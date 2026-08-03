@@ -1,0 +1,12 @@
+# Toolchain, pinned so a checkout matches CI.
+#
+#   mise install && pnpm install
+#
+# Node 22: current LTS, and what the other repos here are pinned to.
+#
+# pnpm rather than yarn: `infra` already uses it, and its strict node_modules layout refuses
+# phantom dependencies — a package can only import what it declares. In a repo whose premise is
+# a dependency set small enough to read, that property is the point, not a preference.
+[tools]
+node = "22"
+pnpm = "9"
