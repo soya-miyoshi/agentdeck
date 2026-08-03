@@ -33,7 +33,7 @@ export interface TmuxSession {
 // A field separator that cannot appear in the values being formatted. tmux format strings are
 // substituted before we see them, so a separator a session name could contain would let a
 // crafted name forge extra fields.
-const SEP = "";
+const SEP = "\u001f";
 
 export interface TmuxOptions {
   socket: string;
