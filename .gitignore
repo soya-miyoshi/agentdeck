@@ -4,3 +4,4 @@ dist
 .DS_Store
 # generated on first run, mode 0600 - never commit
 .agentdeck-token
+.pnpm-store
