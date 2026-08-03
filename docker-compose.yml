@@ -102,6 +102,18 @@ services:
       - agentdeck-node-modules:/workspace/agentdeck/node_modules
       - agentdeck-pnpm-store:/workspace/agentdeck/.pnpm-store
 
+      # .git masked for the same reason and by the same mechanism. Nothing under it is tracked,
+      # so the prescribed `git status` / `git diff` review cannot see `.git/config` or
+      # `.git/hooks/` — and `git diff` is itself the trigger, since git runs `[core] pager` and
+      # `!alias` entries. An empty volume here means a container session simply has no git
+      # repository to reach, which is a boundary rather than a rule someone has to remember.
+      #
+      # The cost, stated rather than discovered: an agent working on agentdeck INSIDE the
+      # container cannot run git at all, which contradicts plan 005's "the agent commits, the
+      # human pushes" for this one repository. Accepted because agentdeck is the one entry on the
+      # mount list whose files the host executes; every other repo mounted here keeps its .git.
+      - agentdeck-git-masked:/workspace/agentdeck/.git
+
       # The server's state directory, deliberately outside every bind mount.
       - agentdeck-state:/var/lib/agentdeck
       # - ${HOME}/ghq/github.com/soya-miyoshi/mulmoterminal:/workspace/mulmoterminal
@@ -143,3 +155,5 @@ volumes:
   agentdeck-node-modules:
   agentdeck-pnpm-store:
   agentdeck-state:
+  # Deliberately always empty. Its job is to shadow the host's .git, not to hold anything.
+  agentdeck-git-masked:

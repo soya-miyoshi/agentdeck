@@ -135,16 +135,30 @@ void describe("the host-executed trees git cannot see are off the bind mount", (
 });
 
 // `.git` is inside the bind mount and none of it is tracked, so the `git status` / `git diff`
-// review is as blind to `.git/config` and `.git/hooks/` as it is to node_modules — but unlike
-// node_modules they cannot be masked by a container-local volume, because the container needs
-// the repository's git metadata. What is left is naming the two commands that can see them, and
-// making the host git this repo prescribes unable to run either surface.
+// review is as blind to `.git/config` and `.git/hooks/` as it is to node_modules. An earlier
+// version of this comment said it could not be masked because the container needs the
+// repository's git metadata; that was wrong about the requirement. This pipeline's agents run
+// git on the HOST, so an empty volume over .git costs the container nothing it actually uses and
+// removes the surface instead of documenting it.
+//
+// Both controls stay, because they cover different sides. The mask stops a container session
+// from writing the surfaces; the host hardening and the two review commands still matter, since
+// host git runs against the real .git that the mask does not touch.
 const docs: readonly (readonly [string, string])[] = [
   ["README.md", "README.md"],
   ["plan 005", "plans/005-containment.md"],
 ];
 
 void describe("git's own execution surfaces are covered where review cannot see them", () => {
+  void test("compose masks .git so a container session cannot reach the surfaces at all", async () => {
+    const compose = await readDoc("docker-compose.yml");
+    assert.match(
+      compose,
+      /\n\s+- agentdeck-git-masked:\/workspace\/agentdeck\/\.git\b/,
+      ".git is still the host's, and nothing under it is tracked, so review cannot cover it",
+    );
+  });
+
   for (const [name, path] of docs) {
     void test(`${name} names the two commands that can see .git`, async () => {
       const doc = await readDoc(path);

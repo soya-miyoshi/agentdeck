@@ -102,6 +102,17 @@ them runs. The better answer for the last of these is the one that moved the
 bearer token out of the mount: keep the iterate skill in the host's `~/.claude/skills` so the
 agent it constrains cannot write it. Until that is done, review is the only control.
 
+**`.git` is masked too, and that is a decision with a cost.** `.git/config` and `.git/hooks/` are
+untracked, so the review is as blind to them as to `node_modules` — and worse, `git diff` is
+itself the trigger, since git runs `[core] pager` and `!alias` entries. An earlier draft said
+`.git` could not be masked because the container needs the repository's git metadata; that was
+wrong about the requirement. The iterate pipeline's agents run git on the *host*, so an empty
+container-local volume over `/workspace/agentdeck/.git` removes the surface at no cost to
+anything that actually uses it. The cost it does have: an agent working on agentdeck **inside**
+the container has no git at all, which contradicts "the agent commits, the human pushes" for this
+one repository. Accepted, because agentdeck is the single entry on the mount list whose files the
+host executes; every other repository mounted here keeps its `.git`.
+
 **That review is blind to `node_modules` and `.pnpm-store`**, because both are gitignored: an agent
 that rewrites `node_modules/.bin/eslint` leaves `git status` clean and the next host lint run
 executes it. Habit cannot cover a file review cannot see, so this half is structural instead —
