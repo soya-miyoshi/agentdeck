@@ -73,7 +73,9 @@ session from another; a git remote is what protects the work, and a short mount 
 lever on how much is in reach.
 
 And agentdeck's own repository is on that mount list, which is the one entry whose contents the
-host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts, `eslint.config.mjs`
+host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts, `pnpm-lock.yaml`
+(pnpm 9 runs dependency lifecycle scripts, so a rewritten resolution entry is host execution at
+the next install), `eslint.config.mjs`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the host
 toolchain or `docker compose up --build` runs agent-authored code on the Mac, outside the
 container. The last two are the ones review misses — both are gitignored, so `git status` says
@@ -143,7 +145,8 @@ prepended to `PATH`.
 
 Before any `docker compose up --build`, and before any host toolchain run taken as that exception,
 `git status` and `git diff` must be clean of unreviewed agent edits to `Dockerfile`,
-`docker-compose.yml`, `package.json` and `eslint.config.mjs`. That review is blind to
+`docker-compose.yml`, `package.json`, `pnpm-lock.yaml` and `eslint.config.mjs`. That review is
+blind to
 `node_modules` and `.pnpm-store`, which are gitignored — which is why the host's copies of both
 are kept off the container's mount by container-local volumes rather than reviewed. A line added to the mount list —
 `/var/run/docker.sock`, or `${HOME}` — turns the next routine rebuild into root on the host.

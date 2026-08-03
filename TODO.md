@@ -15,7 +15,7 @@ Mark an item `[x]` when its branch is merged.
       script. *Done: image builds, `docker inspect` reports healthy, PID 1 is the init and not
       node, mounted repo round-trips file ownership.*
 
-- [ ] **`m0/toolchain`** — `package.json`, TypeScript config, lint, formatter, test runner.
+- [x] **`m0/toolchain`** — `package.json`, TypeScript config, lint, formatter, test runner.
       Nothing else; no source files beyond a placeholder.
       **Done when:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test` all pass on an
       empty suite, inside the container.

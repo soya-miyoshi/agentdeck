@@ -43,7 +43,11 @@ repository currently mounted.
 **And one entry on that mount list is agentdeck itself**, which is the repository whose files the
 *host* runs. `eslint.config.mjs` is loaded and evaluated as JavaScript by `eslint .`; the
 `package.json` scripts are strings handed to a shell; `Dockerfile` and `docker-compose.yml` are
-executed by `docker compose up --build`. So is everything under `node_modules` — `pnpm lint` runs
+executed by `docker compose up --build`. **So is `pnpm-lock.yaml`**, which is the least obvious of
+them: pnpm 9 does not gate dependency lifecycle scripts the way pnpm 10 does, so a rewritten
+`resolution: {tarball: ...}` entry or an added devDependency with a postinstall is host execution
+at the next install — and a thousand-line lockfile diff is exactly the diff nobody reads. That is
+why the documented install runs in the container (`mise.toml`) rather than on the Mac. So is everything under `node_modules` — `pnpm lint` runs
 `node_modules/.bin/eslint`, a shell shim — and the `.pnpm-store` it is installed from. All of them
 are writable by any session in the container, so
 running the host toolchain, or rebuilding after an unreviewed agent edit, executes agent-authored

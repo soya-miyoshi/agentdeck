@@ -16,7 +16,17 @@ const repoRoot = new URL("..", import.meta.url);
 const readDoc = async (name: string): Promise<string> =>
   await readFile(new URL(name, repoRoot), "utf8");
 
-const hostExecutedFiles = ["Dockerfile", "docker-compose.yml", "package.json", "eslint.config.mjs"];
+// pnpm-lock.yaml belongs here for the same reason as package.json and is easier to miss:
+// pnpm 9 does not gate dependency lifecycle scripts, so a rewritten `resolution` entry runs
+// on the host at the next install. The container-local node_modules volume protects the
+// installed tree, not the input that produces it.
+const hostExecutedFiles = [
+  "Dockerfile",
+  "docker-compose.yml",
+  "package.json",
+  "pnpm-lock.yaml",
+  "eslint.config.mjs",
+];
 
 void describe("the self-mount consequence is documented where the containment claim is made", () => {
   void test("compose still mounts agentdeck into its own container", async () => {

@@ -1,0 +1,75 @@
+# Audit
+
+One section per iteration, appended by the `iterate` skill's final whole-codebase pass.
+
+That pass runs **after** the last fix round, so its findings have had no chance to be fixed
+inside the iteration. This file is therefore a ledger of what is open or deliberately accepted,
+not a record of what was resolved. Findings closed during the iteration are noted with the commit
+that closed them; anything else is still live.
+
+---
+
+## m0/toolchain - 2026-08-04
+
+TypeScript, eslint, prettier and `node:test` on Node 22's type stripping, plus the suite that
+proves the toolchain runs. No runtime dependencies added - the six-dependency budget is untouched,
+and the test runner is the one Node ships rather than a seventh entry.
+
+### Findings
+
+- [medium] `docker-compose.yml` - **agentdeck is bind-mounted into its own container, so the files
+  the host executes are agent-writable.** Failure: an agent rewrites `eslint.config.mjs`,
+  a `package.json` script or the `Dockerfile`; the next host-side `pnpm lint` or
+  `docker compose up --build` runs agent-authored code on the Mac with the human's identity -
+  the identity plan 005's credential split exists to keep away from the agent.
+  Status: documented and controlled by review discipline in `f685b44`; structurally reduced in
+  `0e9d8a7`. Residual: review discipline is the control for the four tracked files, which is
+  weaker than a boundary. Accepted, recorded in plan 005.
+
+- [high] `node_modules/` **and** `.pnpm-store` **are gitignored, so the `git status` control above
+  cannot see them.** Failure: an agent rewrites `node_modules/.bin/eslint` - a `/bin/sh` shim -
+  and `git status` reports clean. The human takes the sanctioned host exception and executes it.
+  Verified reachable: uid 1000 in the container can write both paths.
+  Status: fixed in `0e9d8a7`. Both are now container-local volumes layered over the bind mount,
+  so the tree the container executes is not the host's. Habit cannot cover a file review cannot
+  see, so this half is structural rather than documented.
+
+- [high] **The user's bearer token was to be written at the repository root, inside a bind mount
+  every session can read.** Failure: an agent working in agentdeck meets it in an ordinary
+  `ls -la` and it lands in a transcript on its way to a model API. In hostile hands it is
+  `POST /api/sessions` in any mounted repo, `DELETE` on live sessions, and a WebSocket attach that
+  reads and types into every other agent's terminal. Plan 002 draws exactly this line: a session
+  secret can lie about one session, the user's token can start processes.
+  Status: fixed in `0e9d8a7`. Moved to `AGENTDECK_TOKEN_FILE=/var/lib/agentdeck/token` on a
+  container-local volume, outside every bind mount. Residual: same uid means this hides the token
+  rather than isolating it. The only thing that isolates it is a distinct uid for agent sessions,
+  which plan 005 now names and which is **not taken**.
+
+- [medium] **The documented safe in-container toolchain path did not run.** Failure: `pnpm` was
+  absent from the image, so `docker compose exec -T app pnpm lint` failed outright and every lint
+  and test run fell back to the host exception - the one path the containment argument exists to
+  avoid. The test passed because it grepped the README prose instead of running the command.
+  Status: fixed in `0e9d8a7`. `corepack prepare pnpm@9.15.9` is in the image and the documented
+  command carries `-w /workspace/agentdeck`. Verified by hand: `pnpm --version` returns 9.15.9 in
+  the container and typecheck, lint and test all pass there.
+
+- [high] **`pnpm-lock.yaml` is agent-writable and was installed on the host by the only documented
+  install command.** Found by the final whole-codebase pass, and only visible there: it exists
+  because this branch's new lockfile met `mise.toml`, which was already on `main`. Failure: an
+  agent edits a `resolution: {tarball: ...}` entry or adds a devDependency with a postinstall;
+  the human runs the documented `mise install && pnpm install` on the Mac; pnpm 9.15.9 - unlike
+  pnpm 10 - does not gate dependency lifecycle scripts, so it executes with the human's full
+  identity including `~/.ssh`. A thousand-line lockfile diff is exactly the diff nobody reads.
+  The container-local `node_modules` volume protects the installed tree, not the input.
+  Status: fixed on this branch. `mise.toml` now documents the in-container install;
+  `pnpm-lock.yaml` is on the review list in the README, plan 005 and
+  `src/containment.test.ts`'s `hostExecutedFiles`.
+
+### Open after this iteration
+
+Nothing blocking. One standing residual, carried forward rather than closed:
+
+- **Same-uid.** The server and every agent session run as uid 1000, so file mode buys nothing
+  between them. The token move hides it from a working-tree read; it does not isolate it. A
+  distinct uid for agent sessions is recorded in plan 005 as the only real fix and has not been
+  taken. Revisit when M1 writes the token for real.
