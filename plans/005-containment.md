@@ -28,6 +28,24 @@ boundary is around the *machine*, not around the work and not around a session. 
 worrying happens it is just within the container" is true for the Mac and false for every
 repository currently mounted.
 
+**And one entry on that mount list is agentdeck itself**, which is the repository whose files the
+*host* runs. `eslint.config.mjs` is loaded and evaluated as JavaScript by `eslint .`; the
+`package.json` scripts are strings handed to a shell; `Dockerfile` and `docker-compose.yml` are
+executed by `docker compose up --build`. All four are writable by any session in the container, so
+running the host toolchain, or rebuilding after an unreviewed agent edit, executes agent-authored
+code on the Mac with the human's full identity — the identity the credential split below exists to
+keep away from the agent. A mount line added to compose (`/var/run/docker.sock`, or `${HOME}`) is
+the cheapest version of it: the next routine `docker compose up -d --build` is then root on the
+host, which makes "never mount the Docker socket" a rule living in a file the agent it constrains
+can edit.
+
+That path is closed by habit rather than by the boundary: develop and test inside the container,
+never with the host toolchain (the README's Toolchain section states this as the workflow), and
+require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
+`docker-compose.yml`, `package.json` and `eslint.config.mjs` before any `--build`. A stronger
+boundary is a separate decision and would be recorded here: a distinct uid for agent sessions, or
+not mounting agentdeck into itself.
+
 Two things reduce the residual risk, and both are cheap:
 
 - **Keep the mount list short.** One entry per repository actually worked in, never a parent

@@ -72,6 +72,11 @@ pointed, not a wall it is held inside. The container protects the machine, not t
 session from another; a git remote is what protects the work, and a short mount list is the only
 lever on how much is in reach.
 
+And agentdeck's own repository is on that mount list, which is the one entry whose contents the
+host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts and
+`eslint.config.mjs` are all agent-writable, so running the host toolchain or
+`docker compose up --build` runs agent-authored code on the Mac, outside the container.
+
 Two consequences worth knowing before relying on it: `docker compose down` kills every running
 session, and adding a newly cloned repo means editing the mount list, which costs the same restart.
 Both, along with why git push credentials stay outside the container, are in
@@ -113,3 +118,14 @@ Target: **six runtime dependencies or fewer.** Currently planned — `node-pty`,
 `@xterm/xterm`, `@xterm/addon-fit`, a QR encoder for getting the token onto the phone, and Vite as
 a dev dependency. That is the budget spent; any addition needs a line in a plan saying why, and
 [`plans/003-milestones.md`](plans/003-milestones.md) has the line for the sixth.
+
+**Run it in the container, never on the host.** `docker compose exec -T app pnpm lint`,
+`... pnpm test`, `... pnpm typecheck`, with the repo at `/workspace/agentdeck`. `pnpm lint` or
+`pnpm test` on the Mac is an explicit exception, not the default, because both execute files this
+repository's own mount makes agent-writable — `eslint.config.mjs` is evaluated as JavaScript and
+the `package.json` scripts are handed to a shell.
+
+Before any `docker compose up --build`, and before any host toolchain run taken as that exception,
+`git status` and `git diff` must be clean of unreviewed agent edits to `Dockerfile`,
+`docker-compose.yml`, `package.json` and `eslint.config.mjs`. A line added to the mount list —
+`/var/run/docker.sock`, or `${HOME}` — turns the next routine rebuild into root on the host.
