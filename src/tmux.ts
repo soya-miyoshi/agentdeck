@@ -184,8 +184,20 @@ const messageOf = (error: unknown): string => {
   return parts.join(" ");
 };
 
+// Three different sentences, all meaning "there is nothing here to list", and tmux picks between
+// them by version and platform:
+//
+//   no server running on <socket>          the documented one
+//   no sessions                            server up, holding none - the normal state at boot
+//   error connecting to <socket> (No ...)   what tmux 3.7b on macOS actually says when the
+//                                          socket file is absent
+//
+// The third was missed until the server was run for real, where it crashed startup instead of
+// reporting an empty list. Worth stating plainly: the plans cite behaviour "verified on 3.7b"
+// while the container ships 3.3a, so this set is observed rather than assumed, and a fourth
+// wording is likelier than not.
 export const isEmptyTmux = (error: unknown): boolean =>
-  /no server running|no sessions/i.test(messageOf(error));
+  /no server running|no sessions|error connecting to/i.test(messageOf(error));
 
 export const isMissingSession = (error: unknown): boolean =>
   /can't find session|session not found/i.test(messageOf(error));

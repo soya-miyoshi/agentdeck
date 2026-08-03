@@ -64,6 +64,16 @@ void describe("listing sessions", () => {
     assert.deepEqual(await tmux.list(), []);
   });
 
+  void test("and so is the wording tmux 3.7b on macOS actually uses", async () => {
+    // Observed, not guessed: running the server for real crashed startup here, because this is
+    // what tmux says when the socket file does not exist and neither documented phrase appears.
+    const error = Object.assign(new Error("Command failed"), {
+      stderr: "error connecting to /private/tmp/tmux-501/agentdeck (No such file or directory)\n",
+    });
+    const { tmux } = fake({ "list-sessions": error });
+    assert.deepEqual(await tmux.list(), []);
+  });
+
   void test("any other failure propagates", async () => {
     const error = Object.assign(new Error("exited"), { stderr: "permission denied" });
     const { tmux } = fake({ "list-sessions": error });
