@@ -23,10 +23,58 @@ else in that filesystem: sibling agents' processes, `/proc/<pid>/environ` and th
 secrets and API keys (plan 002 says the same thing from the protocol's side), and the agent-state
 volume with every session's transcripts in it.
 
+**And the user's bearer token, unless it is deliberately placed.** The server runs as the same uid
+as every session, so file mode buys nothing between them; what is left is not putting it where an
+agent meets it by accident. At the root of agentdeck's own working tree it is in reach of an
+ordinary `ls -la` or `grep -rn token .`, and that ends with the token in a transcript on its way to
+a model API — and in the wrong hands it is POST /api/sessions in any mounted repo, DELETE on live
+sessions, and a WebSocket attach that reads and types into every other agent's terminal. Plan 002
+draws exactly this line: a session secret can lie about one session, the user's token can start
+processes. **Decision: it lives at `AGENTDECK_TOKEN_FILE` (`/var/lib/agentdeck/token`) on a
+container-local volume, outside every bind mount, and never at the root of a mounted repository.**
+That hides it; it does not isolate it, because same-uid remains same-uid. The only thing that
+isolates it is the distinct uid for agent sessions named below, which is still not taken.
+
 So the honest claim is: **the blast radius is the union of the mount list**, and the container
 boundary is around the *machine*, not around the work and not around a session. "If something
 worrying happens it is just within the container" is true for the Mac and false for every
 repository currently mounted.
+
+**And one entry on that mount list is agentdeck itself**, which is the repository whose files the
+*host* runs. `eslint.config.mjs` is loaded and evaluated as JavaScript by `eslint .`; the
+`package.json` scripts are strings handed to a shell; `Dockerfile` and `docker-compose.yml` are
+executed by `docker compose up --build`. **So is `pnpm-lock.yaml`**, which is the least obvious of
+them: pnpm 9 does not gate dependency lifecycle scripts the way pnpm 10 does, so a rewritten
+`resolution: {tarball: ...}` entry or an added devDependency with a postinstall is host execution
+at the next install — and a thousand-line lockfile diff is exactly the diff nobody reads. That is
+why the documented install runs in the container (`mise.toml`) rather than on the Mac. So is everything under `node_modules` — `pnpm lint` runs
+`node_modules/.bin/eslint`, a shell shim — and the `.pnpm-store` it is installed from. All of them
+are writable by any session in the container, so
+running the host toolchain, or rebuilding after an unreviewed agent edit, executes agent-authored
+code on the Mac with the human's full identity — the identity the credential split below exists to
+keep away from the agent. A mount line added to compose (`/var/run/docker.sock`, or `${HOME}`) is
+the cheapest version of it: the next routine `docker compose up -d --build` is then root on the
+host, which makes "never mount the Docker socket" a rule living in a file the agent it constrains
+can edit.
+
+That path is closed by habit rather than by the boundary: develop and test inside the container,
+never with the host toolchain (the README's Toolchain section states this as the workflow), and
+require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
+`docker-compose.yml`, `package.json` and `eslint.config.mjs` before any `--build`.
+
+**That review is blind to `node_modules` and `.pnpm-store`**, because both are gitignored: an agent
+that rewrites `node_modules/.bin/eslint` leaves `git status` clean and the next host lint run
+executes it. Habit cannot cover a file review cannot see, so this half is structural instead —
+**`/workspace/agentdeck/node_modules` and `/workspace/agentdeck/.pnpm-store` are container-local
+volumes layered over the bind mount**, so the tree the container executes is not the host's and an
+agent editing it cannot reach the host toolchain at all. The Performance section below wants the
+same thing for an unrelated reason, which is why it is cheap. For the same reason **the container
+needs pnpm in the image** (`corepack prepare pnpm@9.15.9 --activate`): a documented in-container
+command that does not run makes the host exception the only path there is.
+
+A stronger
+boundary is a separate decision and would be recorded here: a distinct uid for agent sessions, or
+not mounting agentdeck into itself.
 
 Two things reduce the residual risk, and both are cheap:
 

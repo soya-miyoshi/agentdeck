@@ -2,5 +2,7 @@ node_modules
 dist
 *.log
 .DS_Store
-# generated on first run, mode 0600 - never commit
-.agentdeck-token
+.pnpm-store
+# The bearer token is NOT here and must never be: it lives at AGENTDECK_TOKEN_FILE
+# (/var/lib/agentdeck/token), on a container-local volume outside every bind mount, because
+# this directory is mounted into the container every agent session runs in. See plan 005.

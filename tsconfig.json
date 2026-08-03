@@ -1,0 +1,27 @@
+{
+  // TypeScript type-checks; it never emits. Node 22 strips the types and runs the .ts file
+  // directly, which is why `erasableSyntaxOnly` is on: it rejects the constructs Node cannot
+  // strip (enums, parameter properties, namespaces) at typecheck time rather than at runtime.
+  // It is also why relative imports are written with a .ts extension.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}

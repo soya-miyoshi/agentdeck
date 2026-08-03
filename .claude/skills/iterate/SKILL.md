@@ -41,8 +41,16 @@ export const meta = {
   ],
 }
 
-const ITEM = args.item
-const DONE_WHEN = args.doneWhen
+// args arrives as an object or as a JSON string depending on how it was passed. Accept
+// both: getting this wrong makes ITEM literally "undefined", and the coder then stops with
+// no scope to work against - the right refusal, but a wasted round trip every iteration.
+const A = typeof args === 'string' ? JSON.parse(args) : (args ?? {})
+const ITEM = A.item
+const DONE_WHEN = A.doneWhen
+
+if (!ITEM || !DONE_WHEN) {
+  return { stopped: 'preflight', blockers: ['item and doneWhen must both be provided'] }
+}
 const PLANS = `
 The plans in plans/ are the contract, not background reading. If the implementation needs a
 shape they do not describe, STOP and say so - the rule is that a needed change edits the plan
@@ -194,6 +202,29 @@ do not silently skip it - leave the code alone and say which one and why. Run th
 // 5. Whole-codebase pass ----------------------------------------------------
 // Not a re-review of the diff. The question here is what this change makes possible in
 // combination with code it never touched.
+// A fix round with no review after it proves nothing. Without this, `open` still holds the
+// last round's findings when the loop exits, `clean` is false for any iteration that ever
+// found anything, and the merge decision falls back to a human re-checking by hand - which
+// is the work this gate exists to do.
+if (open.length > 0) {
+  const recheck = await agent(
+    `Verify these findings are actually closed on this branch. Nothing else.
+
+${JSON.stringify(open, null, 2)}
+
+For each, read the current code and decide: closed, or still open. A finding the fixer said it
+skipped as an accepted risk counts as CLOSED only if the plans genuinely argue for it - check,
+do not take the claim. Return only the ones still open.`,
+    { label: 'security:verify', effort: 'high', schema: FINDINGS },
+  )
+  open = (recheck?.findings ?? []).filter((f) => f.severity !== 'low')
+  log(`verify: ${open.length} still open`)
+}
+
+// The audit runs last and has no fix round after it, so anything it finds is deferred work by
+// construction. That is deliberate - its question is broader than one branch - but it means
+// audit findings must never be read as "closed", and audit.md is a ledger of open items rather
+// than a record of resolved ones.
 phase('Audit')
 const audit = await agent(
   `Final security pass. Do NOT re-review the diff in isolation - the previous rounds did that.
@@ -224,7 +255,11 @@ return {
    subagent reporting `ok: true` is a claim, not evidence.
 3. **Demonstrate the "done when".** Actually run it. If the item says a session survives a server
    restart, restart the server and list the session. Report what you saw, including the output.
-4. **Append to `audit.md`** - create it if absent. One section per iteration:
+4. **Decide the audit findings.** They have had no fix round - the audit runs last, so its
+   findings are open by construction. For each: fix it on this branch if it is small and in
+   scope, or record it in `audit.md` as deferred with the reason. A `high` is not deferred
+   silently; either fix it or say plainly that you are merging with it open and why.
+5. **Append to `audit.md`** - create it if absent. One section per iteration:
    ```
    ## <branch> - <date>
    <one line on what changed>
@@ -233,10 +268,10 @@ return {
    ```
    An empty findings list is written as "None." rather than omitted; a missing section and a
    clean one must not look the same later.
-5. **Tick the item** in `TODO.md`.
-6. **Merge**, only if the gate came back clean and your own verification passed:
+6. **Tick the item** in `TODO.md`.
+7. **Merge**, only if the gate came back clean and your own verification passed:
    `git switch main && git merge --no-ff <branch>`. Keep the branch.
-7. **Do not push.** Plan 005's credential split is that the agent commits and the human pushes,
+8. **Do not push.** Plan 005's credential split is that the agent commits and the human pushes,
    and that applies to this pipeline too.
 
 ## Stop rather than proceed
