@@ -20,7 +20,7 @@ Mark an item `[x]` when its branch is merged.
       **Done when:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test` all pass on an
       empty suite, inside the container.
 
-- [ ] **`m0/ci`** — GitHub Actions running typecheck, lint and test on the runner directly.
+- [x] **`m0/ci`** — GitHub Actions running typecheck, lint and test on the runner directly.
       Does **not** build the arm64 image — nothing in CI would run it.
       **Done when:** a PR shows a green check, and a deliberately broken type fails it.
 

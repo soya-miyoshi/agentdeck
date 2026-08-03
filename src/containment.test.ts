@@ -164,6 +164,15 @@ void describe("git's own execution surfaces are covered where review cannot see 
     const hardened = /git -c core\.pager=cat -c\s+core\.hooksPath=\/dev\/null/g;
     const uses = skill.match(hardened) ?? [];
     assert.ok(uses.length >= 4, `only ${uses.length} host git commands are hardened`);
+
+    // A count is a floor, not coverage: every stage prompt ends with "Commit.", and those
+    // commits are host git run by a subagent, which no per-command flag in this file reaches.
+    // The shared prompt is the only layer that does, so assert the instruction is in it.
+    assert.match(
+      skill,
+      /Every git command you run is HOST git/,
+      "the shared agent prompt must tell every stage to harden its own git commands",
+    );
     for (const bare of [
       /(?<!-c )\bgit switch -c /,
       /(?<!-c )\bgit merge --no-ff /,

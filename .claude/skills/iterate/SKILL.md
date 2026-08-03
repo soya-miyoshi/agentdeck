@@ -67,6 +67,12 @@ runtime dependency is a stop-and-ask rather than a judgement call; the status mo
 protocol get tests from the day they are written; nothing is vendored from an upstream we do not
 maintain. Everything is developed and tested INSIDE the container - use
 \`docker compose exec -T app ...\`, never the host toolchain.
+
+Every git command you run is HOST git in a repository whose .git directory is agent-writable
+through the bind mount, so run all of them - commit included - as
+\`git -c core.pager=cat -c core.hooksPath=/dev/null ...\`. .git/config and .git/hooks/ are
+untracked, so \`git status\` and \`git diff\` cannot see an added pre-commit hook or a
+\`[core] pager\` entry; the flags are what stops your own commit from firing it.
 `
 
 const VERDICT = {

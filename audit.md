@@ -73,3 +73,63 @@ Nothing blocking. One standing residual, carried forward rather than closed:
   between them. The token move hides it from a working-tree read; it does not isolate it. A
   distinct uid for agent sessions is recorded in plan 005 as the only real fix and has not been
   taken. Revisit when M1 writes the token for real.
+
+---
+
+## m0/ci - 2026-08-04
+
+GitHub Actions running typecheck, lint and test on the runner directly, with corepack pinning
+pnpm 9.15.9 to match the container. Does not build the arm64 image - nothing in CI would run it.
+
+Every finding this iteration is the same root cause seen from a new angle: **agentdeck is
+bind-mounted into the container that runs agents**, so anything in the tree that the *host* later
+executes is agent-writable. Iteration 1 found `node_modules` and `pnpm-lock.yaml`. This one found
+five more surfaces.
+
+### Findings
+
+- [high] `.git/config` and `.git/hooks/` **are agent-writable and untracked, so the prescribed
+  `git status` / `git diff` review cannot see them - and `git diff` is itself the trigger.**
+  Failure: an agent writes `[core] pager = sh -c '... | sh'` into `.git/config`; the human runs
+  the mandated pre-build `git diff` and git executes it on the Mac. Or it writes
+  `.git/hooks/pre-commit`, and the next commit this very pipeline makes fires it with `~/.ssh` in
+  reach. Needs no `--build` and no host `pnpm` at all.
+  Status: fixed in `0823b6e`. Both are on the review list in README, plan 005 and
+  `hostExecutedFiles`; the review checklist gained `git config --local --list` and
+  `ls -la .git/hooks`, which are the only two commands that can see them; and host git in the
+  skill runs `-c core.pager=cat -c core.hooksPath=/dev/null`.
+
+- [medium] `.github/workflows/` **was created by this branch and left off the review list, and a
+  workflow declares its own `permissions`.** Failure: an agent adds `permissions: contents: write`
+  plus a `run:` step; the human reviews exactly what the README lists, does not look at it, and
+  pushes. Status: fixed in `0823b6e`, added to all three lists.
+
+- [medium] **Enumerating filenames is the wrong shape where the host tool auto-discovers config.**
+  Prettier imports every entry of its `plugins` array from any `.prettierrc*`; mise reads
+  `.mise.toml`, `mise.local.toml` and `mise-tasks/`. The list named `eslint.config.mjs` and
+  `mise.toml` only. Status: fixed in `0823b6e` - the list now names surfaces (`eslint.config.*`,
+  `.prettierrc*`, `.mise*.toml`, `mise-tasks/`) and states that the enumerated set is a floor,
+  not the whole review.
+
+- [medium] **No `no-new-privileges` or `cap_drop`; the container kept 8 setuid-root binaries.**
+  Status: fixed in `653068f`.
+
+- [high, audit] **The skill claimed "every host git command is hardened" while only four were.**
+  Every stage prompt ends with "Commit.", and those commits are host git run by a subagent, which
+  no per-command flag in the skill reaches. The containment test asserted `uses.length >= 4` - a
+  floor that certifies partial coverage as complete, which is the same failure mode as the
+  four-file list it was written to police.
+  Status: fixed on this branch. The instruction moved into the shared prompt every stage receives,
+  which is the only layer that reaches a subagent's own commits, and the test now asserts that
+  rather than counting call sites.
+
+### Open after this iteration
+
+- **The root cause is untouched.** Two iterations have now spent most of a high-effort security
+  budget rediscovering variants of one decision. Plan 005 names both real fixes - a distinct uid
+  for agent sessions, or not mounting agentdeck into itself - and neither is taken. Every
+  remaining item pays this tax until one of them is.
+- **Same-uid**, carried forward from `m0/toolchain`. Unchanged.
+- **The verify pass echoed its input** instead of re-reading the code: it reported three findings
+  as open that `fix:2` had already closed, confirmed by hand. The prompt needs to require quoting
+  the current line it judged, not just a verdict.
