@@ -133,3 +133,15 @@ five more surfaces.
 - **The verify pass echoed its input** instead of re-reading the code: it reported three findings
   as open that `fix:2` had already closed, confirmed by hand. The prompt needs to require quoting
   the current line it judged, not just a verdict.
+
+### Process failure found while merging m0/ci
+
+A fix agent created its own branch (`security/host-execution-surface-and-caps`) and committed
+every security fix there instead of on `m0/ci`. The iteration then merged `m0/ci`, which held only
+the coder and QA commits, printed MERGED, and passed its suite - because the suite had been run
+before the branch switch. Both security rounds' work was absent from `main` while every signal
+said the iteration had succeeded. Recovered by merging the stray branch; no work was lost.
+
+Two controls added to the skill: the shared prompt now forbids stages from creating or switching
+branches, and the after-workflow steps require checking `git branch --show-current` and the recent
+branch list before merging, and re-running the suite on the branch actually being merged.

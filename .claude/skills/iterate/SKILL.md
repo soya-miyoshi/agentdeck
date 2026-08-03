@@ -68,6 +68,10 @@ protocol get tests from the day they are written; nothing is vendored from an up
 maintain. Everything is developed and tested INSIDE the container - use
 \`docker compose exec -T app ...\`, never the host toolchain.
 
+Commit on the branch you are already on. Do NOT run \`git switch\`, \`git checkout -b\` or
+\`git branch\` - creating your own branch strands your work where the merge cannot see it, and
+the iteration then merges an incomplete branch while reporting success. That has happened.
+
 Every git command you run is HOST git in a repository whose .git directory is agent-writable
 through the bind mount, so run all of them - commit included - as
 \`git -c core.pager=cat -c core.hooksPath=/dev/null ...\`. .git/config and .git/hooks/ are
@@ -264,15 +268,22 @@ return {
 
 1. **Read the returned object before doing anything.** If `stopped` is set, the branch is
    unmerged - report the blockers and stop. Do not merge past a stage that did not pass.
-2. **Verify independently.** Run typecheck, lint and the suite yourself in the container. A
-   subagent reporting `ok: true` is a claim, not evidence.
-3. **Demonstrate the "done when".** Actually run it. If the item says a session survives a server
+2. **Check you are still on the iteration branch, and that no stage created its own.**
+   `git branch --show-current` must be the branch from preflight, and
+   `git branch --sort=-committerdate | head` must show nothing a stage invented. A fix agent has
+   created `security/...` and committed there; the iteration then merged a branch missing every
+   fix, printed success, and passed its tests because they ran before the switch. Merge or
+   cherry-pick any stray branch back before going further.
+3. **Verify independently.** Run typecheck, lint and the suite yourself in the container, on the
+   branch you are about to merge. A subagent reporting `ok: true` is a claim, not evidence, and a
+   suite that passed on a different branch is not evidence either.
+4. **Demonstrate the "done when".** Actually run it. If the item says a session survives a server
    restart, restart the server and list the session. Report what you saw, including the output.
-4. **Decide the audit findings.** They have had no fix round - the audit runs last, so its
+5. **Decide the audit findings.** They have had no fix round - the audit runs last, so its
    findings are open by construction. For each: fix it on this branch if it is small and in
    scope, or record it in `audit.md` as deferred with the reason. A `high` is not deferred
    silently; either fix it or say plainly that you are merging with it open and why.
-5. **Append to `audit.md`** - create it if absent. One section per iteration:
+6. **Append to `audit.md`** - create it if absent. One section per iteration:
    ```
    ## <branch> - <date>
    <one line on what changed>
@@ -281,11 +292,11 @@ return {
    ```
    An empty findings list is written as "None." rather than omitted; a missing section and a
    clean one must not look the same later.
-6. **Tick the item** in `TODO.md`.
-7. **Merge**, only if the gate came back clean and your own verification passed:
+7. **Tick the item** in `TODO.md`.
+8. **Merge**, only if the gate came back clean and your own verification passed:
    `git -c core.pager=cat -c core.hooksPath=/dev/null switch main && git -c core.pager=cat -c
    core.hooksPath=/dev/null merge --no-ff <branch>`. Keep the branch.
-8. **Do not push.** Plan 005's credential split is that the agent commits and the human pushes,
+9. **Do not push.** Plan 005's credential split is that the agent commits and the human pushes,
    and that applies to this pipeline too.
 
 ## Stop rather than proceed
