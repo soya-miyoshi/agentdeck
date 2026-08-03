@@ -239,12 +239,17 @@ void describe("erasableSyntaxOnly rejects what Node cannot strip", () => {
 });
 
 void describe("eslint is wired to the type checker", () => {
-  const printConfig = (file: string): { rules: Record<string, unknown>; globals: unknown } => {
+  interface PrintedConfig {
+    readonly rules: Record<string, unknown>;
+    readonly globals: Record<string, unknown> | undefined;
+  }
+
+  const printConfig = (file: string): PrintedConfig => {
     const result = run(`eslint --print-config ${file}`);
     assert.equal(result.status, 0, result.output);
     const parsed = JSON.parse(result.output) as {
       rules: Record<string, unknown>;
-      languageOptions?: { globals?: unknown };
+      languageOptions?: { globals?: Record<string, unknown> };
     };
     return { rules: parsed.rules, globals: parsed.languageOptions?.globals };
   };
@@ -283,9 +288,8 @@ void describe("eslint is wired to the type checker", () => {
     // project. If it regresses, lint fails on its own config file.
     const { rules, globals } = printConfig("eslint.config.mjs");
     assert.equal(severityOf(rules, "@typescript-eslint/no-floating-promises"), 0);
-    const declared = globals as Record<string, unknown> | undefined;
-    assert.equal(declared?.["process"], "readonly");
-    assert.equal(declared?.["console"], "readonly");
+    assert.equal(globals?.["process"], "readonly");
+    assert.equal(globals?.["console"], "readonly");
   });
 });
 
