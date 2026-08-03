@@ -41,7 +41,10 @@ worrying happens it is just within the container" is true for the Mac and false 
 repository currently mounted.
 
 **And one entry on that mount list is agentdeck itself**, which is the repository whose files the
-*host* runs. `eslint.config.mjs` is loaded and evaluated as JavaScript by `eslint .`; the
+*host* runs. `eslint.config.*` is loaded and evaluated as JavaScript by `eslint .`, and
+`.prettierrc*` is the same hole one tool over — prettier 3 imports every entry of its `plugins`
+array as JavaScript relative to the config file, so `"plugins": ["./scripts/fmt.mjs"]` is host
+execution at the next `pnpm lint`; the
 `package.json` scripts are strings handed to a shell; `Dockerfile` and `docker-compose.yml` are
 executed by `docker compose up --build`. **So is `pnpm-lock.yaml`**, which is the least obvious of
 them: pnpm 9 does not gate dependency lifecycle scripts the way pnpm 10 does, so a rewritten
@@ -57,17 +60,59 @@ the cheapest version of it: the next routine `docker compose up -d --build` is t
 host, which makes "never mount the Docker socket" a rule living in a file the agent it constrains
 can edit.
 
+**Several more host-execution surfaces are in the same mount and are easier to miss, because none
+of them looks like a build file.** `src/**/*.test.ts` is what `pnpm test` hands to `node --test`,
+which executes it as code — the suite already shells out (`execFileSync("/bin/sh", ...)`) and
+already prepends `node_modules/.bin` to `PATH`, so one more shell-out added to an existing helper
+is unremarkable in a diff nobody expects to contain an attack. `.mise*.toml` documents `mise install`
+and mise executes `[env] _.source` and `[tasks]` entries on the host — note the glob, because mise
+auto-discovers `mise.toml`, `.mise.toml`, `mise.local.toml`, `.config/mise/config.toml` and file
+tasks under `mise-tasks/` or `.mise/tasks/`, so enumerating the one filename we happen to have
+leaves the others unreviewed. `.github/workflows/` is executed by a GitHub runner rather than by
+the Mac, and it is the one surface that **chooses its own privileges**: `permissions:` is declared
+inside the very file being protected, so an agent that adds `contents: write` and a `run:` step has
+a code-execution primitive on the runner, gated only by the `git push` this plan reserves for the
+human — which makes reviewing the workflow the only thing bounding the token, and makes the
+repository-level default workflow permission (set to read-only in GitHub settings) the only control
+a file edit cannot widen. `.git/config` and `.git/hooks/` are executed by `git` itself: `[core]
+pager`, an `[alias]` beginning `!`, or a `[diff] textconv` entry runs on the host the moment the
+human types the prescribed `git diff`, which makes the review command its own trigger, and a
+`post-checkout`, `pre-commit`, `post-merge` or `pre-push` hook fires on the branch, commit and
+merge steps the iterate skill prescribes, with `~/.ssh` and the human's GitHub identity in reach —
+exactly what the credential split below exists to keep away from the agent. And `.claude/` is not agent
+data at all: it is instruction and configuration a Claude Code process running *on the Mac* loads
+— `.claude/skills/*/SKILL.md`, `CLAUDE.md`, `.claude/settings.json` and its hooks. That last one
+has the weakest trigger of anything on this list: it needs no `--build` and no host `pnpm` run,
+only a human starting an agent session in this repo on the Mac. It is also the file that
+prescribes this very review, so an agent that edits it can edit the gate that would catch it.
+
 That path is closed by habit rather than by the boundary: develop and test inside the container,
 never with the host toolchain (the README's Toolchain section states this as the workflow), and
 require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
-`docker-compose.yml`, `package.json` and `eslint.config.mjs` before any `--build`.
+`docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
+`.mise*.toml`, `mise-tasks/`,
+`src/**/*.test.ts`, `.claude/` and `.github/workflows/` before any `--build`, and before any host
+toolchain run or agent
+session taken as the exception. **That enumeration is a floor rather than the job**: every one of
+these tools discovers its own config, so the exception requires reading every added or modified
+file in the diff, and the list only says which ones may not be skimmed. Run the review itself as
+`git -c core.pager=cat -c core.hooksPath=/dev/null …`, and the same for the `switch` and `merge`
+steps, so git's own agent-writable execution surfaces are inert while the review that would catch
+them runs. The better answer for the last of these is the one that moved the
+bearer token out of the mount: keep the iterate skill in the host's `~/.claude/skills` so the
+agent it constrains cannot write it. Until that is done, review is the only control.
 
 **That review is blind to `node_modules` and `.pnpm-store`**, because both are gitignored: an agent
 that rewrites `node_modules/.bin/eslint` leaves `git status` clean and the next host lint run
 executes it. Habit cannot cover a file review cannot see, so this half is structural instead —
 **`/workspace/agentdeck/node_modules` and `/workspace/agentdeck/.pnpm-store` are container-local
 volumes layered over the bind mount**, so the tree the container executes is not the host's and an
-agent editing it cannot reach the host toolchain at all. The Performance section below wants the
+agent editing it cannot reach the host toolchain at all. **It is blind to `.git/config` and
+`.git/hooks/` for the same reason** — neither is tracked, so `git status` and `git diff` report
+clean after an agent writes a pager alias or a `pre-push` hook — and those cannot be volumed away,
+because the container needs the repository's git metadata. Two commands see them and belong in the
+same checklist: `git config --local --list`, and `ls -la .git/hooks` (a live hook is anything
+without a `.sample` suffix). The Performance section below wants the
 same thing for an unrelated reason, which is why it is cheap. For the same reason **the container
 needs pnpm in the image** (`corepack prepare pnpm@9.15.9 --activate`): a documented in-container
 command that does not run makes the host exception the only path there is.
@@ -195,6 +240,15 @@ exposure is decided, exactly as plan 001 intended.
   `touch` in a mounted repo rather than inheriting the folklore — but keep the non-root part, which
   is not folklore.
 - **CPU and memory limits.** A runaway agent should degrade the container, not the laptop.
+- **`no-new-privileges` and `cap_drop: [ALL]`.** Non-root above is worth exactly as much as the
+  distance between the agent's uid and root, and the default is short: the base image ships
+  setuid-root `su`, `mount`, `umount`, `chsh`, `chfn`, `gpasswd`, `newgrp` and `passwd`, and
+  compose's default capability set keeps `CAP_DAC_OVERRIDE`, `CAP_SETUID`, `CAP_CHOWN`,
+  `CAP_FOWNER` and `CAP_MKNOD`. An agent that reaches uid 0 that way reads and rewrites every
+  bind-mounted repository regardless of file mode and writes root-owned files back through
+  VirtioFS into the human's checkouts. It also pre-defeats the distinct uid for agent sessions
+  named above, since a setuid path to root makes any uid split decorative. Nothing in this image
+  needs a capability — tmux, node, git and curl all run unprivileged as `node` — so both are free.
 - **The container's tmux is not the host's, and the plans cite the host's.** Debian bookworm
   ships **3.3a**; the host runs 3.7b, which is the version plans 001 and 002 name when they say
   "verified". The behaviours those plans depend on all predate 3.3a — `remain-on-exit`,

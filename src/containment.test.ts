@@ -20,12 +20,36 @@ const readDoc = async (name: string): Promise<string> =>
 // pnpm 9 does not gate dependency lifecycle scripts, so a rewritten `resolution` entry runs
 // on the host at the next install. The container-local node_modules volume protects the
 // installed tree, not the input that produces it.
+//
+// The last three are the ones a build-file-shaped review list misses. `src/**/*.test.ts` is what
+// `pnpm test` hands to `node --test`, which runs it as code — this very file already calls
+// execFileSync, so one more shell-out is unremarkable in a diff. `mise.toml` documents
+// `mise install` and mise executes `[env] _.source` and `[tasks]` on the host. `.claude/` needs no
+// build and no host `pnpm` at all: a Claude Code process on the Mac loads SKILL.md, CLAUDE.md and
+// settings.json from it, so starting a session in this repo is the whole trigger — and the skill
+// there is what prescribes this review.
+//
+// The globs are deliberate. Every host tool here discovers its own config, so naming the one
+// filename we happen to have leaves the rest unreviewed: prettier imports its `plugins` entries
+// as JavaScript from any `.prettierrc*`, and mise reads `.mise.toml`, `mise.local.toml` and
+// `mise-tasks/` as readily as `mise.toml`. `.github/workflows/` is the surface that picks its own
+// privileges — `permissions:` lives inside the file being protected. `.git/config` and
+// `.git/hooks/` are executed by git itself, which makes the prescribed `git diff` its own
+// trigger, and neither is tracked, so the review cannot see them at all.
 const hostExecutedFiles = [
   "Dockerfile",
   "docker-compose.yml",
   "package.json",
   "pnpm-lock.yaml",
-  "eslint.config.mjs",
+  "eslint.config.*",
+  ".prettierrc*",
+  ".mise*.toml",
+  "mise-tasks/",
+  "src/**/*.test.ts",
+  ".claude/",
+  ".github/workflows/",
+  ".git/config",
+  ".git/hooks/",
 ];
 
 void describe("the self-mount consequence is documented where the containment claim is made", () => {
@@ -51,6 +75,19 @@ void describe("the self-mount consequence is documented where the containment cl
     assert.match(toolchain, /docker compose exec -T -w \/workspace\/agentdeck app/);
     assert.match(toolchain, /git status/);
     assert.match(toolchain, /git diff/);
+  });
+
+  void test("the host-run exception names everything the host would execute", async () => {
+    // The exception paragraph is where a human decides to run something on the Mac, so the list
+    // that matters is the one there, not the one anywhere in the file.
+    const readme = await readDoc("README.md");
+    const toolchain = readme.slice(readme.indexOf("## Toolchain"));
+    for (const file of hostExecutedFiles) {
+      assert.ok(
+        toolchain.includes(file),
+        `README's toolchain exception does not name ${file} as agent-writable`,
+      );
+    }
   });
 
   void test("plan 005 states it in what containment actually buys", async () => {
@@ -97,6 +134,75 @@ void describe("the host-executed trees git cannot see are off the bind mount", (
   });
 });
 
+// `.git` is inside the bind mount and none of it is tracked, so the `git status` / `git diff`
+// review is as blind to `.git/config` and `.git/hooks/` as it is to node_modules — but unlike
+// node_modules they cannot be masked by a container-local volume, because the container needs
+// the repository's git metadata. What is left is naming the two commands that can see them, and
+// making the host git this repo prescribes unable to run either surface.
+const docs: readonly (readonly [string, string])[] = [
+  ["README.md", "README.md"],
+  ["plan 005", "plans/005-containment.md"],
+];
+
+void describe("git's own execution surfaces are covered where review cannot see them", () => {
+  for (const [name, path] of docs) {
+    void test(`${name} names the two commands that can see .git`, async () => {
+      const doc = await readDoc(path);
+      assert.ok(
+        doc.includes("git config --local --list"),
+        `${name} omits git config --local --list`,
+      );
+      assert.ok(doc.includes("ls -la .git/hooks"), `${name} omits ls -la .git/hooks`);
+      assert.match(doc, /\.sample/);
+    });
+  }
+
+  void test("the iterate skill runs host git with pager and hooks disabled", async () => {
+    // The skill is what prescribes the review and then does the branch, merge and switch on the
+    // host. Each of those is a hook trigger, and `git diff` is a pager trigger.
+    const skill = await readDoc(".claude/skills/iterate/SKILL.md");
+    const hardened = /git -c core\.pager=cat -c\s+core\.hooksPath=\/dev\/null/g;
+    const uses = skill.match(hardened) ?? [];
+    assert.ok(uses.length >= 4, `only ${uses.length} host git commands are hardened`);
+
+    // A count is a floor, not coverage: every stage prompt ends with "Commit.", and those
+    // commits are host git run by a subagent, which no per-command flag in this file reaches.
+    // The shared prompt is the only layer that does, so assert the instruction is in it.
+    assert.match(
+      skill,
+      /Every git command you run is HOST git/,
+      "the shared agent prompt must tell every stage to harden its own git commands",
+    );
+    for (const bare of [
+      /(?<!-c )\bgit switch -c /,
+      /(?<!-c )\bgit merge --no-ff /,
+      /(?<!-c )\bgit status --porcelain/,
+    ]) {
+      assert.doesNotMatch(skill, bare, `the skill still runs an unhardened ${String(bare)}`);
+    }
+  });
+});
+
+// The enumerated list is a floor: the host tools discover config we did not name, so a review
+// scoped to the list is a review with a hole in it. Both documents have to say so.
+void describe("the review list is stated as a floor rather than the whole job", () => {
+  for (const [name, path] of docs) {
+    void test(`${name} requires reviewing every modified file, not only the listed ones`, async () => {
+      const doc = await readDoc(path);
+      assert.match(doc, /floor/);
+      assert.match(doc, /every added or modified\s+file in the diff/);
+    });
+  }
+
+  void test("plan 005 says a workflow file declares its own permissions", async () => {
+    const plan = await readDoc("plans/005-containment.md");
+    const start = plan.indexOf("## What containment actually buys");
+    const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
+    assert.match(section, /permissions:/);
+    assert.match(section, /default workflow permission/);
+  });
+});
+
 void describe("the user's bearer token is not inside a bind mount", () => {
   void test("it is a container-local path, and .gitignore no longer puts it at the repo root", async () => {
     // The repo root IS the bind mount every session can read, and every session runs as the uid
@@ -118,6 +224,31 @@ void describe("the user's bearer token is not inside a bind mount", () => {
     const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
     assert.match(section, /AGENTDECK_TOKEN_FILE/);
     assert.match(section, /distinct uid/);
+  });
+});
+
+// Non-root is worth the distance between the agent's uid and root, and the image's setuid-root
+// helpers make that distance short. These assert the two lines that close it, plus the plan
+// bullet that says why, because "run as node" reads like the whole control and is not.
+void describe("the container cannot escalate to root", () => {
+  void test("compose sets no-new-privileges", async () => {
+    const compose = await readDoc("docker-compose.yml");
+    assert.match(compose, /\n\s+security_opt:\n\s+- "no-new-privileges:true"/);
+  });
+
+  void test("compose drops all capabilities", async () => {
+    const compose = await readDoc("docker-compose.yml");
+    assert.match(compose, /\n\s+cap_drop:\n\s+- ALL\b/);
+  });
+
+  void test("plan 005's container hygiene says why", async () => {
+    const plan = await readDoc("plans/005-containment.md");
+    const start = plan.indexOf("### Container hygiene");
+    assert.ok(start >= 0, "plan 005 has no `Container hygiene` section");
+    const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
+    assert.match(section, /no-new-privileges/);
+    assert.match(section, /cap_drop/);
+    assert.match(section, /setuid/);
   });
 });
 

@@ -12,16 +12,23 @@ decision for a person, and a branch that does two things cannot be reverted as o
 
 ## Preflight
 
+Every host `git` command in this skill runs as `git -c core.pager=cat -c core.hooksPath=/dev/null
+…`. `.git/config` and `.git/hooks/` are inside the bind mount and are not tracked, so an agent can
+write a pager, an `!alias`, a `textconv` or a `pre-push` hook that `git status` and `git diff`
+cannot see and that the review itself would execute (plan 005). These two flags make git's own
+execution surfaces inert for the duration. Check them directly as part of preflight:
+`git config --local --list` and `ls -la .git/hooks` (a live hook is anything without `.sample`).
+
 Refuse to start, with the specific reason, if any of these fail:
 
-1. `git status --porcelain` is empty. Uncommitted work belongs to whoever left it there.
+1. `git -c core.pager=cat -c core.hooksPath=/dev/null status --porcelain` is empty. Uncommitted work belongs to whoever left it there.
 2. Current branch is `main` and it is the merge target.
 3. An item is selected: the argument if one was given, otherwise the **first unchecked** `[ ]`
    item in `TODO.md`. Read its full text - the `TODO.md` entry names the branch and states the
    **done when**, and that sentence is the acceptance criterion for the whole iteration.
 4. Every milestone above the item's is fully `[x]`. M2 work does not start with M1 half done.
 
-Then: `git switch -c <branch-name-from-the-item>`.
+Then: `git -c core.pager=cat -c core.hooksPath=/dev/null switch -c <branch-name-from-the-item>`.
 
 ## The pipeline
 
@@ -60,6 +67,12 @@ runtime dependency is a stop-and-ask rather than a judgement call; the status mo
 protocol get tests from the day they are written; nothing is vendored from an upstream we do not
 maintain. Everything is developed and tested INSIDE the container - use
 \`docker compose exec -T app ...\`, never the host toolchain.
+
+Every git command you run is HOST git in a repository whose .git directory is agent-writable
+through the bind mount, so run all of them - commit included - as
+\`git -c core.pager=cat -c core.hooksPath=/dev/null ...\`. .git/config and .git/hooks/ are
+untracked, so \`git status\` and \`git diff\` cannot see an added pre-commit hook or a
+\`[core] pager\` entry; the flags are what stops your own commit from firing it.
 `
 
 const VERDICT = {
@@ -270,7 +283,8 @@ return {
    clean one must not look the same later.
 6. **Tick the item** in `TODO.md`.
 7. **Merge**, only if the gate came back clean and your own verification passed:
-   `git switch main && git merge --no-ff <branch>`. Keep the branch.
+   `git -c core.pager=cat -c core.hooksPath=/dev/null switch main && git -c core.pager=cat -c
+   core.hooksPath=/dev/null merge --no-ff <branch>`. Keep the branch.
 8. **Do not push.** Plan 005's credential split is that the agent commits and the human pushes,
    and that applies to this pipeline too.
 
