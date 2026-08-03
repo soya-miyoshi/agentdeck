@@ -40,6 +40,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
+# pnpm, pinned to package.json's packageManager. Without this the documented workflow
+# (`docker compose exec -T -w /workspace/agentdeck app pnpm lint`) does not run at all, and
+# every lint and test run falls back to the host toolchain — which is the one path plan 005
+# calls an explicit exception because it executes agent-writable files on the Mac.
+#
+# COREPACK_HOME is set because the build runs as root: the default cache lands in /root, which
+# the node user cannot read, and corepack then re-downloads pnpm on first use at runtime.
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable \
+    && corepack prepare pnpm@9.15.9 --activate \
+    && chmod -R a+rX /opt/corepack
+
 # tmux defaults that the design depends on, set once here so an interactive session and a
 # server-created session agree. The server still sets remain-on-exit per session at M1;
 # this is the same decision seen from the other side, for sessions a human starts by hand.
@@ -68,6 +80,20 @@ COPY docker/entrypoint.sh /app/entrypoint.sh
 COPY scripts/ /app/scripts/
 RUN chmod +x /app/entrypoint.sh
 
+# Mount points for the container-local volumes declared in compose. They exist in the image,
+# owned by node, so the named volumes inherit that ownership on first creation instead of
+# arriving root-owned.
+#
+#   /workspace/agentdeck/node_modules, /workspace/agentdeck/.pnpm-store — the dependency tree
+#   the container executes is NOT the host's. Both are gitignored, so `git status` cannot see
+#   an agent edit to them; keeping them off the bind mount is what makes that blindness safe.
+#
+#   /var/lib/agentdeck — the server's own state, including the user's bearer token. It is
+#   outside every bind mount so no agent working in a mounted repository meets it by reading
+#   its own working tree. Same-uid caveat in plan 005: this hides it, it does not isolate it.
+RUN mkdir -p /workspace/agentdeck/node_modules /workspace/agentdeck/.pnpm-store /var/lib/agentdeck \
+    && chown -R node:node /workspace /var/lib/agentdeck
+
 # Non-root. Whether the uid must MATCH the host user is Linux-host advice — OrbStack maps
 # ownership across VirtioFS itself, so files may come out correct regardless. Verify with
 # one touch rather than inheriting the folklore (plan 005); the non-root part is not
@@ -79,7 +105,9 @@ USER node
 # host side is a single dedicated directory rather than a scatter of files.
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude \
     TMUX_SOCKET=agentdeck \
-    AGENTDECK_PORT=7777
+    AGENTDECK_PORT=7777 \
+    AGENTDECK_STATE_DIR=/var/lib/agentdeck \
+    AGENTDECK_TOKEN_FILE=/var/lib/agentdeck/token
 
 WORKDIR /workspace
 

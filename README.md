@@ -73,9 +73,17 @@ session from another; a git remote is what protects the work, and a short mount 
 lever on how much is in reach.
 
 And agentdeck's own repository is on that mount list, which is the one entry whose contents the
-host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts and
-`eslint.config.mjs` are all agent-writable, so running the host toolchain or
-`docker compose up --build` runs agent-authored code on the Mac, outside the container.
+host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts, `eslint.config.mjs`
+and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the host
+toolchain or `docker compose up --build` runs agent-authored code on the Mac, outside the
+container. The last two are the ones review misses — both are gitignored, so `git status` says
+clean after an agent rewrites `node_modules/.bin/eslint`. They are therefore container-local
+volumes in compose rather than files on the bind mount, so the tree the container executes is not
+the host's.
+
+The user's bearer token is kept out of the mounts for the same reason: it lives at
+`AGENTDECK_TOKEN_FILE` on a container-local volume, never at the root of a mounted repository
+where an agent's `ls -la` would find it.
 
 Two consequences worth knowing before relying on it: `docker compose down` kills every running
 session, and adding a newly cloned repo means editing the mount list, which costs the same restart.
@@ -119,13 +127,23 @@ Target: **six runtime dependencies or fewer.** Currently planned — `node-pty`,
 a dev dependency. That is the budget spent; any addition needs a line in a plan saying why, and
 [`plans/003-milestones.md`](plans/003-milestones.md) has the line for the sixth.
 
-**Run it in the container, never on the host.** `docker compose exec -T app pnpm lint`,
-`... pnpm test`, `... pnpm typecheck`, with the repo at `/workspace/agentdeck`. `pnpm lint` or
-`pnpm test` on the Mac is an explicit exception, not the default, because both execute files this
-repository's own mount makes agent-writable — `eslint.config.mjs` is evaluated as JavaScript and
-the `package.json` scripts are handed to a shell.
+**Run it in the container, never on the host.** The working directory has to be given, because
+compose's `working_dir` is `/workspace`:
+
+```
+docker compose exec -T -w /workspace/agentdeck app pnpm lint
+docker compose exec -T -w /workspace/agentdeck app pnpm test
+docker compose exec -T -w /workspace/agentdeck app pnpm typecheck
+```
+
+`pnpm lint` or `pnpm test` on the Mac is an explicit exception, not the default, because both
+execute files this repository's own mount makes agent-writable — `eslint.config.mjs` is evaluated
+as JavaScript, the `package.json` scripts are handed to a shell, and `node_modules/.bin` is
+prepended to `PATH`.
 
 Before any `docker compose up --build`, and before any host toolchain run taken as that exception,
 `git status` and `git diff` must be clean of unreviewed agent edits to `Dockerfile`,
-`docker-compose.yml`, `package.json` and `eslint.config.mjs`. A line added to the mount list —
+`docker-compose.yml`, `package.json` and `eslint.config.mjs`. That review is blind to
+`node_modules` and `.pnpm-store`, which are gitignored — which is why the host's copies of both
+are kept off the container's mount by container-local volumes rather than reviewed. A line added to the mount list —
 `/var/run/docker.sock`, or `${HOME}` — turns the next routine rebuild into root on the host.
