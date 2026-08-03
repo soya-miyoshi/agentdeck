@@ -1,0 +1,106 @@
+# agentdeck, containerised (plan 005).
+#
+#   docker compose up -d --build
+#   docker compose exec app tmux -L agentdeck new-session -A -s agentdeck claude
+#
+# `docker compose down` is a DESTRUCTIVE act on running work: it takes the container, and
+# the container takes tmux, and tmux takes every session in it. Same for any change to the
+# mount list below, because bind mounts are fixed at container creation. Both are accepted
+# rather than solved — the alternative is a container per session, which needs the thing
+# that creates sessions to be able to create containers, which means the Docker socket,
+# which plan 005 refuses absolutely.
+
+name: agentdeck
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_VERSION: "2.1.220"
+    image: agentdeck:local
+
+    # tini as PID 1. It reaps the zombies agents spawn plenty of and forwards signals;
+    # the entrypoint script is its child and supervises Node in place. What must NOT
+    # happen is Node ending up at PID 1 — see docker/entrypoint.sh for why that looks
+    # like it works right up until the first real crash.
+    init: true
+
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # 127.0.0.1 only. The container is reachable from host loopback and from nothing
+    # else; `tailscale serve` on the host is then the single place where remote exposure
+    # is decided (plans 001 and 005). Nothing listens on this yet — the server lands at
+    # M1 — and publishing early costs nothing.
+    ports:
+      - "127.0.0.1:7777:7777"
+
+    environment:
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+      TMUX_SOCKET: agentdeck
+      AGENTDECK_PORT: "7777"
+      # Deliberately NOT passing ANTHROPIC_API_KEY through. Authentication already lives
+      # in the mounted config directory as .credentials.json, and an API key set to the
+      # empty string does not mean "unset" — it occupies the slot ahead of the stored
+      # credential and authenticates as nobody. If a key is ever genuinely needed, add it
+      # here as a NAME whose value comes from the host environment, never a literal
+      # (plan 004: profiles list variable names, never values).
+
+    volumes:
+      # Agent state. NOT the host's ~/.claude — that directory holds every project's
+      # transcripts and settings, far more than one containerised agent should see. This
+      # is a dedicated directory whose entire contents are the container's own: the
+      # config, the stored login, and nothing from the host's own sessions.
+      #
+      # It is a bind mount rather than a named volume on purpose. `docker compose down`
+      # and every image rebuild are routine here, and both would otherwise discard the
+      # login. It also stays inspectable from the host, which a named volume is not.
+      - ${HOME}/.claude-docker:/home/node/.claude
+
+      # The mount list. This is one list with three jobs (plan 005): the bind mounts, the
+      # `cwd` allowlist that POST /api/sessions validates against, and what GET /api/cwds
+      # serves to the phone's new-session picker.
+      #
+      # Keep it SHORT — one entry per repository actually worked in, never a parent
+      # directory containing all of them. Every session in this container runs as the
+      # same user and can reach every path below, whatever directory it was pointed at,
+      # so this list is the honest blast radius. Eight entries versus ~/ghq is the
+      # difference between the repos you are working on this month and every repo you
+      # have ever cloned.
+      #
+      # Adding one costs a restart, which costs every running session. Do it at a moment
+      # of your choosing, when nothing is mid-turn.
+      - ${HOME}/ghq/github.com/soya-miyoshi/agentdeck:/workspace/agentdeck
+      # - ${HOME}/ghq/github.com/soya-miyoshi/mulmoterminal:/workspace/mulmoterminal
+      # - ${HOME}/ghq/github.com/your-org/project-a:/workspace/project-a
+      # - ${HOME}/ghq/github.com/your-org/project-b:/workspace/project-b
+
+      # NOT mounted, and each omission is a decision:
+      #   ~/.ssh              — mounting it gives the agent your identity everywhere
+      #                         GitHub accepts that key: every repo, every org,
+      #                         force-push included. That single mount undoes most of
+      #                         what the container is for. The agent commits; the human
+      #                         pushes. If pushing from inside ever becomes genuinely
+      #                         necessary, use a per-repo deploy key, never the personal
+      #                         one.
+      #   /var/run/docker.sock — root on the host in one command. It shows up in
+      #                         convenience examples constantly and it makes the whole
+      #                         container boundary decorative.
+
+    working_dir: /workspace
+
+    healthcheck:
+      test: ["CMD", "node", "/app/scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 4 # ~2 minutes unhealthy before anything acts
+      start_period: 30s
+
+    # A runaway agent should degrade the container, not the laptop. Tune once there is
+    # something to measure.
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
