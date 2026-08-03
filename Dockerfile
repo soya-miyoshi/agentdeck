@@ -47,10 +47,18 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 # remain-on-exit: tmux destroys a session when its command exits by default, which would
 # mean an agent that finished or crashed removed its own tab and its exit code with it —
 # leaving the strip unable to tell "it is done" from "I lost it" (plans 001 and 002).
-# history-limit: tmux is the scrollback store, so the limit is a product decision rather
+#
+# exit-empty: the tmux SERVER exits when it holds no sessions, which is on by default and
+# is the same failure one level up. `tmux start-server` then reports success and the
+# server is gone before the next command runs — verified: the health check went unhealthy
+# with "no server running" while the entrypoint had just logged that it was up. Everything
+# here assumes a long-lived server that sessions come and go inside of, so it has to be off.
+#
+# history-limit: tmux is the scrollback store, so the depth is a product decision rather
 # than a default worth inheriting.
 RUN printf '%s\n' \
         'set -g remain-on-exit on' \
+        'set -g exit-empty off' \
         'set -g history-limit 50000' \
         'set -g mouse on' \
     > /etc/tmux.conf

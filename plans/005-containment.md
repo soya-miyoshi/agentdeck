@@ -147,6 +147,18 @@ exposure is decided, exactly as plan 001 intended.
   `touch` in a mounted repo rather than inheriting the folklore — but keep the non-root part, which
   is not folklore.
 - **CPU and memory limits.** A runaway agent should degrade the container, not the laptop.
+- **The container's tmux is not the host's, and the plans cite the host's.** Debian bookworm
+  ships **3.3a**; the host runs 3.7b, which is the version plans 001 and 002 name when they say
+  "verified". The behaviours those plans depend on all predate 3.3a — `remain-on-exit`,
+  `exit-empty`, `capture-pane -p -e -S`, `refresh-client -R`, `#{pane_dead_status}` — so nothing
+  is known to be wrong. But a claim verified against 3.7b has not been verified against what
+  actually runs, and the two defaults plan 002 pins down (`remain-on-exit off`,
+  `window-size latest`) are exactly the kind of thing that moved between releases before. Re-check
+  them inside the container at M1, or pin a newer tmux in the image and stop having two versions.
+- **`exit-empty off` is required, not a preference.** The tmux server exits when it holds no
+  sessions, so `start-server` at boot succeeds and the server is gone before anything can use it.
+  It presents as a health check reporting "no server running" moments after the entrypoint logged
+  that the server was up.
 - **`node-pty` is the one native dependency, and its install is `node scripts/prebuild.js ||
   node-gyp rebuild`** (verified on 1.1.0). The `||` is the whole point: the day a prebuild is
   missing for the pinned base — a Node minor, an ABI bump, an arm64 gap — the image silently falls
