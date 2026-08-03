@@ -20,12 +20,23 @@ const readDoc = async (name: string): Promise<string> =>
 // pnpm 9 does not gate dependency lifecycle scripts, so a rewritten `resolution` entry runs
 // on the host at the next install. The container-local node_modules volume protects the
 // installed tree, not the input that produces it.
+//
+// The last three are the ones a build-file-shaped review list misses. `src/**/*.test.ts` is what
+// `pnpm test` hands to `node --test`, which runs it as code — this very file already calls
+// execFileSync, so one more shell-out is unremarkable in a diff. `mise.toml` documents
+// `mise install` and mise executes `[env] _.source` and `[tasks]` on the host. `.claude/` needs no
+// build and no host `pnpm` at all: a Claude Code process on the Mac loads SKILL.md, CLAUDE.md and
+// settings.json from it, so starting a session in this repo is the whole trigger — and the skill
+// there is what prescribes this review.
 const hostExecutedFiles = [
   "Dockerfile",
   "docker-compose.yml",
   "package.json",
   "pnpm-lock.yaml",
   "eslint.config.mjs",
+  "mise.toml",
+  "src/**/*.test.ts",
+  ".claude/",
 ];
 
 void describe("the self-mount consequence is documented where the containment claim is made", () => {
@@ -51,6 +62,19 @@ void describe("the self-mount consequence is documented where the containment cl
     assert.match(toolchain, /docker compose exec -T -w \/workspace\/agentdeck app/);
     assert.match(toolchain, /git status/);
     assert.match(toolchain, /git diff/);
+  });
+
+  void test("the host-run exception names everything the host would execute", async () => {
+    // The exception paragraph is where a human decides to run something on the Mac, so the list
+    // that matters is the one there, not the one anywhere in the file.
+    const readme = await readDoc("README.md");
+    const toolchain = readme.slice(readme.indexOf("## Toolchain"));
+    for (const file of hostExecutedFiles) {
+      assert.ok(
+        toolchain.includes(file),
+        `README's toolchain exception does not name ${file} as agent-writable`,
+      );
+    }
   });
 
   void test("plan 005 states it in what containment actually buys", async () => {
@@ -118,6 +142,31 @@ void describe("the user's bearer token is not inside a bind mount", () => {
     const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
     assert.match(section, /AGENTDECK_TOKEN_FILE/);
     assert.match(section, /distinct uid/);
+  });
+});
+
+// Non-root is worth the distance between the agent's uid and root, and the image's setuid-root
+// helpers make that distance short. These assert the two lines that close it, plus the plan
+// bullet that says why, because "run as node" reads like the whole control and is not.
+void describe("the container cannot escalate to root", () => {
+  void test("compose sets no-new-privileges", async () => {
+    const compose = await readDoc("docker-compose.yml");
+    assert.match(compose, /\n\s+security_opt:\n\s+- "no-new-privileges:true"/);
+  });
+
+  void test("compose drops all capabilities", async () => {
+    const compose = await readDoc("docker-compose.yml");
+    assert.match(compose, /\n\s+cap_drop:\n\s+- ALL\b/);
+  });
+
+  void test("plan 005's container hygiene says why", async () => {
+    const plan = await readDoc("plans/005-containment.md");
+    const start = plan.indexOf("### Container hygiene");
+    assert.ok(start >= 0, "plan 005 has no `Container hygiene` section");
+    const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
+    assert.match(section, /no-new-privileges/);
+    assert.match(section, /cap_drop/);
+    assert.match(section, /setuid/);
   });
 });
 

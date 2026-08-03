@@ -75,10 +75,16 @@ lever on how much is in reach.
 And agentdeck's own repository is on that mount list, which is the one entry whose contents the
 host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts, `pnpm-lock.yaml`
 (pnpm 9 runs dependency lifecycle scripts, so a rewritten resolution entry is host execution at
-the next install), `eslint.config.mjs`
+the next install), `eslint.config.mjs`, `mise.toml` (mise runs `[env] _.source` and `[tasks]` on
+the host), `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
+the suite already shells out), `.claude/`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the host
 toolchain or `docker compose up --build` runs agent-authored code on the Mac, outside the
-container. The last two are the ones review misses — both are gitignored, so `git status` says
+container. `.claude/` is the one with no build step in front of it: `.claude/skills/*/SKILL.md`,
+`CLAUDE.md` and `.claude/settings.json` are loaded by a Claude Code process running on the Mac, so
+merely starting an agent session in this repo on the host is the trigger — and the iterate skill
+is also what prescribes this review, so an agent that edits it edits its own gate. `node_modules`
+and `.pnpm-store` are the ones review misses — both are gitignored, so `git status` says
 clean after an agent rewrites `node_modules/.bin/eslint`. They are therefore container-local
 volumes in compose rather than files on the bind mount, so the tree the container executes is not
 the host's.
@@ -140,12 +146,17 @@ docker compose exec -T -w /workspace/agentdeck app pnpm typecheck
 
 `pnpm lint` or `pnpm test` on the Mac is an explicit exception, not the default, because both
 execute files this repository's own mount makes agent-writable — `eslint.config.mjs` is evaluated
-as JavaScript, the `package.json` scripts are handed to a shell, and `node_modules/.bin` is
-prepended to `PATH`.
+as JavaScript, the `package.json` scripts are handed to a shell, `src/**/*.test.ts` is executed as
+code by `node --test`, and `node_modules/.bin` is prepended to `PATH`. `mise install` is the same
+exception for the same reason (`mise.toml` is agent-writable and mise executes `[env] _.source`
+and `[tasks]`), and so is starting an agent session in this repo on the Mac, which loads
+`.claude/`.
 
 Before any `docker compose up --build`, and before any host toolchain run taken as that exception,
 `git status` and `git diff` must be clean of unreviewed agent edits to `Dockerfile`,
-`docker-compose.yml`, `package.json`, `pnpm-lock.yaml` and `eslint.config.mjs`. That review is
+`docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.mjs`, `mise.toml`,
+`src/**/*.test.ts` and `.claude/`. The same review is owed before starting a host agent session,
+which is the only trigger `.claude/` needs. That review is
 blind to
 `node_modules` and `.pnpm-store`, which are gitignored — which is why the host's copies of both
 are kept off the container's mount by container-local volumes rather than reviewed. A line added to the mount list —

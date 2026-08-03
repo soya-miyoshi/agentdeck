@@ -57,10 +57,26 @@ the cheapest version of it: the next routine `docker compose up -d --build` is t
 host, which makes "never mount the Docker socket" a rule living in a file the agent it constrains
 can edit.
 
+**Three more host-execution surfaces are in the same mount and are easier to miss, because none
+of them looks like a build file.** `src/**/*.test.ts` is what `pnpm test` hands to `node --test`,
+which executes it as code — the suite already shells out (`execFileSync("/bin/sh", ...)`) and
+already prepends `node_modules/.bin` to `PATH`, so one more shell-out added to an existing helper
+is unremarkable in a diff nobody expects to contain an attack. `mise.toml` documents `mise install`
+and mise executes `[env] _.source` and `[tasks]` entries on the host. And `.claude/` is not agent
+data at all: it is instruction and configuration a Claude Code process running *on the Mac* loads
+— `.claude/skills/*/SKILL.md`, `CLAUDE.md`, `.claude/settings.json` and its hooks. That last one
+has the weakest trigger of anything on this list: it needs no `--build` and no host `pnpm` run,
+only a human starting an agent session in this repo on the Mac. It is also the file that
+prescribes this very review, so an agent that edits it can edit the gate that would catch it.
+
 That path is closed by habit rather than by the boundary: develop and test inside the container,
 never with the host toolchain (the README's Toolchain section states this as the workflow), and
 require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
-`docker-compose.yml`, `package.json` and `eslint.config.mjs` before any `--build`.
+`docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.mjs`, `mise.toml`,
+`src/**/*.test.ts` and `.claude/` before any `--build`, and before any host toolchain run or agent
+session taken as the exception. The better answer for the last of these is the one that moved the
+bearer token out of the mount: keep the iterate skill in the host's `~/.claude/skills` so the
+agent it constrains cannot write it. Until that is done, review is the only control.
 
 **That review is blind to `node_modules` and `.pnpm-store`**, because both are gitignored: an agent
 that rewrites `node_modules/.bin/eslint` leaves `git status` clean and the next host lint run
@@ -195,6 +211,15 @@ exposure is decided, exactly as plan 001 intended.
   `touch` in a mounted repo rather than inheriting the folklore — but keep the non-root part, which
   is not folklore.
 - **CPU and memory limits.** A runaway agent should degrade the container, not the laptop.
+- **`no-new-privileges` and `cap_drop: [ALL]`.** Non-root above is worth exactly as much as the
+  distance between the agent's uid and root, and the default is short: the base image ships
+  setuid-root `su`, `mount`, `umount`, `chsh`, `chfn`, `gpasswd`, `newgrp` and `passwd`, and
+  compose's default capability set keeps `CAP_DAC_OVERRIDE`, `CAP_SETUID`, `CAP_CHOWN`,
+  `CAP_FOWNER` and `CAP_MKNOD`. An agent that reaches uid 0 that way reads and rewrites every
+  bind-mounted repository regardless of file mode and writes root-owned files back through
+  VirtioFS into the human's checkouts. It also pre-defeats the distinct uid for agent sessions
+  named above, since a setuid path to root makes any uid split decorative. Nothing in this image
+  needs a capability — tmux, node, git and curl all run unprivileged as `node` — so both are free.
 - **The container's tmux is not the host's, and the plans cite the host's.** Debian bookworm
   ships **3.3a**; the host runs 3.7b, which is the version plans 001 and 002 name when they say
   "verified". The behaviours those plans depend on all predate 3.3a — `remain-on-exit`,

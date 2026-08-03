@@ -29,6 +29,18 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+    # The distance between the agent's uid and root, closed (plan 005, Container hygiene).
+    # The base image ships setuid-root su/mount/umount/chsh/chfn/gpasswd/newgrp/passwd, and
+    # the default capability set keeps CAP_DAC_OVERRIDE, CAP_SETUID, CAP_CHOWN, CAP_FOWNER
+    # and CAP_MKNOD. Reaching uid 0 that way reads and rewrites every bind-mounted repository
+    # regardless of file mode and writes root-owned files back through VirtioFS into the
+    # human's checkouts — and it makes any future distinct uid for agent sessions decorative.
+    # Nothing here needs a capability: tmux, node, git and curl all run unprivileged as node.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+
     # 127.0.0.1 only. The container is reachable from host loopback and from nothing
     # else; `tailscale serve` on the host is then the single place where remote exposure
     # is decided (plans 001 and 005). Nothing listens on this yet — the server lands at
