@@ -75,19 +75,28 @@ lever on how much is in reach.
 And agentdeck's own repository is on that mount list, which is the one entry whose contents the
 host executes: `Dockerfile`, `docker-compose.yml`, the `package.json` scripts, `pnpm-lock.yaml`
 (pnpm 9 runs dependency lifecycle scripts, so a rewritten resolution entry is host execution at
-the next install), `eslint.config.mjs`, `mise.toml` (mise runs `[env] _.source` and `[tasks]` on
-the host), `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `.claude/`
+the next install), any lint, format or toolchain config the host tool discovers for itself —
+`eslint.config.*`, `.prettierrc*` (prettier imports every entry of its `plugins` array as
+JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
+host, and auto-discovers more filenames than the one we happen to have) —
+`src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
+the suite already shells out), `.claude/`, `.github/workflows/`, `.git/config`, `.git/hooks/`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the host
 toolchain or `docker compose up --build` runs agent-authored code on the Mac, outside the
 container. `.claude/` is the one with no build step in front of it: `.claude/skills/*/SKILL.md`,
 `CLAUDE.md` and `.claude/settings.json` are loaded by a Claude Code process running on the Mac, so
 merely starting an agent session in this repo on the host is the trigger — and the iterate skill
-is also what prescribes this review, so an agent that edits it edits its own gate. `node_modules`
-and `.pnpm-store` are the ones review misses — both are gitignored, so `git status` says
-clean after an agent rewrites `node_modules/.bin/eslint`. They are therefore container-local
+is also what prescribes this review, so an agent that edits it edits its own gate. `.git/config`
+and `.git/hooks/` have a weaker trigger still: `git` itself runs them, so `[core] pager`, an
+`[alias]` with a `!` prefix or a `textconv` entry turns the review command into the payload, and
+a `post-checkout` or `pre-push` hook fires on the ordinary branch-and-merge workflow with the
+human's identity and `~/.ssh` in reach. `.github/workflows/` is executed by a GitHub runner and
+declares its own `permissions:`, so reviewing the workflow before pushing is the only thing that
+bounds the token it gets. `node_modules`, `.pnpm-store`, `.git/config` and `.git/hooks/` are the
+ones review misses — none of them is tracked, so `git status` says
+clean after an agent rewrites `node_modules/.bin/eslint` or `.git/hooks/pre-push`. The first two are therefore container-local
 volumes in compose rather than files on the bind mount, so the tree the container executes is not
-the host's.
+the host's; the `.git` pair are covered by two extra commands in the checklist below.
 
 The user's bearer token is kept out of the mounts for the same reason: it lives at
 `AGENTDECK_TOKEN_FILE` on a container-local volume, never at the root of a mounted repository
@@ -145,19 +154,35 @@ docker compose exec -T -w /workspace/agentdeck app pnpm typecheck
 ```
 
 `pnpm lint` or `pnpm test` on the Mac is an explicit exception, not the default, because both
-execute files this repository's own mount makes agent-writable — `eslint.config.mjs` is evaluated
-as JavaScript, the `package.json` scripts are handed to a shell, `src/**/*.test.ts` is executed as
+execute files this repository's own mount makes agent-writable — `eslint.config.*` is evaluated
+as JavaScript, `.prettierrc*` names plugin files prettier imports as JavaScript, the
+`package.json` scripts are handed to a shell, `src/**/*.test.ts` is executed as
 code by `node --test`, and `node_modules/.bin` is prepended to `PATH`. `mise install` is the same
-exception for the same reason (`mise.toml` is agent-writable and mise executes `[env] _.source`
-and `[tasks]`), and so is starting an agent session in this repo on the Mac, which loads
-`.claude/`.
+exception for the same reason (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
+executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo on the
+Mac, which loads `.claude/`. Host `git` in this repo is the same exception again, since it runs
+`.git/config` and `.git/hooks/`.
 
 Before any `docker compose up --build`, and before any host toolchain run taken as that exception,
 `git status` and `git diff` must be clean of unreviewed agent edits to `Dockerfile`,
-`docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.mjs`, `mise.toml`,
-`src/**/*.test.ts` and `.claude/`. The same review is owed before starting a host agent session,
+`docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `.claude/` and `.github/workflows/`. **That
+list is a floor, not the whole job**: the host tools discover their own config, so the exception
+requires reading every added or modified file in the diff, not only the named ones. The same
+review is owed before starting a host agent session,
 which is the only trigger `.claude/` needs. That review is
 blind to
 `node_modules` and `.pnpm-store`, which are gitignored — which is why the host's copies of both
-are kept off the container's mount by container-local volumes rather than reviewed. A line added to the mount list —
+are kept off the container's mount by container-local volumes rather than reviewed. It is blind
+to `.git/config` and `.git/hooks/` for the same reason, and those cannot be volumed away, so two
+more commands belong in the same checklist:
+
+```
+git config --local --list
+ls -la .git/hooks          # anything without a .sample suffix is a live hook
+```
+
+Run the review itself with git's own execution turned off — `git -c core.pager=cat -c
+core.hooksPath=/dev/null status`, and the same for `diff`, `switch` and `merge` — so the command
+that inspects the repository is not the command that fires the payload. A line added to the mount list —
 `/var/run/docker.sock`, or `${HOME}` — turns the next routine rebuild into root on the host.

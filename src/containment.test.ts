@@ -28,15 +28,28 @@ const readDoc = async (name: string): Promise<string> =>
 // build and no host `pnpm` at all: a Claude Code process on the Mac loads SKILL.md, CLAUDE.md and
 // settings.json from it, so starting a session in this repo is the whole trigger — and the skill
 // there is what prescribes this review.
+//
+// The globs are deliberate. Every host tool here discovers its own config, so naming the one
+// filename we happen to have leaves the rest unreviewed: prettier imports its `plugins` entries
+// as JavaScript from any `.prettierrc*`, and mise reads `.mise.toml`, `mise.local.toml` and
+// `mise-tasks/` as readily as `mise.toml`. `.github/workflows/` is the surface that picks its own
+// privileges — `permissions:` lives inside the file being protected. `.git/config` and
+// `.git/hooks/` are executed by git itself, which makes the prescribed `git diff` its own
+// trigger, and neither is tracked, so the review cannot see them at all.
 const hostExecutedFiles = [
   "Dockerfile",
   "docker-compose.yml",
   "package.json",
   "pnpm-lock.yaml",
-  "eslint.config.mjs",
-  "mise.toml",
+  "eslint.config.*",
+  ".prettierrc*",
+  ".mise*.toml",
+  "mise-tasks/",
   "src/**/*.test.ts",
   ".claude/",
+  ".github/workflows/",
+  ".git/config",
+  ".git/hooks/",
 ];
 
 void describe("the self-mount consequence is documented where the containment claim is made", () => {
@@ -118,6 +131,66 @@ void describe("the host-executed trees git cannot see are off the bind mount", (
       assert.match(doc, /node_modules/);
       assert.match(doc, /\.pnpm-store/);
     }
+  });
+});
+
+// `.git` is inside the bind mount and none of it is tracked, so the `git status` / `git diff`
+// review is as blind to `.git/config` and `.git/hooks/` as it is to node_modules — but unlike
+// node_modules they cannot be masked by a container-local volume, because the container needs
+// the repository's git metadata. What is left is naming the two commands that can see them, and
+// making the host git this repo prescribes unable to run either surface.
+const docs: readonly (readonly [string, string])[] = [
+  ["README.md", "README.md"],
+  ["plan 005", "plans/005-containment.md"],
+];
+
+void describe("git's own execution surfaces are covered where review cannot see them", () => {
+  for (const [name, path] of docs) {
+    void test(`${name} names the two commands that can see .git`, async () => {
+      const doc = await readDoc(path);
+      assert.ok(
+        doc.includes("git config --local --list"),
+        `${name} omits git config --local --list`,
+      );
+      assert.ok(doc.includes("ls -la .git/hooks"), `${name} omits ls -la .git/hooks`);
+      assert.match(doc, /\.sample/);
+    });
+  }
+
+  void test("the iterate skill runs host git with pager and hooks disabled", async () => {
+    // The skill is what prescribes the review and then does the branch, merge and switch on the
+    // host. Each of those is a hook trigger, and `git diff` is a pager trigger.
+    const skill = await readDoc(".claude/skills/iterate/SKILL.md");
+    const hardened = /git -c core\.pager=cat -c\s+core\.hooksPath=\/dev\/null/g;
+    const uses = skill.match(hardened) ?? [];
+    assert.ok(uses.length >= 4, `only ${uses.length} host git commands are hardened`);
+    for (const bare of [
+      /(?<!-c )\bgit switch -c /,
+      /(?<!-c )\bgit merge --no-ff /,
+      /(?<!-c )\bgit status --porcelain/,
+    ]) {
+      assert.doesNotMatch(skill, bare, `the skill still runs an unhardened ${String(bare)}`);
+    }
+  });
+});
+
+// The enumerated list is a floor: the host tools discover config we did not name, so a review
+// scoped to the list is a review with a hole in it. Both documents have to say so.
+void describe("the review list is stated as a floor rather than the whole job", () => {
+  for (const [name, path] of docs) {
+    void test(`${name} requires reviewing every modified file, not only the listed ones`, async () => {
+      const doc = await readDoc(path);
+      assert.match(doc, /floor/);
+      assert.match(doc, /every added or modified\s+file in the diff/);
+    });
+  }
+
+  void test("plan 005 says a workflow file declares its own permissions", async () => {
+    const plan = await readDoc("plans/005-containment.md");
+    const start = plan.indexOf("## What containment actually buys");
+    const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
+    assert.match(section, /permissions:/);
+    assert.match(section, /default workflow permission/);
   });
 });
 
