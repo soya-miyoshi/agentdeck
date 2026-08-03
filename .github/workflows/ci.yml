@@ -1,0 +1,43 @@
+name: CI
+
+# Typecheck, lint and test on the runner directly. The arm64 image is deliberately not built
+# here: nothing in CI would then run it (plan 003, M0).
+#
+# This is the one place `pnpm install` runs outside the container, and it is safe for the
+# reason the host is not (plan 005): the runner is a disposable VM with no human identity on
+# it, so a lifecycle script from an agent-authored lockfile diff gets nothing worth having.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # corepack, not a pnpm setup action, so the version comes from package.json's
+      # `packageManager` field and cannot drift from what the container uses. It has to run
+      # after setup-node, because the shims land in whichever Node install is on PATH.
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - run: pnpm lint
+
+      - run: pnpm test
