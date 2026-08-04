@@ -142,6 +142,20 @@ void describe("create or attach", () => {
   });
 });
 
+void describe("ensuring a server exists", () => {
+  void test("starts one and turns exit-empty off", async () => {
+    // exit-empty defaults to ON, so a server holding no sessions terminates - which is every
+    // server at boot. `start-server` reports success either way, so this is invisible until
+    // something tries to use the server that is already gone.
+    const { tmux, calls } = fake();
+    await tmux.ensureServer();
+    // One invocation, not two: as separate calls the empty server exits between them and
+    // set-option fails with "no server running". Observed, not theorised.
+    assert.equal(calls.length, 1, "start-server and set-option must not be separate calls");
+    assert.deepEqual(calls[0], ["start-server", ";", "set-option", "-g", "exit-empty", "off"]);
+  });
+});
+
 void describe("kill is idempotent", () => {
   void test("a missing session is the desired end state, not a failure", async () => {
     const error = Object.assign(new Error("exited"), { stderr: "can't find session: gone" });

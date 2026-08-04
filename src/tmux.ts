@@ -100,6 +100,26 @@ export class Tmux {
   }
 
   /**
+   * Make sure a tmux server exists, and that it will stay.
+   *
+   * `exit-empty` is on by default, which means the server terminates as soon as it holds no
+   * sessions - so `start-server` succeeds and the server is gone before anything can use it.
+   * That is not a hypothetical: it presented as a health check reporting "no server running"
+   * moments after the entrypoint logged that the server was up.
+   *
+   * Idempotent, so it costs nothing when an entrypoint has already done this. Running it here
+   * too is what lets the server work standalone - without it, `/api/health` reports 503 at boot
+   * on any machine where nothing else started tmux first.
+   */
+  async ensureServer(): Promise<void> {
+    // ONE invocation, with tmux's own `;` separator. As two calls this is a race it loses every
+    // time: `start-server` succeeds, the brand-new server has no sessions, exit-empty is still on
+    // by default, so it exits - and `set-option` then fails with "no server running on ...".
+    // Chaining means the option is set before tmux gets to the point of deciding it is idle.
+    await this.#tmux(["start-server", ";", "set-option", "-g", "exit-empty", "off"]);
+  }
+
+  /**
    * Every session tmux holds, with the fields the state machine needs.
    *
    * `#{pane_dead}` and `#{pane_dead_status}` are the definitive signal - a process that exited

@@ -7,14 +7,25 @@ import { promisify } from "node:util";
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
+import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
 import { Tmux } from "./tmux.ts";
 import { generateToken } from "./token.ts";
+import { attachWebSocketServer } from "./ws.ts";
 
 const run = promisify(execFile);
 
 const VERSION = "0.0.0";
 const HEALTH_TIMEOUT_MS = 3000;
+
+// Depth of scrollback a cold snapshot carries. Not a knob: plan 002 refuses pagination outright,
+// so this is the one fixed depth, and reading further back would be a plan rather than a param.
+const HISTORY_LINES = 2000;
+
+// How often the hub reconciles against tmux. This is what makes a session someone started by
+// hand in a terminal appear in the strip, and what notices an agent that exited while nobody was
+// looking. Cheap - one `list-sessions` - so it can afford to be frequent.
+const SYNC_INTERVAL_MS = 2000;
 
 /**
  * The token, generated on first run and stored 0600.
@@ -96,7 +107,13 @@ export const main = async (): Promise<void> => {
   }
 
   const tmux = new Tmux({ socket });
+  // Before anything asks tmux a question. Idempotent, so it costs nothing when the container's
+  // entrypoint already did it, and it is what lets the server work standalone - without it,
+  // /api/health reports 503 at boot on any machine where nothing else started tmux first.
+  await tmux.ensureServer();
+
   const registry = new Registry(tmux, profiles, allowlist);
+  const hub = new Hub({ tmux, registry, socket });
 
   // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
   // finish, or did I lose it", and expiring it after five minutes puts the question back.
@@ -107,6 +124,9 @@ export const main = async (): Promise<void> => {
 
   const server = createServer(
     createHandler({
+      onSessionsChanged: () => {
+        void hub.sync();
+      },
       registry,
       profiles,
       allowlist,
@@ -117,6 +137,21 @@ export const main = async (): Promise<void> => {
     }),
   );
 
+  const ws = attachWebSocketServer(server, {
+    token,
+    origin: process.env["AGENTDECK_ORIGIN"],
+    streamFor: (id) => hub.streamFor(id),
+    captureHistory: async (id) => await hub.captureHistory(id, HISTORY_LINES),
+    sendInput: (id, data) => hub.sendInput(id, data),
+    applyPaneSize: (id, cols, rows) => hub.applyPaneSize(id, cols, rows),
+  });
+
+  // Attach to whatever tmux already has before serving, so the first request sees real state
+  // rather than an empty list that fills in a moment later.
+  await hub.sync();
+  const syncTimer = setInterval(() => void hub.sync(), SYNC_INTERVAL_MS);
+  syncTimer.unref();
+
   // Loopback only. `tailscale serve` on the host is the single place where remote exposure is
   // decided, and binding the tailnet address here would make that two places.
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
@@ -126,6 +161,11 @@ export const main = async (): Promise<void> => {
   );
 
   const shutdown = (): void => {
+    clearInterval(syncTimer);
+    ws.close();
+    // Detach from every session without killing anything. The agents keep running; this process
+    // going away must not be the thing that ends someone's work.
+    hub.disposeAll();
     server.close(() => {
       process.exit(0);
     });

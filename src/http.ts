@@ -25,6 +25,12 @@ export interface HttpDeps {
   origin: string | undefined;
   /** Hard-timed liveness probe. Returning false means the event loop cannot do its job. */
   probe: () => Promise<boolean>;
+  /**
+   * Called when the session set changes, so whatever holds the live attachments can catch up
+   * immediately rather than waiting for its next poll. Optional: the poll is the guarantee, this
+   * is only the latency.
+   */
+  onSessionsChanged?: () => void;
 }
 
 interface Handled {
@@ -110,7 +116,9 @@ export const createHandler = (deps: HttpDeps) => {
       // The client names a profile id and never a command line. A remote client supplying a
       // command is remote code execution with extra steps.
       try {
-        return { status: 201, body: await deps.registry.create(cwd, agent) };
+        const created = await deps.registry.create(cwd, agent);
+        deps.onSessionsChanged?.();
+        return { status: 201, body: created };
       } catch (error) {
         if (error instanceof CwdNotAllowedError)
           return { status: 403, body: { error: error.message } };
@@ -126,6 +134,7 @@ export const createHandler = (deps: HttpDeps) => {
     const remove = /^\/api\/sessions\/([^/]+)$/.exec(path);
     if (method === "DELETE" && remove) {
       await deps.registry.close(decodeURIComponent(remove[1] ?? ""));
+      deps.onSessionsChanged?.();
       return { status: 200, body: { closed: true } };
     }
 
