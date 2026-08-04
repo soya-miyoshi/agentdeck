@@ -6,3 +6,6 @@ dist
 # The bearer token is NOT here and must never be: it lives at AGENTDECK_TOKEN_FILE
 # (/var/lib/agentdeck/token), on a container-local volume outside every bind mount, because
 # this directory is mounted into the container every agent session runs in. See plan 005.
+
+# Isolated checkouts for parallel agents. Whole copies of this repo; never committed.
+.claude/worktrees

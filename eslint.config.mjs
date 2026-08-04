@@ -4,7 +4,10 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["node_modules", "dist", ".pnpm-store"] },
+  // .claude/worktrees holds isolated checkouts for parallel agents. They are whole copies of
+  // this repository, so without this eslint lints a second agent's half-written files and its
+  // build output as if they were ours - and a lint failure there is not a fact about main.
+  { ignores: ["node_modules", "dist", ".pnpm-store", ".claude/worktrees"] },
   js.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
   {

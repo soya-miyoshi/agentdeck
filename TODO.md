@@ -173,6 +173,26 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ---
 
+## Found while building, not in the original plan
+
+- [ ] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
+      everything else, and no plan says whether this server serves the page, `tailscale serve`
+      does, or something else. It cannot simply sit behind the bearer token either: the page has
+      to load before a token exists, so whatever serves it is unauthenticated by necessity and
+      that deserves a sentence in plan 001 rather than a default.
+      **Done when:** opening the `ts.net` URL on a phone loads the client with no token, and the
+      first thing it shows is the paste field.
+
+- [ ] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
+      ping intervals should reconnect, and that is not implementable as written: the server's
+      keepalive is WebSocket ping frames, which JavaScript cannot observe. A blind 30-second
+      silence timer is worse than nothing, because an idle agent legitimately sends nothing for
+      minutes and every idle tab would reconnect in a loop. The half-open connection is exactly
+      the case the ping exists for, so this is a real hole rather than a nicety.
+      **Done when:** plan 002 gains a client-visible heartbeat (a server-sent `{t:"ping"}`, or
+      `state` on a timer), and pulling the network is noticed by the client before it is noticed
+      by a status that stopped changing.
+
 ## M4 — Phone
 
 - [ ] **`m4/tailscale-serve`** — `tailscale serve --bg` in front of the loopback port.
