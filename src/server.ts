@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
 import { parseProfiles } from "./agent-profiles.ts";
+import { installHookSettings } from "./claude-hooks.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
@@ -77,6 +78,13 @@ export const main = async (): Promise<void> => {
   const port = Number(env("AGENTDECK_PORT", "7777"));
   const tokenFile = env("AGENTDECK_TOKEN_FILE", "/var/lib/agentdeck/token");
 
+  // Where a profile's relative `waiting.settings` lands: the agent-state directory, which is the
+  // container's own bind mount and never the host's ~/.claude (plan 005). For claude that is the
+  // same directory the agent reads, which is what CLAUDE_CONFIG_DIR points the agent at. The
+  // fallback is deliberately somewhere disposable: a misconfigured server should merge into a
+  // file nothing reads rather than into whichever config directory it happened to guess.
+  const agentStateDir = env("AGENTDECK_AGENT_STATE_DIR", env("CLAUDE_CONFIG_DIR", "/tmp"));
+
   // The mount list, which is also the cwd allowlist and what the picker is served. One list with
   // three jobs, so it has exactly one source.
   const mounts = env("AGENTDECK_MOUNTS", "")
@@ -103,6 +111,27 @@ export const main = async (): Promise<void> => {
       console.error(
         `agentdeck: ${profile.id} waiting mechanism disabled: ${profile.waitingDisabledReason}`,
       );
+    }
+  }
+
+  // Once, here, and not once per session: one container has one agent-state directory and so one
+  // settings file, shared by every session of that agent. What genuinely varies per session is the
+  // id and the secret, and those go through the environment at spawn (plan 004).
+  for (const profile of profiles.values()) {
+    if (profile.waiting?.via !== "hook") continue;
+    const settingsPath = isAbsolute(profile.waiting.settings)
+      ? profile.waiting.settings
+      : join(agentStateDir, profile.waiting.settings);
+    try {
+      const { changed } = installHookSettings(settingsPath, port);
+      console.log(
+        `agentdeck: ${profile.id} hooks ${changed ? "merged into" : "already present in"} ${settingsPath}`,
+      );
+    } catch (error) {
+      // A fragment that will not merge disables the MECHANISM, not the profile. That agent drops
+      // to working/idle/exited and stays startable - and the human's own edit stays as they left
+      // it rather than being overwritten with ours.
+      console.error(`agentdeck: ${profile.id} hook install failed for ${settingsPath}:`, error);
     }
   }
 
@@ -134,6 +163,7 @@ export const main = async (): Promise<void> => {
       version: VERSION,
       origin: process.env["AGENTDECK_ORIGIN"],
       probe: async () => await probeTmux(socket),
+      streamFor: (id) => hub.streamFor(id),
     }),
   );
 

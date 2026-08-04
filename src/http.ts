@@ -2,9 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AgentProfile } from "./agent-profiles.ts";
 import { summarise } from "./agent-profiles.ts";
+import { mapHookEvent } from "./claude-hooks.ts";
 import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
 import { AgentUnavailableError, CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
+import type { SessionStream } from "./stream.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
 
 // A terminal server is remote code execution by design. MulmoTerminal binds loopback for exactly
@@ -31,6 +33,11 @@ export interface HttpDeps {
    * is only the latency.
    */
   onSessionsChanged?: () => void;
+  /**
+   * The live stream for a session, so a hook's statement lands where state is decided. Optional:
+   * a session tmux has but nothing is attached to still gets its state through the registry.
+   */
+  streamFor?: (sessionId: string) => SessionStream | undefined;
 }
 
 interface Handled {
@@ -81,8 +88,27 @@ export const createHandler = (deps: HttpDeps) => {
       if (typeof secret !== "string" || !deps.registry.secretMatches(id, secret)) {
         return { status: 401, body: { error: "bad session secret" } };
       }
-      await readJson(req);
-      return { status: 200, body: { ok: true } };
+      let payload: unknown;
+      try {
+        payload = await readJson(req);
+      } catch {
+        return { status: 400, body: { error: "hook payload was not JSON" } };
+      }
+
+      const { state, reason } = mapHookEvent(payload);
+      if (state === undefined) {
+        // An event whose meaning has not been established changes nothing and says so. Logging it
+        // is how the next Claude Code release's new event gets observed rather than guessed.
+        console.log(`agentdeck: hook for ${id} changed no state: ${reason ?? "no reason given"}`);
+        return { status: 200, body: { ok: true, state: null } };
+      }
+
+      // Declared on the stream because that is where the state a session reports is decided, and
+      // a statement outranks the cadence inference there. Also set on the registry so the very
+      // next GET /api/sessions carries it, rather than the one after the hub's next sync.
+      deps.streamFor?.(id)?.declare(state);
+      deps.registry.setState(id, state);
+      return { status: 200, body: { ok: true, state } };
     }
 
     // Everything below needs the user's token.
