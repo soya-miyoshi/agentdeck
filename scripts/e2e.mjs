@@ -71,7 +71,9 @@ const after = await (await fetch(`${base}/api/sessions`, { headers: auth })).jso
 log("state after typing", after.sessions.find((s) => s.id === id)?.state);
 
 socket.close();
-const closed = await (await fetch(`${base}/api/sessions/${id}`, { method: "DELETE", headers: auth })).json();
+const closed = await (
+  await fetch(`${base}/api/sessions/${id}`, { method: "DELETE", headers: auth })
+).json();
 log("deleted", JSON.stringify(closed));
 
 process.exit(echoed && snapshot ? 0 : 1);
