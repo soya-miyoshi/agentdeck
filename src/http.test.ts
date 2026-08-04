@@ -7,6 +7,7 @@ import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Registry } from "./registry.ts";
+import { SessionStream } from "./stream.ts";
 import { Tmux } from "./tmux.ts";
 
 const SEP = "\u001f";
@@ -230,6 +231,97 @@ void describe("the hook route", () => {
       body: "{}",
     });
     assert.equal(status, 401);
+  });
+});
+
+// The secret is deliberately unreadable from outside the registry, so the only way to exercise
+// the route's behaviour AFTER authentication is to say the secret matched.
+class OpenRegistry extends Registry {
+  override secretMatches(): boolean {
+    return true;
+  }
+}
+
+void describe("a hook that authenticates routes its event into the session's state", () => {
+  let hookServer: Server;
+  let hookBase: string;
+  let hookRegistry: Registry;
+  let stream: SessionStream;
+
+  before(async () => {
+    const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
+    hookRegistry = new OpenRegistry(
+      fakeTmux(),
+      profiles,
+      new CwdAllowlist(["/workspace/agentdeck"]),
+    );
+    await hookRegistry.create("/workspace/agentdeck", "claude");
+    stream = new SessionStream({ sessionId: "test" });
+    hookServer = createServer(
+      createHandler({
+        registry: hookRegistry,
+        profiles,
+        allowlist: new CwdAllowlist(["/workspace/agentdeck"]),
+        token: TOKEN,
+        version: "0.0.0-test",
+        origin: undefined,
+        probe: async () => await Promise.resolve(true),
+        streamFor: () => stream,
+      }),
+    );
+    await new Promise<void>((done) => hookServer.listen(0, "127.0.0.1", done));
+    hookBase = `http://127.0.0.1:${String((hookServer.address() as AddressInfo).port)}`;
+  });
+
+  after(async () => {
+    await new Promise<void>((done) =>
+      hookServer.close(() => {
+        done();
+      }),
+    );
+  });
+
+  const post = async (payload: unknown): Promise<Record<string, unknown>> => {
+    const [session] = await hookRegistry.list();
+    assert.ok(session);
+    const response = await fetch(`${hookBase}/api/hooks/${session.id}`, {
+      method: "POST",
+      headers: { "x-agentdeck-secret": "anything", "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return (await response.json()) as Record<string, unknown>;
+  };
+
+  void test("Stop declares waiting on the stream and on the list", async () => {
+    assert.deepEqual(await post({ hook_event_name: "Stop" }), { ok: true, state: "waiting" });
+    assert.equal(stream.state(), "waiting");
+    const [session] = await hookRegistry.list();
+    assert.equal(session?.state, "waiting");
+  });
+
+  void test("PreToolUse declares working", async () => {
+    assert.deepEqual(await post({ hook_event_name: "PreToolUse", tool_name: "Bash" }), {
+      ok: true,
+      state: "working",
+    });
+    assert.equal(stream.state(), "working");
+  });
+
+  void test("an unrecognised event name leaves the state alone", async () => {
+    await post({ hook_event_name: "Stop" });
+    assert.deepEqual(await post({ hook_event_name: "PreCompact" }), { ok: true, state: null });
+    assert.equal(stream.state(), "waiting", "the previous statement must still stand");
+  });
+
+  void test("a body that is not JSON is 400 rather than 500", async () => {
+    const [session] = await hookRegistry.list();
+    assert.ok(session);
+    const response = await fetch(`${hookBase}/api/hooks/${session.id}`, {
+      method: "POST",
+      headers: { "x-agentdeck-secret": "anything", "content-type": "application/json" },
+      body: "not json",
+    });
+    assert.equal(response.status, 400);
   });
 });
 
