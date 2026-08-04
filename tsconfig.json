@@ -23,5 +23,9 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src"]
+  // The browser client is excluded because it is a different platform: it needs `dom` in `lib`,
+  // which this project must not have - a server file that reached for `document` would typecheck.
+  // It has its own config, and `pnpm typecheck` runs both.
+  "include": ["src"],
+  "exclude": ["src/client"]
 }
