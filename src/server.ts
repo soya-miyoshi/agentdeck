@@ -85,6 +85,23 @@ export const main = async (): Promise<void> => {
   // file nothing reads rather than into whichever config directory it happened to guess.
   const agentStateDir = env("AGENTDECK_AGENT_STATE_DIR", env("CLAUDE_CONFIG_DIR", "/tmp"));
 
+  // Disposable is the right fallback, but landing on it silently is not. A profile that declares
+  // a hook mechanism reports `detectsWaiting: true` on the session list, so the strip promises to
+  // tell you when that agent needs you - while the fragment sits in a file the agent never reads
+  // and the promise is never kept. A tab that is confidently wrong is the one output this design
+  // refuses, so say so at boot rather than letting it be discovered by waiting for a prompt that
+  // never lights up.
+  if (
+    process.env["AGENTDECK_AGENT_STATE_DIR"] === undefined &&
+    process.env["CLAUDE_CONFIG_DIR"] === undefined
+  ) {
+    console.error(
+      "agentdeck: neither AGENTDECK_AGENT_STATE_DIR nor CLAUDE_CONFIG_DIR is set, so any hook " +
+        "settings fragment goes to /tmp where the agent will not read it. Agents configured with " +
+        'waiting.via=hook will report "detects waiting" and never report waiting.',
+    );
+  }
+
   // The mount list, which is also the cwd allowlist and what the picker is served. One list with
   // three jobs, so it has exactly one source.
   const mounts = env("AGENTDECK_MOUNTS", "")
@@ -181,6 +198,22 @@ export const main = async (): Promise<void> => {
   await hub.sync();
   const syncTimer = setInterval(() => void hub.sync(), SYNC_INTERVAL_MS);
   syncTimer.unref();
+
+  // A port already in use is the most ordinary startup failure there is, and Node's default for
+  // it is an unhandled 'error' event: a stack trace, a crash, and no sentence saying which port
+  // or what to do. Errors are sentences here for the same reason they are on the wire.
+  server.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(
+        `agentdeck: port ${String(port)} is already in use. Another agentdeck, or the container ` +
+          `(docker compose publishes this port), or something else. Stop it, or set ` +
+          `AGENTDECK_PORT to a free port.`,
+      );
+      process.exit(1);
+    }
+    console.error("agentdeck: server error:", error.message);
+    process.exit(1);
+  });
 
   // Loopback only. `tailscale serve` on the host is the single place where remote exposure is
   // decided, and binding the tailnet address here would make that two places.

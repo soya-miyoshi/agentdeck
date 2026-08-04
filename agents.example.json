@@ -1,0 +1,13 @@
+{
+  "claude": {
+    "name": "Claude Code",
+    "command": "claude",
+    "waiting": { "via": "hook", "settings": "settings.json" }
+  },
+
+  "shell": {
+    "name": "Shell",
+    "command": "/bin/zsh",
+    "args": ["-l"]
+  }
+}
