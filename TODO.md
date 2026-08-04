@@ -24,7 +24,7 @@ Mark an item `[x]` when its branch is merged.
       Does **not** build the arm64 image — nothing in CI would run it.
       **Done when:** a PR shows a green check, and a deliberately broken type fails it.
 
-- [ ] **`m0/health-endpoint`** — the smallest HTTP server plus `GET /api/health`, answering
+- [x] **`m0/health-endpoint`** — the smallest HTTP server plus `GET /api/health`, answering
       `{ ok, version }` from the same event loop that will serve the app, with a hard-timed
       `tmux list-sessions` round trip and nothing else. Extend `scripts/healthcheck.mjs` to
       require both halves (its `TODO(M1)`).
@@ -58,41 +58,41 @@ Mark an item `[x]` when its branch is merged.
 
 Driven from `curl` only. No client.
 
-- [ ] **`m1/session-id`** — id as a pure function of (absolute path, agent id):
+- [x] **`m1/session-id`** — id as a pure function of (absolute path, agent id):
       `<sanitised-basename>-<agent>-<short-hash>`, obeying tmux's naming rules.
       **Done when:** unit tests cover two checkouts with the same basename under different
       parents (distinct ids), the same path under two agents (distinct ids), and names containing
       `.` and `:` (sanitised, still distinct).
 
-- [ ] **`m1/agent-profiles`** — load and validate `agents.json`, resolve `command` against `PATH`,
+- [x] **`m1/agent-profiles`** — load and validate `agents.json`, resolve `command` against `PATH`,
       `GET /api/agents` reporting `available` and `detectsWaiting`.
       **Done when:** a profile whose command is missing reports `available: false` rather than
       failing the load; a malformed `waiting` block disables that mechanism and leaves the profile
       startable; and one bad profile does not take down the others.
 
-- [ ] **`m1/tmux-registry`** — `new-session -A` create/reattach, list, kill, with
+- [x] **`m1/tmux-registry`** — `new-session -A` create/reattach, list, kill, with
       `remain-on-exit on`; state from `#{pane_dead}`, code from `#{pane_dead_status}`; reaping on
       `DELETE` or at server start, never on a timer.
       **Done when:** creating a session, restarting the server and listing again shows the same
       session with the same id; and a session whose command has exited still lists as `exited`
       with its code.
 
-- [ ] **`m1/cwds`** — the mount list as the single source for the `cwd` allowlist and
+- [x] **`m1/cwds`** — the mount list as the single source for the `cwd` allowlist and
       `GET /api/cwds`, reporting live sessions per directory.
       **Done when:** a `cwd` outside the list is refused with a sentence naming what would have to
       change (a compose edit and a restart), not a generic 403.
 
-- [ ] **`m1/auth-token`** — token generated on first run, stored `0600`, never logged, in an
+- [x] **`m1/auth-token`** — token generated on first run, stored `0600`, never logged, in an
       alphabet `Sec-WebSocket-Protocol` accepts. Bearer middleware plus `Origin` check.
       **Done when:** 100 generated tokens contain no `/`, `=` or whitespace; a request with no
       token gets 401; and a wrong `Origin` is rejected.
 
-- [ ] **`m1/session-routes`** — `POST`/`DELETE /api/sessions`, taking a profile id and never a
+- [x] **`m1/session-routes`** — `POST`/`DELETE /api/sessions`, taking a profile id and never a
       command line, with the `warning` field.
       **Done when:** two different agents in one `cwd` produce two sessions and a warning, while
       the same agent twice hands back the one already running and says so.
 
-- [ ] **`m1/session-secret`** — a per-session random secret in the spawn environment, ready for
+- [x] **`m1/session-secret`** — a per-session random secret in the spawn environment, ready for
       M3's hook route.
       **Done when:** the secret is present in the session's process environment, differs per
       session, and appears in no response body or log line.
@@ -101,28 +101,35 @@ Driven from `curl` only. No client.
 
 ## M2 — One streaming tab
 
-- [ ] **`m2/ring-buffer`** — per session, for every session whether attached or not. `seq` as a
+- [x] **`m2/ring-buffer`** — per session, for every session whether attached or not. `seq` as a
       cumulative byte count carried with a per-process random `epoch`.
       **Done when:** unit tests cover the two-sided coverage test
       (`headSeq >= haveSeq >= headSeq - buffer.byteLength`), and a `haveSeq` above `headSeq`
       fails loudly rather than being treated as covered.
 
-- [ ] **`m2/ws-transport`** — one multiplexed socket; token via `Sec-WebSocket-Protocol` with the
+- [x] **`m2/ws-transport`** — one multiplexed socket; token via `Sec-WebSocket-Protocol` with the
       server echoing the selected subprotocol back; `attach`/`detach`/`input`/`resize`.
       **Done when:** a browser opens the socket (proving the echo), and omitting the echo
       reproduces the failure so the test is known to test something.
 
-- [ ] **`m2/snapshot`** — cold snapshot as `capture-pane` scrollback in `history` plus a
+- [ ] **`m2/snapshot`** (PARTIAL: `history` from capture-pane works and is tested; `data` is
+      currently the ring buffer's contents rather than a `refresh-client -R` repaint, so a first
+      attach to a long-idle session shows recent output rather than the live screen. The seq
+      arithmetic is already correct for the repaint; only the source is wrong.)
+  ORIGINAL: — cold snapshot as `capture-pane` scrollback in `history` plus a
       `refresh-client -R` repaint in `data`, carrying the `seq` the repaint reflects.
       **Done when:** a client attaching to a long-running session sees scrollback then a correct
       live screen; and in alternate-screen mode `history` is absent rather than wrong.
 
-- [ ] **`m2/resync-ping`** — gap detection driving `resync`; server pings every 15s and closes at
+- [ ] **`m2/resync-ping`** (PARTIAL: `resync` is implemented and demonstrated end to end,
+      including the stale-epoch case. Ping/pong is implemented on a 15s interval but has NOT been
+      verified against a real half-open connection, which is the only failure it exists for.)
+  ORIGINAL: — gap detection driving `resync`; server pings every 15s and closes at
       30s without a pong; client reconnects after two silent intervals.
       **Done when:** pulling the network is noticed by the ping before it is noticed by a status
       that stopped changing.
 
-- [ ] **`m2/resize-min`** — pane sized to the minimum over *currently attached* clients; detach
+- [x] **`m2/resize-min`** — pane sized to the minimum over *currently attached* clients; detach
       releases the constraint; an empty set resizes nothing.
       **Done when:** two clients of different sizes attach and the pane matches the smaller; the
       small one detaches and the pane grows.
@@ -143,11 +150,11 @@ Driven from `curl` only. No client.
 
 Agent-agnostic signals first, so the generic path is the proven one.
 
-- [ ] **`m3/status-agnostic`** — process exit and output cadence only. No per-agent mechanism.
+- [x] **`m3/status-agnostic`** — process exit and output cadence only. No per-agent mechanism.
       **Done when:** a session running the profile-less `shell` agent reports working/idle/exited
       and **never** claims `waiting`.
 
-- [ ] **`m3/hook-route`** — `POST /api/hooks/:sessionId`, authenticated by the M1 per-session
+- [x] **`m3/hook-route`** — `POST /api/hooks/:sessionId`, authenticated by the M1 per-session
       secret and explicitly **not** by the user's bearer token.
       **Done when:** a request with the wrong session's secret is rejected, and the user's token
       does not work on this route.
