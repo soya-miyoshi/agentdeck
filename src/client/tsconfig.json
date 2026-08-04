@@ -1,0 +1,24 @@
+{
+  // The client is its own project because it runs somewhere else. The root config declares
+  // `lib: es2023` and `types: node` - correct for a server and wrong for a browser, where the
+  // absence of `dom` would make `document` a type error and its presence on the server would
+  // silently allow one. `pnpm typecheck` runs both.
+  //
+  // `moduleResolution: bundler` because Vite is the bundler: it resolves the package exports and
+  // the .ts extensions this repo writes by hand, and asking tsc to model nodenext instead would be
+  // modelling a loader that never runs here.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "jsx": "preserve",
+    "noEmit": true
+  },
+  "include": ["**/*.ts", "**/*.d.ts"],
+  // Emptied rather than inherited: the root excludes this directory, which from here is every
+  // input there is.
+  "exclude": []
+}

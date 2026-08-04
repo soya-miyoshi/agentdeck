@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import type { AgentSummary } from "../agent-profiles.ts";
+import type { Session } from "../registry.ts";
+import type { SessionState } from "../tmux.ts";
+import { selectTab, toTabs } from "./tabs.ts";
+
+const session = (id: string, agent: string, state: SessionState, exitCode?: number): Session => ({
+  id,
+  name: id,
+  cwd: `/work/${id}`,
+  agent,
+  state,
+  startedAt: 0,
+  ...(exitCode === undefined ? {} : { exitCode }),
+});
+
+const agent = (id: string, detectsWaiting: boolean): AgentSummary => ({
+  id,
+  name: id,
+  available: true,
+  detectsWaiting,
+});
+
+void describe("the tab strip", () => {
+  void test("one tab per session, in the order the server listed them", () => {
+    const tabs = toTabs(
+      [session("a", "claude", "working"), session("b", "shell", "idle")],
+      [agent("claude", true), agent("shell", false)],
+    );
+    assert.deepEqual(
+      tabs.map((tab) => [tab.id, tab.status]),
+      [
+        ["a", "working"],
+        ["b", "idle"],
+      ],
+    );
+  });
+
+  void test("an exited tab shows its exit code", () => {
+    // "exited 1" is the answer to "did it finish, or did I lose it".
+    const [tab] = toTabs([session("a", "claude", "exited", 1)], [agent("claude", true)]);
+    assert.equal(tab?.status, "exited 1");
+    assert.equal(tab?.needsYou, false);
+  });
+
+  void test("an exited tab with no readable code says so rather than inventing a zero", () => {
+    const [tab] = toTabs([session("a", "claude", "exited")], [agent("claude", true)]);
+    assert.equal(tab?.status, "exited");
+  });
+
+  void test("an agent that detects waiting gets the needs-you indicator", () => {
+    const [tab] = toTabs([session("a", "claude", "waiting")], [agent("claude", true)]);
+    assert.equal(tab?.needsYou, true);
+    assert.equal(tab?.status, "waiting");
+  });
+});
+
+void describe("detectsWaiting: false is a supported configuration, not a defect", () => {
+  void test("such an agent never shows a needs-you indicator", () => {
+    const [tab] = toTabs([session("a", "shell", "waiting")], [agent("shell", false)]);
+    assert.equal(tab?.needsYou, false);
+    // Displayed as what the process is in fact doing. The client does not invent a state the
+    // server is in no position to claim.
+    assert.equal(tab?.status, "working");
+  });
+
+  void test("an agent the server has no summary for is treated as not detecting", () => {
+    // A session can outlive the profile that started it. A missing indicator is the failure this
+    // direction; a wrong one is the failure the other.
+    const [tab] = toTabs([session("a", "gone", "waiting")], []);
+    assert.equal(tab?.needsYou, false);
+  });
+});
+
+void describe("which tab stays selected when the list changes", () => {
+  const tabs = toTabs(
+    [session("a", "shell", "idle"), session("b", "shell", "idle")],
+    [agent("shell", false)],
+  );
+
+  void test("a still-present selection is kept, so a session exiting elsewhere moves nothing", () => {
+    assert.equal(selectTab(tabs, "b"), "b");
+  });
+
+  void test("a selection that has gone falls back to the first tab", () => {
+    assert.equal(selectTab(tabs, "vanished"), "a");
+  });
+
+  void test("no tabs at all is no selection, not an empty string", () => {
+    assert.equal(selectTab([], "a"), undefined);
+  });
+});
