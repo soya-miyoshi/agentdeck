@@ -151,6 +151,28 @@ turn, so every finished subagent lit up a cell, beeped, and pushed, mid-turn, on
 The fix was to read the payload's `notification_type` and exclude the informational ones, and the
 comment recording it is explicit that this was measured rather than assumed.
 
+### Observed on claude 2.1.221, and it moved the layer
+
+The rule above survives; the level it applies at does not, and this is exactly why plan 004 says
+observe rather than assume.
+
+Eleven payloads were captured by driving a real claude — a `-p` run, and an interactive session
+put through a permission prompt, an Explore subagent and ninety seconds idle. They are committed
+verbatim at `src/fixtures/claude-hooks.jsonl` and the tests read that file rather than
+hand-written JSON.
+
+**This version emits no informational `Notification` subtype at all.** Only two
+`notification_type` values appeared, `permission_prompt` and `idle_prompt`, and both mean a person
+is needed. MulmoTerminal's expensive finding — a finished subagent lighting a cell mid-turn —
+arrives here as its own **event**, `SubagentStop`, carrying `agent_type` while the parent turn
+continues.
+
+So the denylist ships **empty** rather than populated with a string nobody has observed, and the
+subagent case is denied at the event layer where this version actually puts it. The mechanism that
+would hold such a subtype is still there and still tested through an injectable set, so the day
+one is captured it is a one-line edit. Writing a plausible-looking subtype name in now would be
+the guess this section exists to forbid, and it would look identical to knowledge.
+
 **Consequence for the build:** a mechanism can only be written for an installed agent. Today that
 is `claude` alone. Every other profile ships without one and gains it the day that CLI is present
 and can be driven — a config edit plus a fixture plus, for `log`, a small parser. Not a change to

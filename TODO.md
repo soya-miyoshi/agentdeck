@@ -159,7 +159,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       **Done when:** a request with the wrong session's secret is rejected, and the user's token
       does not work on this route.
 
-- [ ] **`m3/claude-hook-profile`** — the settings fragment merged once and idempotently at
+- [x] **`m3/claude-hook-profile`** — the settings fragment merged once and idempotently at
       container start (not per session), session id and secret injected through the environment;
       event mapping with fixtures captured from real payloads.
       **Done when:** merging twice leaves the file unchanged and preserves keys it did not write;
