@@ -63,6 +63,30 @@ Mark an item `[x]` when its branch is merged.
       the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
       observed against it.
 
+- [ ] **`m0/host-boundary`** — what the container was doing that nothing does now. Filed from
+      `m0/de-containerise`'s audit; the twelve findings are in `audit.md` under that heading and are
+      the specification. Five are `high` and two were verified by hand on the machine:
+      **the `env` name allowlist in plan 004 is not a boundary** — the tmux server inherits whatever
+      shell ran `pnpm start`, so a pane sees `SSH_AUTH_SOCK` and every other variable that shell
+      had, and an agent with the forwarded ssh-agent can `git push --force` wherever that key
+      reaches; and **`tmux show-environment -t <session>` prints `AGENTDECK_SECRET` in full** to any
+      process running as the user, while plan 002 documents the leak as `/proc/<pid>/environ`, a
+      path macOS does not have. Also here: `Hub.sync()` attaching to anything on the tmux socket
+      without consulting the allowlist, `CLAUDE_CONFIG_DIR` falling back onto the operator's live
+      Claude config and being rewritten every boot, and the README's `git status --ignored` check
+      that reports the directory and never its contents while a test certifies it.
+      **This item carries the two decisions `m0/de-containerise` deferred**, because they cannot be
+      answered separately: where the token file lives — the default `/var/lib/agentdeck/token` is a
+      container-era volume path, and **`pnpm start` fails on a clean host today because of it** —
+      and whether the `cwd` allowlist is a boundary or only a check on `POST /api/sessions`.
+      **Done when:** a session spawned by agentdeck has an environment built explicitly rather than
+      inherited, demonstrated by starting the server from a shell carrying a marker variable and
+      showing the pane does not have it; `AGENTDECK_SECRET` is not readable via
+      `tmux show-environment`; `pnpm start` works on a clean host with no environment variables set,
+      and refuses to start if the token path resolves inside an allowlist entry; plan 002's
+      `/proc/<pid>/environ` paragraph names the mechanism this host actually has; and every finding
+      in `audit.md`'s `m0/de-containerise` section is marked fixed or accepted-with-a-reason.
+
 > Not a branch: **the retained deployment files.** `Dockerfile`, `docker-compose.yml` and
 > `docker/` stay on disk, unbuilt and unreferenced by anything that runs. How agentdeck is
 > eventually deployed is deliberately left open, and deleting them would decide it. Nothing in
