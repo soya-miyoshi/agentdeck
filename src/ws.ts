@@ -30,6 +30,15 @@ export const RATE_WINDOW_MS = 1000;
 /** Frames one socket may send per window. Far above typing, far below a repaint loop. */
 export const MAX_FRAMES_PER_WINDOW = 100;
 
+// A frame budget bounds how MANY frames arrive, not how big they are or what they cost. Two
+// separate bounds close that gap.
+//
+// Bytes: ws defaults maxPayload to 100 MiB, so 100 frames a second is up to 100 MB each, fully
+// buffered by the receiver before `message` fires and copied twice more by toString and
+// JSON.parse. src/http.ts already refuses a request body over 64 KB for exactly this reason; the
+// socket carries the same kinds of message, so it gets the same number.
+export const MAX_FRAME_BYTES = 64 * 1024;
+
 export interface WsDeps {
   token: string;
   origin: string | undefined;
@@ -74,7 +83,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
   // noServer, so the upgrade is authenticated before any WebSocket exists. Letting `ws` handle
   // the upgrade would mean a socket that opens and then closes, which a client cannot tell from
   // a network problem.
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   let nextClientId = 0;
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -120,6 +129,18 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     };
     clients.add(client);
 
+    // FIRST, before anything else can be registered. `ws` re-emits every receiver-level protocol
+    // violation - invalid UTF-8 in a text frame, a bad opcode, an unmasked client frame, a payload
+    // past maxPayload - as an `error` event on this socket. An EventEmitter with no `error`
+    // listener THROWS, and nothing installs an uncaughtException handler, so a five-byte malformed
+    // frame from one buggy client took the whole server down and every other phone's socket with
+    // it. The frame budget cannot help: the receiver rejects the frame before `message` fires.
+    socket.on("error", (error: unknown) => {
+      console.error("agentdeck: ws socket error:", error);
+      // The close handler does the detach and cleanup; ws closes the socket after an error itself,
+      // and terminate() here makes sure a socket that somehow did not is not left attached.
+      socket.terminate();
+    });
     socket.on("pong", () => {
       client.alive = true;
     });
@@ -278,6 +299,32 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     }
   };
 
+  // A cold snapshot is the expensive frame: capture-pane for the history and another spawn to ask
+  // whether the pane is on the alternate screen, each allowed a 16 MB buffer. Hub.repaint already
+  // coalesces its own call, but these do not, so a hundred `resync` frames inside the frame budget
+  // meant a hundred concurrent snapshot builds - the loop the budget is supposed to stop, running
+  // at full speed inside it. Callers that arrive while one build is in flight share its result;
+  // each still sends its own frame.
+  const snapshots = new Map<string, Promise<Awaited<ReturnType<typeof buildSnapshot>>>>();
+
+  const buildCoalescedSnapshot = async (
+    sessionId: string,
+    stream: SessionStream,
+  ): Promise<Awaited<ReturnType<typeof buildSnapshot>>> => {
+    const inFlight = snapshots.get(sessionId);
+    if (inFlight !== undefined) return await inFlight;
+    const started = buildSnapshot({
+      buffer: stream.buffer,
+      captureHistory: async () => await deps.captureHistory(sessionId),
+      alternateScreen: async () => await deps.isAlternateScreen(sessionId),
+      repaint: async () => await deps.repaint(sessionId),
+    }).finally(() => {
+      snapshots.delete(sessionId);
+    });
+    snapshots.set(sessionId, started);
+    return await started;
+  };
+
   const sendPosition = async (
     client: Client,
     sessionId: string,
@@ -299,12 +346,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       }
       return stream.buffer.headSeq;
     }
-    const snapshot = await buildSnapshot({
-      buffer: stream.buffer,
-      captureHistory: async () => await deps.captureHistory(sessionId),
-      alternateScreen: async () => await deps.isAlternateScreen(sessionId),
-      repaint: async () => await deps.repaint(sessionId),
-    });
+    const snapshot = await buildCoalescedSnapshot(sessionId, stream);
     send(client.socket, { t: "snapshot", sessionId, ...snapshot });
     return snapshot.seq;
   };
