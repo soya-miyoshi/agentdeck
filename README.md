@@ -154,6 +154,14 @@ no `-l`, but that only covers the profile we ship: keeping a credential out of a
 keeping it out of the dotfiles `HOME` points at, and there is no way for this server to enforce
 that.
 
+The inheritance bound holds even when the tmux server was not ours to begin with. `start-server`
+does nothing to a socket that already has a live server — and attaching to an orphaned session,
+which the refusal text tells you to do, starts one from your shell. So at boot agentdeck also
+clears every variable off the server's _global_ environment that is not on the list above, and
+logs the names it cleared. Without that the client half bounds nothing, and emptying
+`update-environment` would make it worse rather than better: tmux's own default list names
+`SSH_AUTH_SOCK`, so the default was overwriting it from our clean client by accident.
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of

@@ -285,8 +285,11 @@ void describe("ensuring a server exists", () => {
     const { tmux, calls } = fake();
     await tmux.ensureServer();
     // One invocation, not two: as separate calls the empty server exits between them and
-    // set-option fails with "no server running". Observed, not theorised.
-    assert.equal(calls.length, 1, "start-server and set-option must not be separate calls");
+    // set-option fails with "no server running". Observed, not theorised. What matters is that
+    // these three share a single invocation, which the deepEqual below is what actually proves -
+    // this used to assert `calls.length === 1` as a proxy for it, which also forbade the
+    // later `show-environment` sweep of a pre-existing server's globals. The race is between
+    // start-server and set-option and nothing else, so the guarantee is unchanged.
     assert.deepEqual(commandsOf(calls[0] ?? []), [
       ["start-server"],
       ["set-option", "-g", "exit-empty", "off"],
@@ -461,6 +464,70 @@ void describe("what a real tmux server hands a real pane", () => {
     } finally {
       delete process.env["SEKRIT_MARKER"];
       delete process.env["SSH_AUTH_SOCK"];
+    }
+  });
+
+  void test("a server we did not start does not hand its environment to our panes", async () => {
+    // The case the first version of this branch documented as unreachable and left open: with a
+    // live server already on the socket, `start-server` is a no-op, so building the CLIENT's
+    // environment bounds nothing - the pane inherits the server's global environment instead.
+    // The trigger is prescribed by our own refusal text and the README, both of which tell the
+    // operator to `tmux -L agentdeck attach`, and attaching starts a server.
+    //
+    // Emptying `update-environment` makes this strictly worse, which is why it could not stay a
+    // residual: tmux's default list NAMES SSH_AUTH_SOCK, so the default was overwriting it from
+    // our clean client. Verified by hand on tmux 3.7b - with the list emptied and a dirty
+    // pre-existing server, the pane saw both the marker and the forwarded agent.
+    const dirty = `${socket}-dirty`;
+    const dirtyOut = join(tmpdir(), `agentdeck-dirty-env-${String(process.pid)}`);
+    const dirtyTmux = new Tmux({ socket: dirty });
+    try {
+      // A server started by someone else, from a shell holding things no profile allowlisted.
+      execFileSync("tmux", ["-L", dirty, "new-session", "-d", "-s", "operator", "sleep", "30"], {
+        env: {
+          ...process.env,
+          SEKRIT_MARKER: "the-operators-shell",
+          SSH_AUTH_SOCK: "/tmp/agentdeck-test-agent.sock",
+        },
+      });
+
+      await dirtyTmux.ensureServer();
+      await dirtyTmux.createOrAttach(
+        "dirtyprobe",
+        tmpdir(),
+        "/bin/sh",
+        ["-c", `env > ${dirtyOut}; sleep 5`],
+        { AGENTDECK_SESSION_ID: "dirtyprobe" },
+      );
+
+      let paneEnv = "";
+      for (let attempt = 0; attempt < 50 && paneEnv === ""; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          paneEnv = readFileSync(dirtyOut, "utf8");
+        } catch {
+          // Not written yet.
+        }
+      }
+      assert.notEqual(paneEnv, "", "the pane never wrote its environment");
+
+      assert.doesNotMatch(
+        paneEnv,
+        /^SEKRIT_MARKER=/m,
+        "the pane inherited the shell that started the pre-existing server",
+      );
+      assert.doesNotMatch(
+        paneEnv,
+        /^SSH_AUTH_SOCK=/m,
+        "the pane got the ssh-agent forwarded into a server we did not start",
+      );
+    } finally {
+      try {
+        execFileSync("tmux", ["-L", dirty, "kill-server"], { stdio: "ignore" });
+      } catch {
+        // Already gone.
+      }
+      rmSync(dirtyOut, { force: true });
     }
   });
 

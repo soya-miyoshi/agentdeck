@@ -272,9 +272,6 @@ export class Tmux {
     // the moment we attached to it. Observed on tmux 3.7b: with the default,
     // `show-environment -t` listed SSH_AUTH_SOCK; emptied, it lists only what `-e` put there.
     //
-    // What this does NOT reach: a tmux server someone else already started on this socket. Its
-    // global environment is whatever shell started it, and tmux has no way to clear that. The
-    // option above is re-applied on every boot, so the client half is covered either way.
     await this.#tmux([
       "start-server",
       ";",
@@ -288,6 +285,57 @@ export class Tmux {
       "update-environment",
       "",
     ]);
+    await this.#clearInheritedGlobalEnv();
+  }
+
+  /**
+   * Strip the global environment of a server we did not start.
+   *
+   * `start-server` is a no-op against a socket that already has a live server, so on that path
+   * the only half of the environment we build is the client's - and the server's global
+   * environment is whatever shell started it. Every pane forked afterwards inherits it. The
+   * trigger is ordinary rather than exotic: `CwdAllowlist.refusal()` and the README both tell
+   * the operator to run `tmux -L agentdeck attach` to reach an orphaned session, and
+   * `attach-session` starts a server if none is running. `exit-empty off` then keeps that
+   * server alive indefinitely.
+   *
+   * Emptying `update-environment` above makes this worse rather than better, which is why it
+   * cannot be left as a documented residual. tmux's default list names SSH_AUTH_SOCK, so the
+   * default behaviour was overwriting it from our clean client - and removing the list removes
+   * that accident. Verified by hand on tmux 3.7b: with a server started from a shell holding
+   * SSH_AUTH_SOCK and a marker variable, a pane created exactly as `createOrAttach` builds it
+   * saw both. The same test after the unset below saw neither.
+   */
+  async #clearInheritedGlobalEnv(): Promise<void> {
+    const shown = await this.#tmux(["show-environment", "-g"]).catch(() => "");
+    // `show-environment` prints `NAME=value`, or `-NAME` for one it records as removed. A
+    // removed name is already unset, so only the assignments are worth a command.
+    const inherited = shown
+      .split("\n")
+      .filter((line) => line.includes("=") && !line.startsWith("-"))
+      .map((line) => line.slice(0, line.indexOf("=")))
+      // PWD is tmux's own doing, not an inheritance: it is in the global environment of a server
+      // we started ourselves with a built environment, so sweeping it would make the log line
+      // below fire on every ordinary boot and mean nothing. A pane's working directory comes from
+      // `new-session -c` regardless.
+      .filter((name) => name !== "" && name !== "PWD" && !BASE_ENV_NAMES.includes(name));
+    if (inherited.length === 0) return;
+
+    // One invocation, tmux's own `;` between commands and none trailing - a dangling separator
+    // is a command tmux cannot parse.
+    const args: string[] = [];
+    for (const name of inherited) {
+      if (args.length > 0) args.push(";");
+      args.push("set-environment", "-g", "-u", name);
+    }
+    await this.#tmux(args);
+    // Say it out loud. A run that had to clean up after another server is the run where the
+    // environment was not ours to begin with, and that is worth seeing in the log rather than
+    // inferring later from a pane that has something it should not.
+    console.error(
+      `agentdeck: cleared ${String(inherited.length)} inherited variable(s) from the tmux server's ` +
+        `global environment: ${inherited.join(", ")}`,
+    );
   }
 
   /**
