@@ -228,13 +228,34 @@ void describe("adopting a session that outlived the process which created it", (
     assert.equal((await restarted.list())[0]?.waitingDetectionLost, undefined);
   });
 
-  void test("an adopted session can be closed and reaped like any other", async () => {
+  void test("a corpse from before the restart survives reap at boot, and a human can still close it", async () => {
+    // The exit report is the whole point. An agent that died while the server was down leaves a
+    // pane whose scrollback says why, and `reap()` at boot runs before the listener is open - so
+    // killing it would delete the answer before any client could ever see it, and take the
+    // `tmux attach` recovery path with it. It stays listed as `exited` until a human closes it.
     const { registry, sessions, die } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
-    die(session.id, "exited");
+    die(session.id, "1");
     const restarted = restart(sessions);
 
-    assert.deepEqual(await restarted.reap(), [session.id], "the corpse was not reaped");
+    assert.deepEqual(await restarted.reap(), [], "the adopted corpse was reaped at boot");
+    const [listed] = await restarted.list();
+    assert.equal(listed?.id, session.id, "the corpse is no longer listed");
+    assert.equal(listed?.state, "exited");
+    assert.equal(listed?.exitCode, 1, "the exit code did not survive the restart");
+
+    await restarted.close(session.id);
+    assert.equal(sessions.size, 0, "closing an adopted corpse did not kill it");
+  });
+
+  void test("a corpse this process watched exit is still reaped at boot", async () => {
+    // The other half: the secret is the marker for "we started it and saw it die", and reaping
+    // those is what keeps a restart from accumulating dead panes forever.
+    const { registry, sessions, die } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    die(session.id, "1");
+
+    assert.deepEqual(await registry.reap(), [session.id], "our own corpse was not reaped");
     assert.equal(sessions.size, 0);
   });
 });

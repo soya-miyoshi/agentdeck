@@ -82,9 +82,9 @@ export class Registry {
 
     // A dead session under our own id, left by a previous run, otherwise makes this a lie.
     // `createOrAttach` sets `remain-on-exit on`, so a session whose agent exited stays on the
-    // socket. `#adopt` now recovers such a corpse after a restart, so `reap()` at boot usually
-    // clears it; this stays because reaping is not run on a timer and a corpse can also be one
-    // this process watched exit. Otherwise tmux would report `attached: true` and the phone would
+    // socket. `#adopt` recovers such a corpse after a restart and `reap()` deliberately leaves it
+    // alone, so it is still here when the next create arrives - and a corpse this process watched
+    // exit can also outlive a reap, which is not run on a timer. Otherwise tmux would report `attached: true` and the phone would
     // get a 201 saying "a claude session was already running in <cwd>; you are attached to it rather than to
     // a new one" - false, with a tab pinned at `exited` and no agent started. A tab that is
     // confidently wrong is the one output this design refuses, so the corpse goes first.
@@ -315,9 +315,20 @@ export class Registry {
     this.#states.delete(id);
   }
 
-  /** Reap dead sessions. Called at server start and on DELETE, never on a timer. */
+  /**
+   * Reap the corpses THIS process left. Called at server start, never on a timer.
+   *
+   * Scoped to sessions with a recorded secret, which is exactly the set this process started and
+   * watched exit. An adopted corpse - one whose agent died while the server was down - has no
+   * secret (see `#adopt`), and killing it would destroy the pane whose scrollback and `exited N`
+   * are the only remaining answer to "did it finish, or did I lose it". That is the question
+   * reaping at start rather than on a timer exists to keep answerable, so an adopted corpse stays
+   * listed as `exited` with its code until a human closes it.
+   */
   async reap(): Promise<string[]> {
-    const dead = (await this.list()).filter((s) => s.state === "exited");
+    const dead = (await this.list()).filter(
+      (s) => s.state === "exited" && this.#meta.get(s.id)?.secret !== undefined,
+    );
     for (const session of dead) await this.close(session.id);
     return dead.map((s) => s.id);
   }
