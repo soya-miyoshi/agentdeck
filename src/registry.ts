@@ -94,11 +94,25 @@ export class Registry {
     this.#meta.set(id, { cwd, agent: agentId, secret });
     if (!attached) this.#states.set(id, "idle");
 
-    const sessions = await this.list();
-    const session = sessions.find((s) => s.id === id);
+    // Everything after the create either produces the 201 or undoes the create. Before
+    // m0/create-500 this block could throw - and did, on every real server run, because
+    // `Tmux.list()` was parsing mangled output (see `baseEnv`) - leaving the caller with a 500 and
+    // the machine with an agent nobody had been told about. The parse bug is fixed at its cause;
+    // this is the property that makes ANY later failure survivable rather than that one.
+    //
+    // Only a session THIS call started is killed. `attached: true` means the agent was already
+    // running and was somebody else's work before this request existed.
+    let session: Session | undefined;
+    try {
+      session = (await this.list()).find((s) => s.id === id);
+    } catch (error) {
+      if (!attached) await this.#undoCreate(id);
+      throw error;
+    }
     if (session === undefined) {
       // tmux accepted the create and the session is not there. Better to say so than to
       // synthesise a Session object that claims something we did not observe.
+      if (!attached) await this.#undoCreate(id);
       throw new Error(`session ${id} was created but tmux does not list it`);
     }
 
@@ -118,6 +132,23 @@ export class Registry {
               `neither understands.`,
           }
         : { session };
+  }
+
+  /**
+   * Take back a session this call just created, when the rest of the call could not finish.
+   *
+   * Not `close()`: `close()` goes through `list()`, and the reason we are here is that `list()`
+   * either threw or does not contain the session - so it would refuse the one kill that is
+   * definitely ours to make. The id is `sessionId(cwd, agent)` for an allowlisted cwd and
+   * `createOrAttach` reported it as newly created moments ago, which is the whole warrant.
+   *
+   * Best-effort: a kill that fails leaves the orphan, and the original failure is still the one
+   * worth reporting.
+   */
+  async #undoCreate(id: string): Promise<void> {
+    await this.#tmux.kill(id).catch(() => undefined);
+    this.#meta.delete(id);
+    this.#states.delete(id);
   }
 
   /**

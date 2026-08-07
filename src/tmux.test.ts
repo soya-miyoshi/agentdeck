@@ -326,7 +326,11 @@ void describe("the environment a tmux server is started with", () => {
       AWS_SECRET_ACCESS_KEY: "sk-live",
       SEKRIT: "marker",
     });
-    assert.deepEqual(Object.keys(built).sort(), ["HOME", "PATH", "TERM"]);
+    // LC_CTYPE is there because nothing on the input declared a UTF-8 locale - see `baseEnv`, and
+    // src/create-500.test.ts for what a non-UTF-8 tmux client did to `list-sessions` output.
+    assert.deepEqual(Object.keys(built).sort(), ["HOME", "LC_CTYPE", "PATH", "TERM"]);
+    assert.equal(built["LC_CTYPE"], "UTF-8");
+    assert.equal(baseEnv({ PATH: "/usr/bin", LANG: "ja_JP.UTF-8" })["LC_CTYPE"], undefined);
     assert.equal(built["SSH_AUTH_SOCK"], undefined);
     assert.equal(built["SEKRIT"], undefined);
   });

@@ -47,6 +47,8 @@ export const BASE_ENV_NAMES: readonly string[] = [
   "TERM",
   "LANG",
   "LC_ALL",
+  // LC_CTYPE is not decoration and not a nicety: see `baseEnv` below, where it is defaulted.
+  "LC_CTYPE",
   "TMPDIR",
   "USER",
   "LOGNAME",
@@ -57,6 +59,22 @@ export const BASE_ENV_NAMES: readonly string[] = [
  *
  * `TERM` has a fallback because the node process is often started from something that has none
  * (launchd, a supervisor), and a pane with no TERM renders as a dumb terminal.
+ *
+ * `LC_CTYPE` has one for a sharper reason, and it is the m0/create-500 bug: a tmux CLIENT whose
+ * locale does not say UTF-8 is not, to tmux, a UTF-8 client, and tmux sanitises the output of
+ * commands it prints to a non-UTF-8 client - every byte it considers non-printable is replaced
+ * with `_`. `list()` formats its fields with U+001F, so under a server started with no LANG and no
+ * LC_* (which is exactly what `env -i` and launchd give it) `list-sessions -F` came back as
+ * `name_0__1786113059_/path`, `line.split(SEP)` yielded ONE field, and every session parsed with
+ * the whole line as its id. Measured on tmux 3.7b with `od -c`: no locale gives `f o o _ 0`,
+ * `LC_CTYPE=UTF-8` or `LC_ALL=C.UTF-8` gives `f o o 037 0`, `LANG=C` gives `_`. That is why the
+ * same call worked from a shell (which had LANG) and failed from the server. `capture-pane -p` was
+ * checked the same way and is NOT affected - it is not printed through that path - so this is the
+ * command-output path only.
+ *
+ * Defaulted rather than forced: an operator with a real UTF-8 locale keeps theirs. Only a run that
+ * declares no UTF-8 locale at all gets one, because for that run the alternative is a parser
+ * reading mangled bytes.
  */
 export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -65,6 +83,8 @@ export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, st
     if (value !== undefined) out[name] = value;
   }
   out["TERM"] ??= "xterm-256color";
+  const utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].some((name) => /utf-?8/i.test(out[name] ?? ""));
+  if (!utf8) out["LC_CTYPE"] = "UTF-8";
   return out;
 };
 
@@ -372,6 +392,20 @@ export class Tmux {
       .split("\n")
       .filter((line) => line !== "")
       .map((line) => {
+        // Loud, not lenient. A missing separator means tmux rewrote our format's U+001F - see
+        // `baseEnv` - and the fields cannot be recovered from what is left. Reading such a line
+        // leniently is how m0/create-500 presented: `id` became the whole line, `Registry.list()`
+        // silently dropped the session, and `create` reported failure over a session that was
+        // running. A crafted session name can add separators but cannot remove them, so this can
+        // only fire on the mangling. It survives an LC_ALL the operator set to a non-UTF-8 value,
+        // which is the one case `baseEnv` cannot fix without overwriting their setting.
+        if (!line.includes(SEP)) {
+          throw new Error(
+            `tmux returned a list-sessions line with no field separator: ${JSON.stringify(line)}. ` +
+              `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
+              `set LC_ALL or LC_CTYPE to a UTF-8 locale for the process running agentdeck.`,
+          );
+        }
         const [id = "", dead = "0", status = "", created = "0", path = ""] = line.split(SEP);
         return {
           id,
