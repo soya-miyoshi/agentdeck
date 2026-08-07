@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -225,7 +233,122 @@ void describe("what the handler will and will not do", () => {
       assert.equal((await get(path)).header("x-content-type-options"), "nosniff");
     }
   });
+
+  // The socket's `Origin` check (plan 001) stops a foreign page opening a socket, but a foreign
+  // page that FRAMES this one gets there anyway: the framed document is this origin, so it reads
+  // the token and its own socket passes the check, and keystrokes typed at an invisible frame
+  // land in a live session's stdin. So the page has to refuse to be framed at all.
+  void test("no answer can be framed, and none may load or talk off-origin", async () => {
+    for (const path of ["/", "/assets/index-abc123.js", "/../private/token", "/assets/gone.js"]) {
+      const res = await get(path);
+      assert.equal(res.header("x-frame-options"), "DENY", `${path} may be framed`);
+      const csp = res.header("content-security-policy") ?? "";
+      assert.match(csp, /frame-ancestors 'none'/, `${path} has no frame-ancestors`);
+      assert.match(csp, /default-src 'self'/, `${path} has no default-src`);
+    }
+  });
 });
+
+// The two ways this process could be taken down by a request it answers correctly. Neither is a
+// traversal; both end the same way, with the deck gone and tmux sessions nobody can reach until
+// a human is at the Mac - nothing restarts it before plan 001's M4 agent.
+void describe("surviving the request path", () => {
+  // Bounded, because the failure it is written against is a request that is never answered at
+  // all - an unhandled rejection leaves the socket open forever, so without a timeout the proof
+  // is a hang rather than a failure.
+  void test(
+    "a file that vanishes mid-request is a 404, not a dead process",
+    { timeout: 30_000 },
+    async () => {
+      // `pnpm build` sets `emptyOutDir`, so every file under `dist/client` is unlinked and rewritten
+      // while the server is up. A `stat` that loses that race used to reject with nobody catching
+      // it, and Node's default for an unhandled rejection is to throw and exit.
+      const churn = join(root, "assets", "churn.js");
+      const away = join(root, "assets", "churn.away");
+      writeFileSync(churn, "export const churn = 1;\n");
+
+      let churning = true;
+      const shuffle = (async () => {
+        while (churning) {
+          try {
+            // Away for a whole turn of the loop, which is the window `pnpm build` leaves open for
+            // rather longer: a request that resolved the path before this line stats it after.
+            renameSync(churn, away);
+            await new Promise((tick) => setImmediate(tick));
+            renameSync(away, churn);
+          } catch {
+            // The rename losing its own race is not what this test is about.
+          }
+          await new Promise((tick) => setImmediate(tick));
+        }
+      })();
+
+      for (let round = 0; round < 40; round++) {
+        await Promise.allSettled(
+          Array.from({ length: 8 }, async () => await get("/assets/churn.js")),
+        );
+      }
+      churning = false;
+      await shuffle;
+
+      // If the rejection escaped, the test process is already gone and this line never runs.
+      const alive = await get("/");
+      assert.equal(alive.status, 200);
+      assert.equal(alive.header("content-type"), "text/html; charset=utf-8");
+    },
+  );
+
+  void test("an aborted download does not leak the descriptor it opened", async () => {
+    // `pipe` unpipes when the client goes away but never destroys the source, and an
+    // `fs.ReadStream` holds a raw fd with no finaliser. Every navigation away mid-load leaks one,
+    // and this route takes no bearer token, so anything on the tailnet can loop it to EMFILE.
+    const big = join(root, "assets", "big-0000.js");
+    writeFileSync(big, `export const big = "${"x".repeat(24 << 20)}";\n`);
+
+    const abort = async (): Promise<void> => {
+      await new Promise<void>((done) => {
+        const socket = connect(port, "127.0.0.1");
+        socket.on("error", () => {
+          done();
+        });
+        socket.on("connect", () => {
+          socket.write(
+            `GET /assets/big-0000.js HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`,
+          );
+          setTimeout(() => {
+            socket.destroy();
+            done();
+          }, 25);
+        });
+      });
+    };
+
+    for (let round = 0; round < 6; round++) {
+      await Promise.all(Array.from({ length: 20 }, abort));
+    }
+    // The streams are torn down asynchronously; give the loop a few turns to finish closing.
+    await new Promise((settle) => setTimeout(settle, 250));
+
+    const open = openHandlesOn(big);
+    if (open === undefined) return; // No `lsof` here; nothing to measure against.
+    assert.ok(open <= 5, `${String(open)} descriptors still open on an aborted download`);
+  });
+});
+
+/** How many descriptors this process holds on `file`, or undefined where `lsof` is not available. */
+const openHandlesOn = (file: string): number | undefined => {
+  try {
+    const out = execFileSync("lsof", ["-p", String(process.pid), "-Fn"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const name = file.slice(file.lastIndexOf("/") + 1);
+    return out.split("\n").filter((line) => line.startsWith("n") && line.endsWith(`/${name}`))
+      .length;
+  } catch {
+    return undefined;
+  }
+};
 
 void describe("API and socket routes", () => {
   void test("a 404 from the API stays a JSON 404", async () => {

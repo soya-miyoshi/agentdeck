@@ -2,6 +2,7 @@ import { createReadStream, existsSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
+import { pipeline } from "node:stream";
 
 // The one unauthenticated surface (plan 001, Authentication): the page has to load before there
 // is a token to send, so a bearer check in front of the SPA would make the paste field
@@ -59,6 +60,33 @@ const NOT_BUILT = (root: string): string =>
   `agentdeck: the client is not built, so there is no page to serve. ` +
   `Run \`pnpm build\`, which writes ${root}.`;
 
+/**
+ * On every answer, including the refusals.
+ *
+ * `frame-ancestors` is the one that matters most: the `Origin` check on the socket (plan 001)
+ * stops a foreign page opening a socket, but a foreign page that FRAMES the deck reaches the same
+ * place with a correct origin - the framed document is ours, reads the token from `localStorage`,
+ * and forwards keystrokes to a live session's stdin. `X-Frame-Options` says the same thing to
+ * anything that predates CSP. `default-src 'self'` is the containment for the other direction: the
+ * app renders agent-controlled bytes and loads nothing off-origin, so an injection in the terminal
+ * renderer has nowhere to send the token. Styles are inline because the terminal renderer writes
+ * them at runtime; images and fonts allow `data:` for the same reason.
+ */
+const SAFETY_HEADERS: Readonly<Record<string, string>> = {
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "content-security-policy":
+    "default-src 'self'; " +
+    "script-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; " +
+    "font-src 'self' data:; " +
+    "base-uri 'none'; " +
+    "object-src 'none'; " +
+    "form-action 'none'; " +
+    "frame-ancestors 'none'",
+};
+
 /** Every answer this file writes by hand rather than streams is a sentence, so the type is fixed. */
 const sendText = (
   req: IncomingMessage,
@@ -70,7 +98,7 @@ const sendText = (
   res.writeHead(status, {
     "content-type": "text/plain; charset=utf-8",
     "content-length": Buffer.byteLength(body),
-    "x-content-type-options": "nosniff",
+    ...SAFETY_HEADERS,
     ...headers,
   });
   res.end(req.method === "HEAD" ? undefined : body);
@@ -121,7 +149,15 @@ const locate = async (
   }
   if (!contains(root, real)) return { reason: "outside" };
 
-  const info = await stat(real);
+  // The file can go away between `realpath` and `stat` - `pnpm build` empties `dist/client` on
+  // every run - and an ENOENT here is the same fact as an ENOENT there: this build has no such
+  // file. Answered as a miss rather than allowed to escape as a rejection.
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(real);
+  } catch {
+    return { reason: "missing" };
+  }
   if (info.isDirectory()) return { reason: "missing" };
   if (!info.isFile()) return { reason: "outside" };
   return { file: real };
@@ -187,19 +223,30 @@ const createStaticHandler = (
       res.writeHead(200, {
         "content-type": contentTypeFor(target),
         "cache-control": cache,
-        "x-content-type-options": "nosniff",
+        ...SAFETY_HEADERS,
       });
       if (method === "HEAD") {
         res.end();
         return;
       }
-      createReadStream(target)
-        .on("error", (error) => {
+      // `pipe` unpipes on a client disconnect but never destroys the source, and an `fs.ReadStream`
+      // holds a raw descriptor with no finaliser - so every navigation away mid-load, and every
+      // aborted request from anywhere on the tailnet, used to leak one fd until EMFILE. `pipeline`
+      // destroys the source when the destination closes or errors.
+      pipeline(createReadStream(target), res, (error) => {
+        if (error !== null && error !== undefined) {
           console.error(`agentdeck: could not read ${target}:`, error);
           res.end();
-        })
-        .pipe(res);
-    })();
+        }
+      });
+    })().catch((error: unknown) => {
+      // Nothing supervises this process (plan 001, M4), so an unhandled rejection here is the deck
+      // gone until a human is at the Mac. Answered like the API's handler answers: logged, 500 if
+      // the response has not started, closed if it has.
+      console.error("agentdeck: static request failed:", error);
+      if (res.headersSent) res.end();
+      else sendText(req, res, 500, { "cache-control": "no-store" }, "internal error\n");
+    });
   };
 };
 
