@@ -780,3 +780,53 @@ property of a path this branch made reachable rather than of code it wrote.
 - **`api.ts` cannot see a 403**, so an origin misconfiguration is indistinguishable from a bad
   network. `m2/reconnect` owns the ladder and is the natural home for it.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/serve-client - final whole-codebase pass - 2026-08-08
+
+The server serves the built client from `dist/client` on every path that is not an API or socket
+route, unauthenticated by necessity. Containment is verified by resolving and then checking against
+the real root rather than by rejecting suspicious-looking strings. **Verified by hand against a
+live server:** encoded traversal (`..%2f`, `%2e%2e%2f`) is 403; unencoded traversal falls through
+to the SPA history fallback and serves index.html rather than any file; a symlink planted inside
+`dist/client` pointing at a canary outside is 403, and so is one pointing at the bearer token; and
+`/api/*` keeps answering JSON rather than becoming the HTML page.
+
+### Findings
+
+- [medium] src/server.ts:184 - Serving `dist/client` created a second dangerous location, and one
+  the allowlist rule cannot describe: everything under it goes out with no bearer token, so a
+  credential placed there is downloadable at a URL equal to its filename by any device with HTTP
+  reach and no shell. `tokenInsideAllowlist` cannot catch it - if this repo is not itself on
+  `AGENTDECK_MOUNTS` the check says nothing and the boot proceeds. The repo is also in its own blast
+  radius, so an agent session started here can write a file into the published directory and have it
+  served; confirmed by hand, a planted file returns 200 with its contents. Status: FIXED in cdf260c
+  for the credential half - the server refuses to start if the token file or the profiles file
+  resolves inside the published directory, with the same shape as the allowlist refusal. **The
+  agent-writes-into-dist half is OPEN and is a property of publishing a directory at all:** an agent
+  with write access to the checkout can publish arbitrary bytes to anyone who can reach the port.
+
+- [low] src/static.ts:195 - The unbuilt-client 503 named the absolute build path on the wire, so an
+  unauthenticated caller learned the account name, the checkout layout and the forge owner, in the
+  state the server is most likely to be probed in. Status: FIXED. The wire answer still says
+  `pnpm build`; where it writes goes to the log.
+
+- [low] src/static.ts:56 - The API routing table now lives in two files and they disagree on case
+  and encoding: `/API/health` and `/%61pi/health` return the SPA rather than the API, on a
+  case-insensitive filesystem. Nothing today is served that should not be, but any future route
+  outside `/api` is silently shadowed by the history fallback - an authenticated 401 becoming an
+  unauthenticated 200 text/html. The `/ws` entry is also a claim nothing enforces: `ws.ts` never
+  reads `req.url` and will complete an upgrade on any path. Status: OPEN.
+
+- [low] src/client/vite.config.ts:17 - The CSP and `X-Frame-Options` this branch adds are set only
+  by the production handler, so the documented dev flow - which runs against real sessions - has
+  neither. Status: OPEN.
+
+### Open after this iteration
+
+- **A directory is published, so whatever is in it is published.** The credential case is refused
+  at boot now; the general case is inherent and stated rather than solved.
+- **Two routing tables**, which is a bypass shape waiting for a route outside `/api`.
+- **`ws.ts` upgrades on any path.**
+- **Same-uid**, unchanged.
