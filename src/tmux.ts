@@ -213,9 +213,8 @@ const messageOf = (error: unknown): string => {
 //                                          socket file is absent
 //
 // The third was missed until the server was run for real, where it crashed startup instead of
-// reporting an empty list. Worth stating plainly: the plans cite behaviour "verified on 3.7b"
-// while the container ships 3.3a, so this set is observed rather than assumed, and a fourth
-// wording is likelier than not.
+// reporting an empty list. Worth stating plainly: this set is observed on the tmux 3.7b the Mac
+// actually runs rather than assumed, and a fourth wording is likelier than not.
 export const isEmptyTmux = (error: unknown): boolean =>
   /no server running|no sessions|error connecting to/i.test(messageOf(error));
 

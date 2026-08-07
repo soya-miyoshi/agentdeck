@@ -11,61 +11,61 @@ Mark an item `[x]` when its branch is merged.
 
 ## M0 — Skeleton
 
-- [x] **`m0/container`** — Dockerfile, compose, entrypoint supervisor, tmux config, healthcheck
-      script. *Done: image builds, `docker inspect` reports healthy, PID 1 is the init and not
-      node, mounted repo round-trips file ownership.*
+- [x] ~~**`m0/container`**~~ — MOOT, superseded by `m0/de-containerise`. It was built and it
+      worked; agentdeck now runs on the Mac directly and none of it is in the path.
 
 - [x] **`m0/toolchain`** — `package.json`, TypeScript config, lint, formatter, test runner.
       Nothing else; no source files beyond a placeholder.
       **Done when:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test` all pass on an
-      empty suite, inside the container.
+      empty suite, on the host toolchain.
 
 - [x] **`m0/ci`** — GitHub Actions running typecheck, lint and test on the runner directly.
-      Does **not** build the arm64 image — nothing in CI would run it.
+      Builds no artifact — nothing consumes one.
       **Done when:** a PR shows a green check, and a deliberately broken type fails it.
 
 - [x] **`m0/health-endpoint`** — the smallest HTTP server plus `GET /api/health`, answering
       `{ ok, version }` from the same event loop that will serve the app, with a hard-timed
       `tmux list-sessions` round trip and nothing else. Extend `scripts/healthcheck.mjs` to
       require both halves (its `TODO(M1)`).
-      **Done when:** `curl -s 127.0.0.1:7777/api/health` returns ok from the host; the container
-      reports healthy; and blocking the event loop with a busy loop makes it report unhealthy
-      within the configured window.
+      **Done when:** `curl -s 127.0.0.1:7777/api/health` returns ok from the host;
+      `scripts/healthcheck.mjs` exits 0 against it and non-zero with the server down; and blocking
+      the event loop with a busy loop makes it report unhealthy within the configured window.
 
-- [ ] **`m0/de-containerise`** — agentdeck runs on the Mac directly; the container is gone and the
-      documents have to say so. Plan 005 already carries its superseded header. This item makes the
-      rest true: the Docker references in plans 001/003/004/006 and README, the healthcheck's
-      container half, and the three M0 items below — `m0/dockerfile-multistage` and
-      `m0/tmux-version` are struck as moot (no image to build; the host's tmux 3.7b is the one
-      plans 001/002 already cite as verified), while `m0/supervisor-crash-test` is **not** moot and
-      must be restated rather than struck: PID 1 was what brought node back, and on the host
-      nothing does yet. Out of scope, deliberately: where the token file lives and whether the cwd
-      allowlist is now the only boundary. Both are named as open in plan 005 and are a person's
-      call.
-      **Done when:** `grep -ril docker .` over tracked files returns only the retained Dockerfile,
-      docker-compose.yml and docker/, plus plan 005 and the deleted-items note that explain why
-      they are retained; `pnpm typecheck && pnpm lint && pnpm test` pass on the host with **no**
-      skipped tests, the in-image toolchain test having been removed rather than left to self-skip;
-      `scripts/healthcheck.mjs` runs on the host and fails when the server is down; and
-      `m0/supervisor-crash-test` names what supervises node on a Mac, or says plainly that nothing
-      does until `m4/launchd-watchdog`.
+- [x] **`m0/de-containerise`** — agentdeck runs on the Mac directly; the container is gone and the
+      documents say so. Plans 001/003/004/006, the README, `mise.toml`, the `cwd` refusal and the
+      port-clash message no longer describe a container; `scripts/healthcheck.mjs` gained the
+      `/api/health` half it was missing and runs on the host; the in-image toolchain test is gone
+      rather than left to self-skip. Deliberately not decided here: where the token file lives, and
+      whether the `cwd` allowlist is now the only boundary. Both are named as open in plan 005's
+      superseded header and are a person's call.
 
-- [ ] **`m0/dockerfile-multistage`** — builder stage with `python3`/`make`/`g++`, absent from the
-      runtime stage. `node-pty` installs as `prebuild || node-gyp rebuild` and the fallback must
-      be able to succeed.
-      **Done when:** the image builds with the prebuild path *and* with it forced to fall through
-      to `node-gyp`; `require("node-pty")` loads inside the container; and `which g++` fails in
-      the runtime stage.
+- [x] ~~**`m0/dockerfile-multistage`**~~ — MOOT. There is no image to build, so there is no builder
+      stage to keep `g++` out of.
 
-- [ ] **`m0/supervisor-crash-test`** — the property M1 onwards depends on, proven rather than
-      assumed. A scripted test that kills the node process inside the container.
-      **Done when:** node comes back, the container does **not** restart, and a tmux session
-      created beforehand is still alive afterwards with the same id.
+- [ ] **`m0/supervisor-crash-test`** — the property M1 onwards depends on, and the one thing the
+      discarded PID 1 supervisor genuinely bought. **Nothing supervises the node process on this
+      Mac.** tmux is a daemon of its own, so a crash leaves every agent alive and the server gone:
+      the work survives, the phone gets nothing, and the recovery is a person opening a terminal.
+      Answering it properly is `m4/launchd-watchdog` (plan 006), which is where `launchd`,
+      `tailscale serve` and the notification all land together — so this item is the crash test
+      that proves what actually happens meanwhile, not a second supervisor.
+      **Done when:** a scripted test kills the node process, and the assertion is that tmux
+      sessions created beforehand are still alive with the same ids afterwards and reattach when
+      the server is started again — with the plain statement, in the test and in plan 003, that
+      nothing restarted it.
 
-- [ ] **`m0/tmux-version`** — the container ships 3.3a, the host 3.7b, and plans 001/002 cite the
-      host's as verified. Either pin a newer tmux in the image or re-verify in-container.
-      **Done when:** `remain-on-exit` and `window-size` defaults are confirmed against whatever
-      tmux the image actually has, and plan 002's verified-on notes name that version.
+- [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux 3.7b is
+      the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
+      observed against it.
+
+> Not a branch: **the retained deployment files.** `Dockerfile`, `docker-compose.yml` and
+> `docker/` stay on disk, unbuilt and unreferenced by anything that runs. How agentdeck is
+> eventually deployed is deliberately left open, and deleting them would decide it. Nothing in
+> `plans/`, the README or `src/` describes them as the way this runs — `plans/005-containment.md`
+> carries the superseded header explaining what the container bought and what its removal costs,
+> and it is the file to read before picking any of this up again. `audit.md` also still names
+> them: it is an append-only ledger of what each iteration found, so its entries are a record of
+> what was true then, not a claim about now, and rewriting them would be falsifying it.
 
 > Not a branch: **enable HTTPS certificates and MagicDNS in the Tailscale admin console.** One
 > minute now, a bad afternoon at M4. Both are off by default and the CLI error does not say so.
@@ -95,10 +95,10 @@ Driven from `curl` only. No client.
       session with the same id; and a session whose command has exited still lists as `exited`
       with its code.
 
-- [x] **`m1/cwds`** — the mount list as the single source for the `cwd` allowlist and
-      `GET /api/cwds`, reporting live sessions per directory.
+- [x] **`m1/cwds`** — one list as the single source for the `cwd` allowlist and `GET /api/cwds`,
+      reporting live sessions per directory.
       **Done when:** a `cwd` outside the list is refused with a sentence naming what would have to
-      change (a compose edit and a restart), not a generic 403.
+      change (`AGENTDECK_MOUNTS` and a restart), not a generic 403.
 
 - [x] **`m1/auth-token`** — token generated on first run, stored `0600`, never logged, in an
       alphabet `Sec-WebSocket-Protocol` accepts. Bearer middleware plus `Origin` check.
@@ -178,7 +178,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       does not work on this route.
 
 - [x] **`m3/claude-hook-profile`** — the settings fragment merged once and idempotently at
-      container start (not per session), session id and secret injected through the environment;
+      server start (not per session), session id and secret injected through the environment;
       event mapping with fixtures captured from real payloads.
       **Done when:** merging twice leaves the file unchanged and preserves keys it did not write;
       an unrecognised `notification_type` **within** `Notification` is actionable while an
@@ -229,11 +229,13 @@ Agent-agnostic signals first, so the generic path is the proven one.
 - [ ] **`m4/key-row`** — Esc, Tab, arrows, Enter, Ctrl.
       **Done when:** a real permission prompt is **answered** from the phone, not merely watched.
 
-- [ ] **`m4/launchd-watchdog`** — host-side, on a timer: OrbStack running, container healthy,
-      `tailscale serve` still configured, `/api/health` reachable. Climbs the ladder — node in
-      place first, container only if that did not help, then stop and notify.
-      **Done when:** killing the container's process group results in automatic recovery with a
-      notification, **and a deliberately slow-but-alive server is not restarted.**
+- [ ] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
+      reachable, `tailscale serve` still configured. Restarts the server after consecutive
+      failures, then stops and notifies rather than crash-looping. This is also what finally
+      answers `m0/supervisor-crash-test`: nothing supervises node before it.
+      **Done when:** killing the node process results in automatic recovery with a notification,
+      the tmux sessions still alive with the same ids afterwards, **and a deliberately
+      slow-but-alive server is not restarted.**
 
 ---
 

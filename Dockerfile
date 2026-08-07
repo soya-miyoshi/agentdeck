@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1
 
+# NOT IN USE. agentdeck runs on the Mac directly; nothing builds or runs this file.
+# It is kept, not deleted, because how agentdeck is eventually deployed is deliberately left
+# open and deleting it would decide that. plans/005-containment.md carries the superseded
+# header explaining what the container bought and what its removal cost; TODO.md's M0 note
+# says the same in one paragraph. Read both before picking any of this up again.
+#
 # The agentdeck runtime image: an agent CLI, tmux, and as little else as the job allows.
 #
 # arm64 only, and that is deliberate. The image is built on the Mac and used on the Mac, so

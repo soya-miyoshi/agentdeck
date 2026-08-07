@@ -93,23 +93,25 @@ evidence for why they are not negotiable.
 
 - **Absent `waiting` is a supported configuration, not a half-finished one.** That agent reports
   `working` / `idle` / `exited` and never claims `waiting`. Fewer states, never a wrong one.
-- **A hook installs into the container's agent-state store, never the host's `~/.claude`.** Plan
-  005 refuses that mount; this is the same rule seen from the other side. The fragment is merged
-  into the agent's settings inside the container and it points at the server on container
-  loopback. That store is a dedicated host directory bind-mounted in (plan 005), not a named
-  volume, so the merge writes somewhere a human can also open and edit — it must therefore
-  preserve keys it did not write rather than rewriting the file wholesale.
-- **The merge happens once, at container start, not once per session.** One container means one
-  agent-state volume means one settings file, shared by every session of that agent — so "merge at
-  session start" is concurrent writes to a file each of them is also reading, for a result that is
-  identical every time. Merge idempotently at boot. What genuinely varies per session is the
-  session id and the secret, and those arrive through the environment, which is per process and
-  needs no coordination at all.
-- **The hook command needs something in the image that can make an HTTP request.** `curl`, or
-  `node -e` if the image is to stay thin. It is one line of Dockerfile and no plan currently owns
-  it, which is how it gets discovered at M3 by a hook that silently does nothing.
+- **A hook installs into agentdeck's own agent-state directory, not blindly into the user's
+  `~/.claude`.** The directory is named by `AGENTDECK_AGENT_STATE_DIR`, falling back to
+  `CLAUDE_CONFIG_DIR`, and the hook points at the server on loopback. Whichever it is, it is a
+  directory a human also opens and edits, so the merge must preserve keys it did not write rather
+  than rewriting the file wholesale. If neither variable is set the fragment lands where the agent
+  will not read it, and a tab that promises `detectsWaiting` and never delivers it is the one
+  output this design refuses — so the server says so at boot rather than letting it be discovered
+  by waiting for a prompt that never lights up.
+- **The merge happens once, at server start, not once per session.** One agent-state directory
+  means one settings file, shared by every session of that agent — so "merge at session start" is
+  concurrent writes to a file each of them is also reading, for a result that is identical every
+  time. Merge idempotently at boot. What genuinely varies per session is the session id and the
+  secret, and those arrive through the environment, which is per process and needs no coordination
+  at all.
+- **The hook command needs something that can make an HTTP request.** `curl`, or `node -e`. On the
+  Mac both are already present, which is the one thing running on the host makes simpler rather
+  than harder.
 - **A hook must carry the session id it belongs to**, injected as an environment variable at
-  spawn. Two sessions of the same agent in the same container are otherwise indistinguishable at
+  spawn. Two sessions of the same agent are otherwise indistinguishable at
   the receiving route, and attributing one repo's `waiting` to another repo's tab is a wrong
   state, which is the one outcome this design refuses.
 - **The denylist applies at the layer it was learned at, and not above it.** MulmoTerminal's

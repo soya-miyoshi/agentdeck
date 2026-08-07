@@ -164,7 +164,7 @@ void describe("sessions", () => {
       body: JSON.stringify({ cwd: "/etc", agent: "claude" }),
     });
     assert.equal(status, 403);
-    assert.match(String(body["error"]), /docker-compose\.yml/);
+    assert.match(String(body["error"]), /AGENTDECK_MOUNTS/);
   });
 
   void test("an unknown agent is 404", async () => {

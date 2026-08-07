@@ -6,7 +6,7 @@ import { CwdAllowlist } from "./cwds.ts";
 const list = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
 
 void describe("the cwd allowlist", () => {
-  void test("allows exactly what is mounted", () => {
+  void test("allows exactly what is on the list", () => {
     assert.equal(list.allows("/workspace/agentdeck"), true);
     assert.equal(list.allows("/workspace/web"), true);
     assert.equal(list.allows("/workspace/other"), false);
@@ -34,9 +34,9 @@ void describe("the cwd allowlist", () => {
 
   void test("the refusal names what would have to change, and its cost", () => {
     const message = list.refusal("/workspace/newly-cloned");
-    assert.match(message, /docker-compose\.yml/);
-    assert.match(message, /every running session/);
-    assert.match(message, /\/workspace\/agentdeck/, "it should say what IS mounted");
+    assert.match(message, /AGENTDECK_MOUNTS/);
+    assert.match(message, /restart agentdeck/);
+    assert.match(message, /\/workspace\/agentdeck/, "it should say what IS allowed");
   });
 });
 

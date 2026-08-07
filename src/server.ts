@@ -78,9 +78,9 @@ export const main = async (): Promise<void> => {
   const port = Number(env("AGENTDECK_PORT", "7777"));
   const tokenFile = env("AGENTDECK_TOKEN_FILE", "/var/lib/agentdeck/token");
 
-  // Where a profile's relative `waiting.settings` lands: the agent-state directory, which is the
-  // container's own bind mount and never the host's ~/.claude (plan 005). For claude that is the
-  // same directory the agent reads, which is what CLAUDE_CONFIG_DIR points the agent at. The
+  // Where a profile's relative `waiting.settings` lands: agentdeck's own agent-state directory,
+  // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004). For
+  // claude that is the same directory the agent reads, which CLAUDE_CONFIG_DIR points it at. The
   // fallback is deliberately somewhere disposable: a misconfigured server should merge into a
   // file nothing reads rather than into whichever config directory it happened to guess.
   const agentStateDir = env("AGENTDECK_AGENT_STATE_DIR", env("CLAUDE_CONFIG_DIR", "/tmp"));
@@ -102,8 +102,9 @@ export const main = async (): Promise<void> => {
     );
   }
 
-  // The mount list, which is also the cwd allowlist and what the picker is served. One list with
-  // three jobs, so it has exactly one source.
+  // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
+  // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of
+  // bind mounts; the list outlived the mounts.
   const mounts = env("AGENTDECK_MOUNTS", "")
     .split(":")
     .filter((entry) => entry !== "");
@@ -131,9 +132,9 @@ export const main = async (): Promise<void> => {
     }
   }
 
-  // Once, here, and not once per session: one container has one agent-state directory and so one
-  // settings file, shared by every session of that agent. What genuinely varies per session is the
-  // id and the secret, and those go through the environment at spawn (plan 004).
+  // Once, here, and not once per session: one agent-state directory means one settings file,
+  // shared by every session of that agent. What genuinely varies per session is the id and the
+  // secret, and those go through the environment at spawn (plan 004).
   for (const profile of profiles.values()) {
     if (profile.waiting?.via !== "hook") continue;
     const settingsPath = isAbsolute(profile.waiting.settings)
@@ -153,9 +154,9 @@ export const main = async (): Promise<void> => {
   }
 
   const tmux = new Tmux({ socket });
-  // Before anything asks tmux a question. Idempotent, so it costs nothing when the container's
-  // entrypoint already did it, and it is what lets the server work standalone - without it,
-  // /api/health reports 503 at boot on any machine where nothing else started tmux first.
+  // Before anything asks tmux a question. Idempotent, so it costs nothing when a tmux server is
+  // already up, and it is what lets the server start standalone - without it, /api/health reports
+  // 503 at boot on any machine where nothing else started tmux first.
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
@@ -205,9 +206,8 @@ export const main = async (): Promise<void> => {
   server.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE") {
       console.error(
-        `agentdeck: port ${String(port)} is already in use. Another agentdeck, or the container ` +
-          `(docker compose publishes this port), or something else. Stop it, or set ` +
-          `AGENTDECK_PORT to a free port.`,
+        `agentdeck: port ${String(port)} is already in use. Another agentdeck, or something ` +
+          `else on this Mac. Stop it, or set AGENTDECK_PORT to a free port.`,
       );
       process.exit(1);
     }

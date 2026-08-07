@@ -1,12 +1,12 @@
 import { basename, resolve } from "node:path";
 
-// The mount list is one list with three jobs (plan 005): the container's bind mounts, the `cwd`
-// allowlist that POST /api/sessions validates against, and what GET /api/cwds serves to the
-// phone's new-session picker.
+// One list with two jobs: the `cwd` allowlist that POST /api/sessions validates against, and what
+// GET /api/cwds serves to the phone's new-session picker. It comes from AGENTDECK_MOUNTS, whose
+// name is older than the decision to run on the Mac directly.
 //
 // GET /api/cwds exists because the client cannot construct a valid `cwd` on its own. The
-// allowlist is knowable only to the server, and a phone user typing an absolute container path
-// into a soft keyboard is not a design.
+// allowlist is knowable only to the server, and a phone user typing an absolute path into a soft
+// keyboard is not a design.
 
 export interface Cwd {
   path: string;
@@ -29,7 +29,7 @@ export class CwdAllowlist {
    *
    * A prefix test would accept `/workspace/agentdeck/../../etc`, and resolving first is not
    * enough on its own: `/workspace/agentdeck-secrets` also starts with an allowed path. The list
-   * names the repositories that are mounted, and only those are startable.
+   * names the repositories chosen, and only those are startable.
    */
   allows(cwd: string): boolean {
     return this.paths.includes(resolve(cwd));
@@ -38,14 +38,15 @@ export class CwdAllowlist {
   /**
    * The refusal a person meets most often, so it says what would have to change rather than 403.
    *
-   * A repository cloned since the container was created is not mounted and cannot be until it is
-   * restarted - and that restart costs every running session, which is the part worth stating.
+   * A repository cloned since the server started is not on the list and cannot be until it is
+   * restarted - so the sentence names the variable to edit and says what the restart costs, which
+   * is a reconnect rather than the running sessions.
    */
   refusal(cwd: string): string {
     return (
-      `${resolve(cwd)} is not on the mount list, so no session can start there. ` +
-      `Add it to the volumes in docker-compose.yml and recreate the container - which ends every ` +
-      `running session, so pick a moment when nothing is mid-turn. Currently mounted: ` +
+      `${resolve(cwd)} is not on the allowlist, so no session can start there. ` +
+      `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running sessions ` +
+      `across that restart, so it costs a reconnect. Currently allowed: ` +
       `${this.paths.join(", ")}`
     );
   }

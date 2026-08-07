@@ -189,14 +189,13 @@ void describe("CI cannot drift from the container's pnpm", () => {
     assert.ok(corepack > setupNode, "corepack enable runs before actions/setup-node");
   });
 
-  void test("the version corepack will select is the one the image activates", async () => {
+  void test("corepack is given an exact version to select", async () => {
+    // Without the pin corepack resolves whatever `pnpm@9` means on the day, so CI and the Mac
+    // drift apart on a resolver change nobody made.
     const pkg = await readPackageJson();
     const pinned = pkg.packageManager;
     assert.ok(pinned, "package.json has no packageManager field for corepack to read");
     assert.match(pinned, /^pnpm@\d+\.\d+\.\d+$/, "packageManager must pin an exact pnpm version");
-    const dockerfile = await readFile(`${repoRoot}Dockerfile`, "utf8");
-    const activated = /corepack prepare (pnpm@\d+\.\d+\.\d+) --activate/.exec(dockerfile)?.[1];
-    assert.equal(activated, pinned, "the container and CI would run different pnpm versions");
   });
 
   void test("the runner installs from the lockfile rather than resolving afresh", async () => {
@@ -211,34 +210,24 @@ void describe("CI cannot drift from the container's pnpm", () => {
   });
 });
 
-void describe("CI does not undo what the container decisions bought", () => {
-  void test("the workflow does not build the arm64 image", async () => {
-    // Plan 003, M0: not built here because nothing in CI would then run it. A build step that
-    // creeps back in is minutes of qemu or a second runner arch per push, buying an artifact
-    // nothing consumes.
-    const workflow = await readWorkflow();
-    const steps = stepsOf(workflow);
+void describe("CI builds nothing, because nothing consumes it", () => {
+  void test("the workflow runs the suite and produces no artifact", async () => {
+    // Plan 003, M0. There is no image and no deployment artifact, so a build step that creeps
+    // back in is minutes per push buying something nothing installs.
+    const steps = stepsOf(await readWorkflow());
     for (const step of steps) {
       assert.ok(
-        !/docker\/(build-push-action|setup-buildx-action|setup-qemu-action)/.test(step.value),
-        `the workflow builds the image: ${step.value}`,
-      );
-      assert.ok(
-        !/^docker\b.*\bbuild\b/.test(step.value),
-        `the workflow builds the image: ${step.value}`,
-      );
-      assert.ok(
-        !/docker\s+compose\s+(up|build)/.test(step.value),
-        `the workflow brings up the container: ${step.value}`,
+        !/\b(image|buildx|qemu|build-push|podman|upload-artifact)\b/i.test(step.value),
+        `the workflow produces an artifact nothing consumes: ${step.value}`,
       );
     }
   });
 
-  void test("the runner's install is the only one outside the container", async () => {
-    // Plan 005: `pnpm install` on the Mac executes this repo's own agent-writable package.json and
-    // lockfile under pnpm 9, which does not gate lifecycle scripts. mise.toml and the README were
-    // moved to a container-side install for that reason, and a documented host-side install is the
-    // regression - a green CI would never notice it, because CI is the one place it is fine.
+  void test("the documented install is the host one, and it is the same one CI runs", async () => {
+    // There is nowhere else to install now: `pnpm install` runs on the Mac and executes this
+    // repo's own agent-writable package.json and lockfile under a pnpm 9 that does not gate
+    // lifecycle scripts. That is a review gate rather than a boundary, and it only works if the
+    // documents name the command a person actually types.
     const documents = {
       "mise.toml": await readFile(`${repoRoot}mise.toml`, "utf8"),
       "README.md": await readFile(`${repoRoot}README.md`, "utf8"),
@@ -247,22 +236,21 @@ void describe("CI does not undo what the container decisions bought", () => {
       const commands = text
         .split("\n")
         .map((line) => line.replace(/^[\s#>*-]*/, "").trim())
-        .filter((line) => /^(pnpm|docker)\b.*\bpnpm install\b|^pnpm install\b/.test(line));
+        .filter((line) => /^pnpm install\b/.test(line));
+      assert.ok(commands.length > 0, `${name} documents no install command`);
       for (const command of commands) {
         assert.match(
           command,
-          /^docker compose exec\b/,
-          `${name} documents a host-side install: ${command}`,
+          /^pnpm install --frozen-lockfile$/,
+          `${name} documents an install that is not the reviewed one: ${command}`,
         );
       }
     }
   });
 
   void test("CI's install is justified in the workflow rather than left to be inferred", async () => {
-    // The exception is only safe because the runner is disposable and carries no human identity.
-    // That reasoning lives next to the step, since this is the one file where the repo's stated
-    // rule is deliberately broken and a reader who does not find the reason will either copy it to
-    // the host or delete it from here.
+    // The runner is disposable and carries no human identity, which is why the same command that
+    // is a review gate on the Mac is unremarkable there. That reasoning lives next to the step.
     const workflow = await readWorkflow();
     const comments = workflow
       .split("\n")
