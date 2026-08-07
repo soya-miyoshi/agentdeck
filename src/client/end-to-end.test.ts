@@ -219,7 +219,8 @@ const drive = async (cwd: string): Promise<Driven> => {
       // thing that test exists to catch.
       verifyToken: async () => {
         try {
-          const response = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
+          const response = await fetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+            method: "POST",
             headers: { authorization: `Bearer ${token}` },
           });
           if (response.status === 401) return "rejected";

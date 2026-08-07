@@ -64,17 +64,51 @@ void describe("the server's answer to a mismatched Origin", () => {
     );
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     const port = (server.address() as AddressInfo).port;
-    const response = await realFetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
+    const response = await realFetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+      method: "POST",
       headers: { authorization: `Bearer ${token}`, origin: "http://localhost:7778" },
     });
     assert.equal(response.status, 403);
     const body = (await response.json()) as { error?: string };
     assert.equal(typeof body.error, "string", "the refusal carried no sentence to render");
+
+    // The same route, with the origin the server expects, is the plain `ok` the ladder reads.
+    const allowed = await realFetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, origin: "https://mac.tailnet.example" },
+    });
+    assert.equal(allowed.status, 200);
     await new Promise<void>((done) =>
       server.close(() => {
         done();
       }),
     );
+  });
+});
+
+void describe("the probe asks a question a browser stamps with Origin", () => {
+  void test("it is not a GET, so the server's origin check can see it", async () => {
+    // The defect this pins: a browser MUST send `Origin` on the socket upgrade and MUST NOT send
+    // it on a same-origin GET, and the page and the API are same-origin. A GET probe is therefore
+    // answered 200 by the very server whose upgrade check returned 403, `forbidden` is unreachable
+    // and the ladder runs forever. Fetch appends `Origin` to any non-GET/HEAD request, so the
+    // method is the fix and a mocked status can never catch a regression of it.
+    const seen: { url: string; method: string }[] = [];
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      seen.push({ url, method: init?.method ?? "GET" });
+      return await Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
+    assert.equal(await verifyToken(token), "ok");
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.url, "/api/probe");
+    assert.notEqual(seen[0]?.method.toUpperCase(), "GET");
+    assert.notEqual(seen[0]?.method.toUpperCase(), "HEAD");
   });
 });
 

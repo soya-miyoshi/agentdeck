@@ -29,8 +29,11 @@ export class ForbiddenError extends Error {}
  */
 export type TokenVerdict = "ok" | "rejected" | "forbidden" | "unreachable";
 
-const request = async <T>(token: string, path: string): Promise<T> => {
-  const response = await fetch(path, { headers: { authorization: `Bearer ${token}` } });
+const request = async <T>(token: string, path: string, method = "GET"): Promise<T> => {
+  const response = await fetch(path, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+  });
   if (response.status === 401) throw new UnauthorizedError("the server rejected this token");
   if (response.status === 403) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -64,10 +67,18 @@ export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
  * `"forbidden"` is separated from all of them because it is the one condition retrying cannot
  * mend, and it used to be folded into `"ok"` - so an `AGENTDECK_ORIGIN` that does not match the
  * address the page was opened from produced a client that reconnected forever with no diagnosis.
+ *
+ * It asks `POST /api/probe` rather than reading `/api/sessions`, and the method is the whole
+ * point. A browser MUST send `Origin` on a WebSocket handshake and MUST NOT send it on a
+ * same-origin GET; the page and the API are same-origin by construction, so a GET probe is
+ * answered 200 by the same server that just refused the upgrade 403, and `"forbidden"` was
+ * unreachable from a browser - the ladder ran forever and `#diagnoseSilence` then blamed a proxy
+ * that was not there. Fetch appends `Origin` to any request whose method is not GET or HEAD, so
+ * the probe now carries the same evidence the upgrade does.
  */
 export const verifyToken = async (token: string): Promise<TokenVerdict> => {
   try {
-    await fetchSessions(token);
+    await request<{ ok: true }>(token, "/api/probe", "POST");
     return "ok";
   } catch (error) {
     if (error instanceof UnauthorizedError) return "rejected";

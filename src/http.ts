@@ -128,6 +128,15 @@ export const createHandler = (deps: HttpDeps) => {
       return { status: 403, body: { error: "origin not allowed" } };
     }
 
+    // The client's "why can I not get in" question. A POST rather than a GET because that is
+    // what makes the origin check above reachable from a browser at all: a same-origin GET
+    // carries no `Origin` header, so a GET probe is answered 200 by the same server that just
+    // refused this page's socket upgrade 403. Fetch stamps `Origin` on any non-GET/HEAD request.
+    // It reads nothing and changes nothing.
+    if (method === "POST" && path === "/api/probe") {
+      return { status: 200, body: { ok: true } };
+    }
+
     if (method === "GET" && path === "/api/sessions") {
       return { status: 200, body: { sessions: await deps.registry.list() } };
     }

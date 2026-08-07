@@ -20,6 +20,7 @@ route not called by the phone authenticates differently, for reasons given under
 | `GET` | `/api/agents` | `{ agents: AgentSummary[] }` — the configured profiles |
 | `GET` | `/api/cwds` | `{ cwds: Cwd[] }` — the directories a session may be started in |
 | `GET` | `/api/health` | `{ ok: true, version }` |
+| `POST` | `/api/probe` | `{ ok: true }` — the client asking why it cannot get in |
 | `POST` | `/api/hooks/:sessionId` | `{ ok: true }` — an agent reporting its own turn boundary |
 
 ```ts
@@ -113,6 +114,21 @@ started is not on the list, and cannot be until it is restarted.
 `warning` is set whenever the new session's `cwd` already has a live session, in either of the two
 shapes above — two agents in one working tree, which is allowed but worth surfacing, or the same
 agent handed back rather than started twice (plan 004).
+
+### `POST /api/probe`
+
+Side-effect-free, authenticated, and a `POST` on purpose. It exists so the client can find out
+whether the server is refusing this page's origin — the one failure retrying cannot mend — and a
+`GET` cannot find that out. A browser attaches `Origin` to every WebSocket handshake but omits it
+from a same-origin `GET`, and the page and the API are same-origin by construction (plan 001), so
+a `GET /api/sessions` probe is answered 200 by the very server whose upgrade check just returned
+403. The verdict the client needs would never be reachable, and the ladder would run forever over
+a configuration mistake the server knows about exactly. Fetch appends `Origin` to any request
+whose method is not `GET` or `HEAD`, so the `POST` carries the same evidence the upgrade does and
+the origin check answers the same way for both.
+
+It answers `{ ok: true }` and changes nothing: it is a question about this client's admission, not
+a command.
 
 ### `POST /api/hooks/:sessionId`
 
