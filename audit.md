@@ -199,6 +199,13 @@ two are verified by hand, and three of the five ask for decisions the item put o
   `show-environment -t` prints nothing; verified by hand and by a real-tmux test. Plan 002's
   paragraph now names what this host has - the tmux read, now closed, and same-uid debugger and
   file access, which are not.
+  Reopened and closed again the same day: that fix left the same values in the tmux client's argv,
+  which `ps` shows to every same-uid process even on a macOS that hides the environment - verified
+  here with `ps -Ao args=`, so an agent polling `ps` could read the next session's secret and the
+  operator's `ANTHROPIC_API_KEY` out of a `new-session` client that lives for milliseconds. No
+  value is an argument now: they travel in the creating client's own environment and a momentary
+  `update-environment` name list, set immediately before `new-session` and emptied immediately
+  after in the same invocation, is what copies them into the session the pane is forked from.
 
 - [high] README.md:195 - The documented replacement for the container-local `node_modules` volume
   cannot see what it claims to, and a test certifies it. `git status --ignored -- node_modules
@@ -294,3 +301,34 @@ What is still open, unchanged and carried forward: **same-uid**. The server and 
 as the human, so one agent can attach a debugger to another and read every file that user owns.
 Placement, the environment allowlist and the tmux fix take away the easy reads; none of them is a
 boundary. A distinct uid for agent sessions remains the only real fix and remains untaken.
+
+## m0/host-boundary - review of the fixes above - 2026-08-07
+
+Two findings against the branch that closed the section above. Both are about the same thing: a
+claim that was true of the mechanism it was written for and not of the residue beside it.
+
+- [medium] src/tmux.ts:148 - The values taken out of the tmux SESSION environment were still in the
+  tmux CLIENT's argv, and macOS shows every process's argv to every process this user runs even
+  though it hides the environment - verified here with `ps -Ao args=`, which printed a sibling's
+  full command line. Failure: an agent sampling `ps` in a loop catches the `new-session` client
+  created for the next session and reads its `AGENTDECK_SECRET` and the operator's
+  `ANTHROPIC_API_KEY`, which is the one credential plan 004 keeps out of every file. Status: FIXED
+  in m0/host-boundary. No value is passed as an argument. They travel in the creating client's own
+  environment, and an `update-environment` name list set immediately before `new-session` and
+  emptied immediately after - in the same invocation, so the next client cannot be caught by it -
+  is what copies them into the session the pane is forked from. Covered by a test that scans every
+  argument of every call for a value, and by the existing real-tmux test for the pane's half.
+
+- [medium] README.md:142 - "Built, not inherited" bounds what a pane INHERITS and not what its own
+  shell puts back. `HOME` must be on `BASE_ENV_NAMES`, and the shipped `agents.example.json` ran
+  `/bin/zsh -l` - a login shell, which sources `/etc/zprofile`, `~/.zprofile`, `~/.zshrc` and
+  `~/.zlogin`. Failure: the `export SSH_AUTH_SOCK=...` that 1Password and `ssh-agent` both document
+  puts the forwarded agent back in every session, which is exactly the `git push --force`
+  capability the README says is gone; Claude Code is the same shape, since it execs a snapshot of
+  those rc files. Status: FIXED as far as it can be. The example profile no longer passes `-l`, and
+  the README and plan 005 now say that keeping a credential out of a session means keeping it out
+  of the dotfiles `HOME` points at. A real-tmux test spawns a login shell against a temporary
+  `ZDOTDIR` and asserts the variable does come back, so the documented residue is checked rather
+  than asserted. Not closed, because it cannot be: a profile that starts a login shell, or an agent
+  that reads rc files itself, re-establishes whatever those files export. The only real fix is the
+  one already open - a distinct uid, with its own home.

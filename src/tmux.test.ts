@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -12,17 +13,21 @@ const SEP = "\u001f";
 /** A fake tmux that records what it was asked and replays canned stdout. */
 const fake = (responses: Record<string, string | Error> = {}) => {
   const calls: string[][] = [];
+  const envs: (Record<string, string> | undefined)[] = [];
   const tmux = new Tmux({
     socket: "test",
-    exec: async (args) => {
+    exec: async (args, extra) => {
       calls.push(args);
-      const key = args[0] ?? "";
+      envs.push(extra);
+      // By membership rather than by args[0]: one invocation chains several tmux commands, and
+      // the one that names the response is not always the first of them.
+      const key = Object.keys(responses).find((name) => args.includes(name)) ?? "";
       const response = responses[key];
       if (response instanceof Error) throw response;
       return await Promise.resolve({ stdout: response ?? "", stderr: "" });
     },
   });
-  return { tmux, calls };
+  return { tmux, calls, envs };
 };
 
 /** Split one tmux invocation into the commands its `;` separators chain together. */
@@ -145,32 +150,71 @@ void describe("create or attach", () => {
   });
 
   void test("passes environment per session rather than through our own", async () => {
-    // One session's secret must never become another's.
-    const { tmux, calls } = fake({ "list-sessions": "" });
+    // One session's secret must never become another's, so it is given to the client that creates
+    // that one session and to nothing else.
+    const { tmux, calls, envs } = fake({ "list-sessions": "" });
     await tmux.createOrAttach("s", "/w", "claude", [], { AGENTDECK_SECRET: "abc" });
-    const create = calls.find((c) => c[0] === "new-session");
-    assert.ok(create?.includes("AGENTDECK_SECRET=abc"));
+    const index = calls.findIndex((c) => c.includes("new-session"));
+    assert.equal(envs[index]?.["AGENTDECK_SECRET"], "abc");
+    for (const [i, extra] of envs.entries()) {
+      if (i !== index) assert.equal(extra?.["AGENTDECK_SECRET"], undefined);
+    }
+  });
+
+  void test("no value is ever an argument, because argv is public", async () => {
+    // macOS will not show another process's environment to `ps`, and it shows every process's
+    // ARGV to everything this user runs - verified on this Mac, `ps -Ao args=` printed a sibling's
+    // full argv. With `-e NAME=VALUE`, an agent sampling `ps` in a loop caught the tmux client
+    // created for the NEXT session and read the operator's API key out of it. So the values ride
+    // the client's own environment and `update-environment` names which of them tmux copies in.
+    const { tmux, calls, envs } = fake({ "list-sessions": "" });
+    await tmux.createOrAttach("s", "/w", "claude", [], {
+      AGENTDECK_SECRET: "s3cretvalue",
+      ANTHROPIC_API_KEY: "sk-ant-live",
+    });
+    for (const call of calls) {
+      for (const arg of call) {
+        assert.doesNotMatch(arg, /s3cretvalue|sk-ant-live/, `a value reached argv: ${arg}`);
+      }
+    }
+
+    const create = calls.find((c) => c.includes("new-session"));
+    assert.ok(create, "no new-session call");
+    const commands = commandsOf(create);
+    // The name list is set before the session is created - the copy happens as tmux creates it -
+    // and emptied after, in the same invocation, so it cannot catch the next client's variables.
+    const first = commands[0] ?? [];
+    assert.deepEqual(first.slice(0, 3), ["set-option", "-g", "update-environment"]);
+    assert.deepEqual((first[3] ?? "").split(" ").sort(), ["AGENTDECK_SECRET", "ANTHROPIC_API_KEY"]);
+    assert.ok(
+      commands
+        .slice(1)
+        .some((c) => c[0] === "set-option" && c[2] === "update-environment" && c[3] === ""),
+      "update-environment is left naming the secrets",
+    );
+    const index = calls.indexOf(create);
+    assert.equal(envs[index]?.["ANTHROPIC_API_KEY"], "sk-ant-live");
   });
 
   void test("and takes every one of them back out of the session environment", async () => {
-    // `-e` reaches the pane by putting the variable in the SESSION environment, where tmux keeps
-    // it: `tmux -L <socket> show-environment -t <session>` would otherwise print the per-session
-    // hook secret, and every API key a profile passed through, to any process running as this
-    // user. tmux builds the pane's environment when new-session forks it, so unsetting in the
-    // same chained invocation takes the value from the reader and not from the agent.
+    // The copy reaches the pane by putting the variable in the SESSION environment, where tmux
+    // keeps it: `tmux -L <socket> show-environment -t <session>` would otherwise print the
+    // per-session hook secret, and every API key a profile passed through, to any process running
+    // as this user. tmux builds the pane's environment when new-session forks it, so unsetting in
+    // the same chained invocation takes the value from the reader and not from the agent.
     const { tmux, calls } = fake({ "list-sessions": "" });
     await tmux.createOrAttach("s", "/w", "claude", [], {
       AGENTDECK_SECRET: "abc",
       ANTHROPIC_API_KEY: "sk-live",
       AGENTDECK_SESSION_ID: "s",
     });
-    const create = calls.find((c) => c[0] === "new-session");
+    const create = calls.find((c) => c.includes("new-session"));
     assert.ok(create, "no new-session call");
 
     // One invocation, not a follow-up call: a second call is a window in which the secret is
     // readable, and a crash between the two would leave it there for the session's life.
     assert.equal(
-      calls.filter((c) => c[0] === "new-session" || c[0] === "set-environment").length,
+      calls.filter((c) => c.includes("new-session") || c.includes("set-environment")).length,
       1,
     );
     const unset = commandsOf(create)
@@ -418,5 +462,97 @@ void describe("what a real tmux server hands a real pane", () => {
       delete process.env["SEKRIT_MARKER"];
       delete process.env["SSH_AUTH_SOCK"];
     }
+  });
+
+  void test("a login shell in the pane puts the operator's dotfiles back", async () => {
+    // The claim "built, not inherited" is about what a pane INHERITS. `HOME` has to be on the
+    // list, so a login shell reads the dotfiles it points at and re-exports whatever they export -
+    // and `export SSH_AUTH_SOCK=...` in `~/.zprofile` is what 1Password and `ssh-agent` both
+    // document. This is why `agents.example.json` no longer passes `-l`, and why the README says
+    // the residue out loud instead of claiming the variable cannot come back.
+    const home = mkdtempSync(join(tmpdir(), `agentdeck-home-${String(process.pid)}-`));
+    const login = `${out}-login`;
+    const plain = `${out}-plain`;
+    const wait = async (file: string) => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          const text = readFileSync(file, "utf8");
+          if (text !== "") return text;
+        } catch {
+          // Not written yet.
+        }
+      }
+      return "";
+    };
+    try {
+      writeFileSync(join(home, ".zprofile"), "export SSH_AUTH_SOCK=/tmp/from-dotfile.sock\n");
+      await tmux.ensureServer();
+
+      // HOME and ZDOTDIR ride the same per-session channel a profile's `env` does, so this reads
+      // the temporary dotfile and never the operator's own.
+      const dotfiles = { HOME: home, ZDOTDIR: home };
+      await tmux.createOrAttach(
+        "loginprobe",
+        tmpdir(),
+        "/bin/zsh",
+        ["-l", "-c", `env > ${login}; sleep 5`],
+        dotfiles,
+      );
+      assert.match(
+        await wait(login),
+        /^SSH_AUTH_SOCK=\/tmp\/from-dotfile\.sock$/m,
+        "a login shell was expected to source the dotfiles - if it no longer does, the README and " +
+          "plan 005 are now understating what a session gets, not overstating it",
+      );
+
+      // And the shape the example ships: same shell, same dotfiles, no `-l`.
+      await tmux.createOrAttach(
+        "plainprobe",
+        tmpdir(),
+        "/bin/zsh",
+        ["-c", `env > ${plain}; sleep 5`],
+        dotfiles,
+      );
+      assert.doesNotMatch(await wait(plain), /^SSH_AUTH_SOCK=/m);
+    } finally {
+      rmSync(home, { force: true, recursive: true });
+      rmSync(login, { force: true });
+      rmSync(plain, { force: true });
+    }
+  });
+});
+
+void describe("what a session's shell puts back, which the name list does not bound", () => {
+  const repoRoot = new URL("../", import.meta.url);
+  const readDoc = async (name: string) => await readFile(new URL(name, repoRoot), "utf8");
+
+  void test("the shipped shell profile does not start a login shell", async () => {
+    // `-l` sources `/etc/zprofile`, `~/.zprofile`, `~/.zshrc` and `~/.zlogin`, and the setup
+    // 1Password documents puts `SSH_AUTH_SOCK` in one of them - which hands the session the
+    // forwarded ssh-agent the README says it does not have.
+    const example = JSON.parse(await readDoc("agents.example.json")) as Record<
+      string,
+      { args?: string[] }
+    >;
+    for (const [id, profile] of Object.entries(example)) {
+      for (const arg of profile.args ?? []) {
+        assert.notEqual(arg, "-l", `profile ${id} starts a login shell`);
+        assert.notEqual(arg, "--login", `profile ${id} starts a login shell`);
+      }
+    }
+  });
+
+  void test("the README says the bound is on inheritance, not on what an rc file re-exports", async () => {
+    // The sentence that was wrong: "Nothing else from the shell that ran `pnpm start` reaches it"
+    // read as "SSH_AUTH_SOCK cannot reach a session", which the operator's own dotfiles disprove.
+    const readme = await readDoc("README.md");
+    assert.match(readme, /dotfiles/i, "the README does not mention dotfiles at all");
+    const paragraph = readme.slice(readme.indexOf("built, not inherited"));
+    assert.match(
+      paragraph.slice(0, 1200),
+      /dotfiles `HOME` points at/,
+      "the README does not say that a credential in the dotfiles reaches the session anyway",
+    );
   });
 });

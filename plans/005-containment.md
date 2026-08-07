@@ -63,7 +63,17 @@
 > marker variable, which made plan 004's `env` name allowlist decorative and handed every agent
 > the forwarded ssh-agent, and with it `git push --force` to every repository that key reaches.
 > A pane now gets a named list (`BASE_ENV_NAMES` in `src/tmux.ts`) plus what the profile asks for,
-> and `update-environment` is emptied so no tmux client can inject through an attach.
+> and `update-environment` is emptied between creations so no tmux client can inject through an
+> attach.
+>
+> What that bounds is what a pane INHERITS, and not what its own shell re-establishes. `HOME` is
+> necessarily on the list, so a login or interactive shell reads the operator's dotfiles: an
+> `export SSH_AUTH_SOCK=...` in `~/.zprofile` — 1Password's and `ssh-agent`'s documented setup —
+> hands the forwarded agent back to every such session, and to every command Claude Code runs,
+> since it execs a snapshot of those same rc files. The shipped `agents.example.json` no longer
+> starts `/bin/zsh -l` for that reason, and the README says plainly that keeping a credential out
+> of a session means keeping it out of the dotfiles `HOME` points at. This server cannot enforce
+> that, and does not claim to.
 >
 > **What macOS does instead of `/proc`.** This plan and plan 002 both described one agent reading
 > another's `/proc/<pid>/environ`. macOS has no `/proc`, and `ps` will not show another process's
@@ -71,7 +81,10 @@
 > `new-session` stores a variable in the tmux SESSION environment, and
 > `tmux -L <socket> show-environment -t <session>` printed the per-session hook secret and every
 > profile-passed API key to any process running as this user. Closed on 2026-08-07 by unsetting
-> those variables from the session environment in the same invocation that creates the pane. What
+> those variables from the session environment in the same invocation that creates the pane — and,
+> the same day, by taking the values off the command line entirely, since `ps` does show every
+> process's argv even where it hides the environment. They now ride the creating tmux client's own
+> environment, named by a momentary `update-environment` list. What
 > remains, and is not closed: same uid means one agent can attach a debugger to another's process,
 > and can read every file this user owns — including another agent's transcripts and any
 > credentials on disk. The only fix remains a distinct uid for agent sessions, which is not taken.

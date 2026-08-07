@@ -18,7 +18,10 @@ const fakeTmux = () => {
   return new Tmux({
     socket: "test",
     exec: async (args) => {
-      const [verb, ...rest] = args;
+      // The interesting command is not always first: a create is preceded by the
+      // `set-option -g update-environment <names>` that keeps the values out of argv.
+      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => args.includes(n));
+      const rest = verb === undefined ? args : args.slice(args.indexOf(verb) + 1);
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]

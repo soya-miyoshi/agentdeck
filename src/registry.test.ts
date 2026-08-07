@@ -20,7 +20,12 @@ const fakeTmux = () => {
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
-      const [verb, ...rest] = args;
+      // One invocation chains several tmux commands and the interesting one is not always first -
+      // a create is preceded by the `set-option -g update-environment <names>` that carries the
+      // session's secrets in the client environment rather than in argv.
+      const verbAt = (name: string) => args.indexOf(name);
+      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => verbAt(n) !== -1);
+      const rest = verb === undefined ? args : args.slice(verbAt(verb) + 1);
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]

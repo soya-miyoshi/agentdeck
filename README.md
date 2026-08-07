@@ -144,6 +144,16 @@ A session's own environment is **built, not inherited**: a pane gets `PATH`, `HO
 lists in `env`. Nothing else from the shell that ran `pnpm start` reaches it — `SSH_AUTH_SOCK`
 above all, since a forwarded ssh-agent is `git push --force` to every repository that key reaches.
 
+**What that bounds is what a pane INHERITS, and not what its own shell puts back.** `HOME` has to
+be on the list, so a login or interactive shell in the pane reads the operator's dotfiles and
+re-exports whatever they export. If `~/.zprofile` sets `SSH_AUTH_SOCK` to the 1Password or
+`ssh-agent` socket — the setup those tools document — then every shell started under it has the
+forwarded agent again, and so does every command Claude Code runs, since it execs a login-shell
+snapshot of the same rc files. The shipped `agents.example.json` therefore starts `/bin/zsh` with
+no `-l`, but that only covers the profile we ship: keeping a credential out of a session means
+keeping it out of the dotfiles `HOME` points at, and there is no way for this server to enforce
+that.
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of

@@ -105,27 +105,42 @@ const SEP = "\u001f";
 
 export interface TmuxOptions {
   socket: string;
-  /** Injected so tests can drive the parser without a tmux server. */
-  exec?: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Injected so tests can drive the parser without a tmux server.
+   *
+   * `extra` is the second argument because the values a session needs travel in the CLIENT's
+   * environment rather than in its argv - see `createOrAttach`.
+   */
+  exec?: (
+    args: string[],
+    extra?: Record<string, string>,
+  ) => Promise<{ stdout: string; stderr: string }>;
 }
 
 export class Tmux {
   readonly socket: string;
-  #exec: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
+  #exec: (
+    args: string[],
+    extra?: Record<string, string>,
+  ) => Promise<{ stdout: string; stderr: string }>;
 
   constructor(options: TmuxOptions) {
     this.socket = options.socket;
     this.#exec =
       options.exec ??
-      (async (args) =>
+      (async (args, extra) =>
         // `env` rather than the inherited one, and this is the load-bearing half of it: the tmux
         // SERVER is a child of whichever of these calls starts it, so its global environment -
-        // which every pane inherits - is this object.
-        await run("tmux", ["-L", this.socket, ...args], { encoding: "utf8", env: baseEnv() }));
+        // which every pane inherits - is this object. `extra` is what a single session is given
+        // on top of it, and it is here rather than on the command line because argv is public.
+        await run("tmux", ["-L", this.socket, ...args], {
+          encoding: "utf8",
+          env: { ...baseEnv(), ...extra },
+        }));
   }
 
-  async #tmux(args: string[]): Promise<string> {
-    const { stdout } = await this.#exec(args);
+  async #tmux(args: string[], extra?: Record<string, string>): Promise<string> {
+    const { stdout } = await this.#exec(args, extra);
     return stdout;
   }
 
@@ -142,21 +157,31 @@ export class Tmux {
   ): Promise<{ attached: boolean }> {
     const existed = await this.has(id);
     if (!existed) {
-      // -d so creating a session does not attach this process to it. Environment is passed with
-      // repeated -e rather than through our own environment, so one session's secret never
-      // becomes another's.
-      const envArgs = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-      // ...and then taken straight back out of the session environment, which is the only reason
-      // these three run as one invocation.
+      // -d so creating a session does not attach this process to it. The VALUES never appear in
+      // an argument, and that is the point of the shape below.
       //
-      // `-e` puts a variable in the SESSION environment, and tmux keeps it there: any same-uid
-      // process could then read the per-session hook secret and every profile-passed API key with
-      // `tmux -L <socket> show-environment -t <session>`. No ptrace, no debugger, and on macOS no
-      // `/proc/<pid>/environ` either - `ps` does not show another process's environment. tmux
-      // builds the pane's environment when the pane is forked, which new-session has already done
-      // by the time set-environment runs, so unsetting afterwards takes the value away from the
-      // reader and not from the agent. Verified by hand on tmux 3.7b: the pane saw the secret,
-      // `show-environment -t` did not.
+      // `-e NAME=VALUE` was the obvious way, and it lost the values twice over. Once because `-e`
+      // puts the variable in the SESSION environment, where tmux keeps it, so any same-uid process
+      // could read the per-session hook secret and every profile-passed API key with
+      // `tmux -L <socket> show-environment -t <session>`. And once because a command line is
+      // public: macOS will not show another process's ENVIRONMENT to `ps`, but it shows every
+      // process's ARGV to every process this user runs - verified on this Mac, `ps -Ao args=`
+      // printed a sibling's full argv - so a session created while another agent polls `ps` hands
+      // that agent the operator's API key. The tens of milliseconds the tmux client lives are
+      // enough.
+      //
+      // So the values go in the tmux CLIENT's own environment (below, as the second argument to
+      // #tmux), and `update-environment` names which of them tmux copies into the new session.
+      // That copy happens as the session is created, and the pane is forked from it, so the agent
+      // gets the values; the same chained invocation then empties the name list again and unsets
+      // each variable from the session environment, so the reader gets nothing. One invocation
+      // because a second call is a window in which both are readable. Verified by hand on tmux
+      // 3.7b: the pane saw the value, `show-environment -t` was empty, and `ps` showed only names.
+      const names = Object.keys(env);
+      const updateArgs =
+        names.length > 0
+          ? ["set-option", "-g", "update-environment", names.join(" "), ";"]
+          : ([] as string[]);
       const unsetArgs = Object.keys(env).flatMap((k) => [
         ";",
         "set-environment",
@@ -165,37 +190,53 @@ export class Tmux {
         "-u",
         k,
       ]);
-      // The whole invocation is wrapped, because node puts the full argv into the rejection
-      // message of a failed execFile - and the argv here carries the per-session hook secret and
-      // every profile-passed API key as `-e NAME=VALUE`. That message reaches the client verbatim
-      // through the generic 500 in `createHandler`, so it must not contain a value in the first
-      // place. Any non-zero exit does it: a socket tmux refuses to connect to, a fork failure, or
-      // a failure in the chained set-option/set-environment, since chaining fails the whole call.
+      // The whole invocation is wrapped anyway: node puts the full argv into the rejection message
+      // of a failed execFile, tmux's own stderr can quote a value back, and that message reaches
+      // the client verbatim through the generic 500 in `createHandler`. Any non-zero exit does it:
+      // a socket tmux refuses to connect to, a fork failure, or a failure in the chained
+      // set-option/set-environment, since chaining fails the whole call.
       try {
-        await this.#tmux([
-          "new-session",
-          "-d",
-          "-A",
-          "-s",
-          id,
-          "-c",
-          cwd,
-          ...envArgs,
-          "--",
-          command,
-          ...args,
-          // Set per session rather than relying on a global: a session created by a human by hand
-          // must behave the same as one the server made, and the server cannot assume its own
-          // tmux.conf reached a server someone else started.
-          ";",
-          "set-option",
-          "-t",
-          exactWindowTarget(id),
-          "remain-on-exit",
-          "on",
-          ...unsetArgs,
-        ]);
+        await this.#tmux(
+          [
+            ...updateArgs,
+            "new-session",
+            "-d",
+            "-A",
+            "-s",
+            id,
+            "-c",
+            cwd,
+            "--",
+            command,
+            ...args,
+            // Set per session rather than relying on a global: a session created by a human by
+            // hand must behave the same as one the server made, and the server cannot assume its
+            // own tmux.conf reached a server someone else started.
+            ";",
+            "set-option",
+            "-t",
+            exactWindowTarget(id),
+            "remain-on-exit",
+            "on",
+            // Back to empty in the same breath: the name list is for this one creation, and a
+            // list left standing would copy the NEXT client's variables of those names into the
+            // next session.
+            ";",
+            "set-option",
+            "-g",
+            "update-environment",
+            "",
+            ...unsetArgs,
+          ],
+          env,
+        );
       } catch (error) {
+        // The chain aborts where it failed, so the name list can be left standing. Emptying it is
+        // best-effort: if this fails too, the create already failed and the original error is the
+        // one worth reporting.
+        if (names.length > 0) {
+          await this.#tmux(["set-option", "-g", "update-environment", ""]).catch(() => undefined);
+        }
         throw new Error(redactSecrets(messageOf(error), Object.values(env)));
       }
     }

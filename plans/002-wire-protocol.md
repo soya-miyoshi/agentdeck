@@ -138,10 +138,20 @@ matters, because the Linux one being absent reads like the hazard being absent:
   user. No debugger, no privileged call. Closed on 2026-08-07: `src/tmux.ts` unsets those
   variables from the session environment in the same invocation that forks the pane, which leaves
   the value with the agent and takes it from the reader.
+- **What that first fix left behind, and is also closed.** Removing a value from the session
+  environment did nothing about the `-e NAME=VALUE` still sitting in the tmux client's *argv*, and
+  macOS hides another process's environment from `ps` while showing it every process's argv —
+  verified here, `ps -Ao args=` printed a sibling's full command line. An agent sampling `ps` in a
+  loop needed only the tens of milliseconds a `new-session` client lives to read the next session's
+  secret and the operator's API key. Closed the same day: no value is passed as an argument at
+  all. They travel in the creating client's own environment, and a `update-environment` name list —
+  set immediately before `new-session` and emptied immediately after, in the same invocation — is
+  what copies them into the session tmux then forks the pane from.
 - **What still exists.** Same uid means one agent can attach a debugger to another agent's
   process, and can read every file this user owns — the other sessions' transcripts, and whatever
   credentials are on disk. macOS will not show another process's environment to `ps`, which makes
-  this harder than `cat /proc/<pid>/environ`; it does not make it a boundary.
+  this harder than `cat /proc/<pid>/environ`; it does not make it a boundary. It also says nothing
+  about argv, which `ps` does show — hence the bullet above.
 
 So the secret bounds what a *remote* caller can do with a stolen one; it bounds nothing between
 two agents on the same machine, and plan 005 is explicit about why no such boundary exists.
