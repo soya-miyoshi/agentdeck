@@ -132,9 +132,12 @@ void describe("the settings fragment", () => {
     // secret in the environment and a stand-in on PATH that writes down the argv it was given.
     const dir = mkdtempSync(join(tmpdir(), "agentdeck-argv-"));
     const argvFile = join(dir, "argv");
-    writeFileSync(join(dir, "node"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${argvFile}\n`);
-    chmodSync(join(dir, "node"), 0o755);
-    execFileSync("/bin/sh", ["-c", command], {
+    const stub = join(dir, "node");
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > ${argvFile}\n`);
+    chmodSync(stub, 0o755);
+    // The emitted command names an absolute interpreter, so a PATH shim no longer intercepts:
+    // the stub is passed in as the interpreter instead.
+    execFileSync("/bin/sh", ["-c", hookCommand(7777, stub)], {
       env: {
         PATH: dir,
         AGENTDECK_SESSION_ID: "s1",
@@ -143,6 +146,34 @@ void describe("the settings fragment", () => {
     });
     const argv = readFileSync(argvFile, "utf8");
     assert.ok(!argv.includes("s3cret-value"), `secret leaked into argv: ${argv}`);
+  });
+
+  void test("runs the interpreter by absolute path, so a minimal PATH still posts", () => {
+    const command = hookCommand(7777);
+    // A bare `node` resolves against the session's PATH, which is the server's own. Under launchd
+    // that is /usr/bin:/bin:/usr/sbin:/sbin, where no Homebrew/mise/nvm node exists - every hook
+    // would die with `command not found` and `exit 0` would hide it.
+    assert.doesNotMatch(command, /(?:^|[\s;])node -e/);
+    assert.ok(
+      command.includes(`'${process.execPath}' -e`),
+      `expected the running node's absolute path in: ${command}`,
+    );
+
+    // Not by reading the string: run it through a shell with a PATH that has no node at all, and
+    // an interpreter stub reachable only by absolute path.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-abs-"));
+    const marker = join(dir, "ran");
+    const stub = join(dir, "interp");
+    writeFileSync(stub, `#!/bin/sh\nprintf ok > ${marker}\n`);
+    chmodSync(stub, 0o755);
+    execFileSync("/bin/sh", ["-c", hookCommand(7777, stub)], {
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", AGENTDECK_SESSION_ID: "s1" },
+    });
+    assert.equal(readFileSync(marker, "utf8"), "ok");
+  });
+
+  void test("refuses a bare interpreter name rather than emitting one", () => {
+    assert.throws(() => hookCommand(7777, "node"), /absolute path/);
   });
 
   void test("merges once and idempotently, preserving keys it did not write", () => {

@@ -149,10 +149,21 @@ export const HOOK_MARKER = "/api/hooks/";
  * argv - unlike the environment - is readable from any process running as this user
  * (`ps -Ao args=`). A hook fires dozens of times a turn, so that would broadcast the secret
  * continuously for the life of the session. Node reads it out of its own environment instead, so
- * no value ever reaches an argument. Plan 004 sanctions either transport and both are present on
- * the Mac; nothing new is depended on.
+ * no value ever reaches an argument.
+ *
+ * The interpreter is written out as the ABSOLUTE path of the node this server is running on, not
+ * the bare name `node`. The curl form it replaced needed no PATH beyond `/usr/bin`; a bare `node`
+ * does, and a session started from launchd or any at-boot wrapper gets a minimal PATH with no
+ * Homebrew/mise/nvm node on it. Every hook would then die with `node: command not found`, the
+ * trailing `exit 0` would swallow it, and the strip would silently stop reporting waiting sessions.
+ * `installHookSettings` rewrites the file at every boot, so a moved or rebuilt node self-heals on
+ * the next start.
  */
-export const hookCommand = (port: number): string => {
+export const hookCommand = (port: number, interpreter: string = process.execPath): string => {
+  if (!interpreter.startsWith("/")) {
+    throw new Error(`hook interpreter must be an absolute path, got ${interpreter}`);
+  }
+  const quoted = `'${interpreter.split("'").join(`'\\''`)}'`;
   const script =
     `let b="";` +
     `process.stdin.on("data",(c)=>{b+=c}).on("end",()=>{` +
@@ -164,7 +175,8 @@ export const hookCommand = (port: number): string => {
     `"Content-Type":"application/json"}},(res)=>{res.resume()});` +
     `r.on("error",()=>{});r.on("timeout",()=>{r.destroy()});r.end(b)})`;
   return (
-    `[ -n "$AGENTDECK_SESSION_ID" ] || exit 0; ` + `node -e '${script}' >/dev/null 2>&1; exit 0`
+    `[ -n "$AGENTDECK_SESSION_ID" ] || exit 0; ` +
+    `${quoted} -e '${script}' >/dev/null 2>&1; exit 0`
   );
 };
 
