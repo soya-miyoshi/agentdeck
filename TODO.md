@@ -42,29 +42,29 @@ Mark an item `[x]` when its branch is merged.
 - [x] ~~**`m0/dockerfile-multistage`**~~ — MOOT. There is no image to build, so there is no builder
       stage to keep `g++` out of.
 
-- [ ] **`m0/create-500`** — **`POST /api/sessions` answers 500 on a real server run, and leaks the
-      session it just made.** Found by hand while verifying `m0/supervisor-crash-test`, reproduced
-      on `main` before that branch, so it arrived with `m0/host-boundary` and no test caught it:
-      every unit test drives a fake tmux, and that branch's own verification demonstrated boot and
-      the token refusal but never a create.
-      **Reproduction, on `main`:** start the server against a scratch allowlist entry
-      (`env -i PATH=… HOME=<empty> TERM=xterm-256color TMUX_SOCKET=… AGENTDECK_PORT=… `
-      `AGENTDECK_MOUNTS=<repo> AGENTDECK_PROFILES=<file> node --experimental-strip-types
-    src/server.ts`) and `POST /api/sessions`. The response is the generic 500; the log says
-      `session <id> was created but tmux does not list it`; `tmux -L <socket> list-sessions` shows
-      the session alive at the right path. So the phone gets an error and the machine gets an
-      orphaned agent — the confidently-wrong output this design refuses, in its worst direction.
-      **What is known:** instrumenting `Registry.list()` shows the entry arriving with `id` set to
-      the ENTIRE unsplit `list-sessions -F` line (`<id>\x1f0\x1f\x1f<created>\x1f<path>`), so
-      `#meta.get(entry.id)` misses and the session is filtered out. `SEP` is `U+001F`
-      (`src/tmux.ts:104`), and tmux 3.7b does emit it intact — verified with `od -c` under both a
-      clean and the operator's `HOME`. The same `Registry.create` call against the same tmux
-      binary succeeds when driven from a standalone script, so the trigger is something about the
-      server process rather than the parser in isolation. **Not root-caused. Do not guess: find
-      why `line.split(SEP)` yields one field there and five here.**
-      **Done when:** a test that drives the REAL tmux through `POST /api/sessions` — not a fake —
-      goes red on today's code and green after; the endpoint returns 201; and no orphan is left on
-      the socket when a create fails for any other reason.
+- [x] **`m0/create-500`** - **`POST /api/sessions` answered 500 on a real server run, and left the
+      session it had just made.** Found by hand while verifying `m0/supervisor-crash-test`, arrived
+      with `m0/host-boundary`, and no unit test caught it because every unit test drives a fake
+      tmux.
+      **Root cause, measured rather than guessed - and it is NOT what this item first sketched.**
+      It was not concurrency, not a chained invocation's stdout reaching the wrong caller, and not
+      the `show-environment` sweep. tmux sanitises the output of commands it prints, replacing
+      every byte it considers non-printable with `_`, unless the CLIENT's own locale
+      (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-8. `Tmux.list()` separates its `-F` fields with U+001F,
+      and `baseEnv` copied `LANG`/`LC_ALL` only when the launching process had them - so a server
+      started under `env -i`, which the reproduction was and which is what launchd hands a job,
+      ran every tmux command as a non-UTF-8 client. `list-sessions` came back as
+      `id_0__1786113059_/path`, `line.split(SEP)` yielded ONE field, `entry.id` was the whole line,
+      `#meta.get(entry.id)` missed, and `Registry.list()` dropped the session. The standalone
+      script worked because the shell that ran it had `LANG`. Verified on tmux 3.7b with `od -c`:
+      no locale and `LANG=C` give `_`; `LC_CTYPE=UTF-8` and `LC_ALL=C.UTF-8` give the byte intact.
+      `capture-pane -p` was checked the same way and is unaffected.
+      **Fixed** in `baseEnv` (`LC_CTYPE=UTF-8` defaulted only when no UTF-8 locale is declared, so
+      an operator's own locale is kept), with `Tmux.list()` now refusing a separator-less line
+      loudly instead of reading it, and `Registry.create` killing a session it created when
+      anything after the create fails - so no failure of any kind leaves an orphan. Covered by
+      `src/create-500.test.ts`, which drives the real tmux through the real endpoint from a server
+      process started with no locale variable at all.
 
 - [x] **`m0/supervisor-crash-test`** — the property M1 onwards depends on, and the one thing the
       discarded PID 1 supervisor genuinely bought. **Nothing supervises the node process on this

@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { CwdNotAllowedError, Registry, UnknownAgentError } from "./registry.ts";
+import { sessionId } from "./session-id.ts";
 import { Tmux } from "./tmux.ts";
 
 const SEP = "\u001f";
@@ -14,9 +15,16 @@ const SEP = "\u001f";
  */
 type FakeSessions = Map<string, { dead: boolean; status: string; created: number; path: string }>;
 
+// `list-throws` and `list-omits` are the two ways the call after a create can fail (m0/create-500):
+// tmux not answering at all, and tmux answering without the session that was just made.
+type FakeMode = "ok" | "list-throws" | "list-omits";
+
+const NO_SESSIONS: FakeSessions = new Map();
+
 // The map is a parameter so a second Tmux can be built over the SAME socket state, which is what
 // a server restart is: the sessions outlive the process that remembered anything about them.
 const fakeTmux = (sessions: FakeSessions = new Map()) => {
+  let mode: FakeMode = "ok";
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
@@ -24,11 +32,27 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
       // a create is preceded by the `set-option -g update-environment <names>` that carries the
       // session's secrets in the client environment rather than in argv.
       const verbAt = (name: string) => args.indexOf(name);
-      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => verbAt(n) !== -1);
+      const verb = ["list-sessions", "new-session", "kill-session", "display-message"].find(
+        (n) => verbAt(n) !== -1,
+      );
       const rest = verb === undefined ? args : args.slice(verbAt(verb) + 1);
+      // `#undoCreate` confirms with display-message rather than with `list()`, because it runs
+      // exactly when `list()` has failed. `list-omits` is about what the LIST reports, so this
+      // still answers - the session is on the socket either way, which is the point of the check.
+      if (verb === "display-message") {
+        const target = (rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, "").replace(/:$/, "");
+        const found = sessions.get(target);
+        if (found === undefined) throw Object.assign(new Error("x"), { stderr: "can't find pane" });
+        return await Promise.resolve({
+          stdout: `${found.path}\u001f${String(found.created)}\n`,
+          stderr: "",
+        });
+      }
       if (verb === "list-sessions") {
-        if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
-        const out = [...sessions.entries()]
+        if (mode === "list-throws") throw new Error("tmux is not answering this call");
+        const shown = mode === "list-omits" ? NO_SESSIONS : sessions;
+        if (shown.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
+        const out = [...shown.entries()]
           .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, String(s.created), s.path].join(SEP))
           .join("\n");
         return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
@@ -36,7 +60,20 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
       if (verb === "new-session") {
         const id = rest[rest.indexOf("-s") + 1] ?? "";
         const path = rest[rest.indexOf("-c") + 1] ?? "";
-        sessions.set(id, { dead: false, status: "", created: 1_700_000_000, path });
+        // `-A` is attach-if-exists, so a name already on the socket keeps its session and its
+        // creation time rather than being replaced. Modelling that is what lets a test put a
+        // session under our name and check the undo does not kill it.
+        //
+        // A genuinely new one is stamped now, not at a fixed past instant: `#undoCreate` refuses
+        // to kill a session tmux reports as older than the create it is undoing.
+        if (!sessions.has(id)) {
+          sessions.set(id, {
+            dead: false,
+            status: "",
+            created: Math.floor(Date.now() / 1000),
+            path,
+          });
+        }
       }
       if (verb === "kill-session") {
         // The real tmux resolves `=name` as an exact match and anything else by prefix or
@@ -55,17 +92,20 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
   const plant = (id: string, path: string) => {
     sessions.set(id, { dead: false, status: "", created: 1_700_000_000, path });
   };
-  return { tmux, sessions, die, plant };
+  const fail = (next: FakeMode): void => {
+    mode = next;
+  };
+  return { tmux, sessions, die, plant, fail };
 };
 
 const build = () => {
-  const { tmux, sessions, die, plant } = fakeTmux();
+  const { tmux, sessions, die, plant, fail } = fakeTmux();
   const { profiles } = parseProfiles({
     claude: { command: "/bin/sh", name: "Claude Code" },
     gemini: { command: "/bin/sh", name: "Gemini CLI" },
   });
   const allowlist = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
-  return { registry: new Registry(tmux, profiles, allowlist), sessions, die, plant };
+  return { registry: new Registry(tmux, profiles, allowlist), sessions, die, plant, fail };
 };
 
 void describe("creating sessions", () => {
@@ -284,5 +324,78 @@ void describe("the allowlist is matched against where tmux says a session is", (
     const { registry } = build();
     await registry.create("/workspace/web", "claude");
     assert.equal((await registry.list())[0]?.cwd, "/workspace/web");
+  });
+});
+
+// m0/create-500's second property, over the modelled tmux: a create that cannot finish takes back
+// the session it made. The real-binary version of this lives in src/create-500.test.ts; these are
+// the branches that are hard to provoke against a real tmux - a list that succeeds but omits the
+// session, and the attach path, where killing would destroy somebody else's running agent.
+void describe("a create that cannot finish leaves no orphan", () => {
+  void test("the session is killed when the list after the create throws", async () => {
+    // The shape of the reported bug, minus its cause: tmux made the session, the call could not
+    // report it, and before m0/create-500 the agent stayed running with nobody holding its id.
+    const { registry, sessions, fail } = build();
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.deepEqual([...sessions.keys()], []);
+  });
+
+  void test("the session is killed when the list comes back without it", async () => {
+    // The other branch, and the one the 500 actually came out of: list() succeeded and simply did
+    // not contain what had just been created.
+    const { registry, sessions, fail } = build();
+    fail("list-omits");
+    await assert.rejects(
+      async () => await registry.create("/workspace/agentdeck", "claude"),
+      /was created but tmux does not list it/,
+    );
+    assert.deepEqual([...sessions.keys()], []);
+  });
+
+  void test("a retry after a failed create succeeds rather than colliding with its own leftovers", async () => {
+    // Undoing the create has to clear the remembered metadata too. If it did not, the id would
+    // still be in `#meta` and the next create would report an attach to a session that no longer
+    // exists - a failure that outlives the failure.
+    const { registry, sessions, fail } = build();
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    fail("ok");
+    const result = await registry.create("/workspace/agentdeck", "claude");
+    assert.equal(result.warning, undefined);
+    assert.equal(result.session.state, "idle");
+    assert.deepEqual([...sessions.keys()], [result.session.id]);
+  });
+
+  void test("a session under our name that we did not just create is not killed", async () => {
+    // `attached === false` is not a warrant on its own: it comes from a `has()` that ran BEFORE
+    // `new-session -A`, and the name is `sessionId(cwd, agent)` - computable offline by anything
+    // running as this user, and readable from GET /api/cwds and GET /api/agents by any client.
+    // Something that puts that name on the socket inside the window makes `-A` attach to ITS
+    // session while `attached` still reports false, and the undo would then kill it.
+    const { registry, sessions, plant, fail } = build();
+    const id = sessionId("/workspace/agentdeck", "claude");
+    plant(id, "/workspace/agentdeck");
+    // Older than any create this call could have made.
+    const planted = sessions.get(id);
+    if (planted !== undefined) sessions.set(id, { ...planted, created: 1_700_000_000 });
+
+    // The list omits it, so `has()` reports no session and `-A` attaches to the planted one while
+    // `attached` still comes back false - which is exactly the window the warrant was too wide for.
+    fail("list-omits");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.ok(sessions.has(id), "a session this call did not create was killed by its undo");
+  });
+
+  void test("an ATTACH that cannot finish leaves the running agent alone", async () => {
+    // The line between taking back your own mess and destroying somebody's work. The second call
+    // created nothing - tmux handed back a session that was already running - so a failure after
+    // that point must not kill it. Getting this wrong turns a transient tmux error into hours of
+    // an agent's work ended by a request that only wanted to look at it.
+    const { registry, sessions, fail } = build();
+    const first = await registry.create("/workspace/agentdeck", "claude");
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.deepEqual([...sessions.keys()], [first.session.id]);
   });
 });

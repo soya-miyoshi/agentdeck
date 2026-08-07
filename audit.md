@@ -502,3 +502,87 @@ change and are fixed here. The rest are recorded and open.
   `#meta` misses. Not root-caused. **This blocks M1 in practice** - the endpoint M1 is built on
   does not work outside the fake-tmux tests.
 - **Same-uid**, unchanged.
+
+---
+
+## m0/create-500 - final whole-codebase pass - 2026-08-08
+
+**Root cause, and it was not any of the four the item guessed at.** A tmux CLIENT whose locale does
+not say UTF-8 is not a UTF-8 client to tmux, and tmux sanitises the output of commands it prints to
+one: every byte it considers non-printable is replaced with `_`. `list()` separates its fields with
+U+001F, so under `env -i` - no LANG, no LC*\* , which is exactly what launchd gives it -
+`list-sessions -F` came back as `name_0\_\_1786113059*/path`, `line.split(SEP)`yielded ONE field,
+and every session parsed with the whole line as its id. Measured on tmux 3.7b with`od -c`: no
+locale gives `f o o \_ 0`, `LC_CTYPE=UTF-8`gives`f o o 037 0`. That is why the same call worked
+from a shell, which had LANG, and failed from the server. `baseEnv`now defaults`LC_CTYPE`when
+the effective locale - POSIX precedence, LC_ALL then LC_CTYPE then LANG - is not UTF-8, and drops a
+non-UTF-8`LC_ALL`rather than be overridden by it.`capture-pane -p` was checked the same way and
+is not affected.
+
+Verified by hand after the fix, with the exact reproduction from the item: `POST /api/sessions`
+returns **201**, `GET /api/sessions` lists it, and the log is clean.
+
+Both of the audit's `high`s are fixed on this branch, and one `medium`, because it was a regression
+this branch introduced.
+
+### Findings
+
+- [high] src/server.ts:254 - Whichever tmux client starts a server donates its whole environment to
+  that server's GLOBAL environment, and the create chain runs with `AGENTDECK_SECRET` and every
+  profile API key in its environment by design. The per-session unsets at the end of that chain
+  clear the SESSION environment and do nothing about the global one. `ensureServer` ran once at
+  boot, which sufficed only while the tmux server could not outlive the node process - and a server
+  that dies with its last session and is restarted by a create gets no `exit-empty off` and no
+  sweep. **Verified by hand on tmux 3.7b: emit that exact chain against a socket with no server and
+  `show-environment -g` prints the secret and the API key while the session environment is clean; a
+  pane forked afterwards sees both.** Status: FIXED in 7e5eded. `createOrAttach` calls
+  `ensureServer` first, which passes no `extra`, so the server is always started by a client holding
+  nothing but `baseEnv()`. Covered by a real-tmux test that fails without the fix.
+
+- [high] src/ws.ts:100 - The third fire-and-forget site, left behind when the two `hub.sync()` calls
+  were hardened. `handleMessage` reaches `capture-pane` through the snapshot an attach builds, and
+  `Tmux` rethrows anything that is not a missing session or an empty server, so one failing capture
+  was an unhandled rejection - which exits Node, on a process nothing restarts. `execFile`'s 1MB
+  default made it reachable on purpose: 2000 lines of `capture-pane -e` is agent-sized output, so a
+  session that wants to can kill the server for every attached phone. Status: FIXED in 7e5eded.
+  Caught and reported to the client; `maxBuffer` sized for the capture. The test asserts the socket
+  survives and the client is told. Honest note on evidence: removing the fix hangs the test runner
+  rather than producing a clean red, which is consistent with the rejection killing the process but
+  is not a failing assertion.
+
+- [medium] src/registry.ts:148 - `#undoCreate` killed on a warrant computed before the create.
+  `attached === false` comes from a `has()` that ran BEFORE `new-session -A`, and the session name
+  is computable offline by anything running as this user, so a session put under that name inside
+  the window was killed by a request that did not create it. The half needing no attacker: a
+  transient failure of the post-create `list()` killed the agent just started, where before this
+  branch it survived and a retry adopted it. Status: FIXED in d766db3. The kill is conditional on
+  tmux still reporting the session at the cwd this call passed, started no earlier than this call,
+  confirmed with `display-message` rather than the `list()` that just failed. Cannot confirm means
+  do not act.
+
+- [medium] src/tmux.ts:424 - A newline in `#{session_path}` truncates the parsed path. Status:
+  OPEN. It fails closed - a truncated path does not match an allowlist entry, so the session is
+  dropped rather than admitted - but the failure mode is a session that silently never appears.
+
+- [low] src/server.ts:105 - `/api/health` reports 200 for exactly the failure this branch added a
+  throw for, because `probeTmux` does not use `baseEnv` and so has its own locale. Status: OPEN,
+  and it means the health check cannot see the class of bug this item was about.
+
+- [low] src/registry.ts:149 - `#undoCreate` forgets the session even when the kill fails, leaving a
+  running agent the API can neither list nor stop. Status: OPEN, and now more likely by design,
+  since the narrowed undo deliberately declines to kill what it cannot confirm.
+
+- [low] src/tmux.ts:51 - `BASE_ENV_NAMES` is two lists in one: adding `LC_CTYPE` for the
+  environment we build also exempted it from the inherited-globals sweep. Status: OPEN.
+
+- [low] src/tmux.ts:169 - A profile's `env` name list overrides the locale hardening for the create
+  invocation. Status: OPEN.
+
+- [low] src/hub.ts:189 - Swallowed sync errors make the frozen-PTY case silent and permanent.
+  Status: OPEN, and it is the cost of not exiting the process on a tmux failure.
+
+### Open after this iteration
+
+- **`/api/health` cannot see this class of failure** (`probeTmux` bypasses `baseEnv`). The one
+  probe `m4/launchd-watchdog` will restart on is blind to the bug that broke every create.
+- **Same-uid**, unchanged.

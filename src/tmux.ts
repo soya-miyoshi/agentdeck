@@ -47,6 +47,8 @@ export const BASE_ENV_NAMES: readonly string[] = [
   "TERM",
   "LANG",
   "LC_ALL",
+  // LC_CTYPE is not decoration and not a nicety: see `baseEnv` below, where it is defaulted.
+  "LC_CTYPE",
   "TMPDIR",
   "USER",
   "LOGNAME",
@@ -57,6 +59,23 @@ export const BASE_ENV_NAMES: readonly string[] = [
  *
  * `TERM` has a fallback because the node process is often started from something that has none
  * (launchd, a supervisor), and a pane with no TERM renders as a dumb terminal.
+ *
+ * `LC_CTYPE` has one for a sharper reason, and it is the m0/create-500 bug: a tmux CLIENT whose
+ * locale does not say UTF-8 is not, to tmux, a UTF-8 client, and tmux sanitises the output of
+ * commands it prints to a non-UTF-8 client - every byte it considers non-printable is replaced
+ * with `_`. `list()` formats its fields with U+001F, so under a server started with no LANG and no
+ * LC_* (which is exactly what `env -i` and launchd give it) `list-sessions -F` came back as
+ * `name_0__1786113059_/path`, `line.split(SEP)` yielded ONE field, and every session parsed with
+ * the whole line as its id. Measured on tmux 3.7b with `od -c`: no locale gives `f o o _ 0`,
+ * `LC_CTYPE=UTF-8` or `LC_ALL=C.UTF-8` gives `f o o 037 0`, `LANG=C` gives `_`. That is why the
+ * same call worked from a shell (which had LANG) and failed from the server. `capture-pane -p` was
+ * checked the same way and is NOT affected - it is not printed through that path - so this is the
+ * command-output path only.
+ *
+ * Defaulted rather than forced: an operator whose EFFECTIVE locale is UTF-8 keeps theirs. Only a
+ * run whose effective locale is not UTF-8 gets one, because for that run the alternative is a
+ * parser reading mangled bytes. "Effective" is decided by POSIX precedence - LC_ALL, then
+ * LC_CTYPE, then LANG - and a non-UTF-8 LC_ALL is dropped rather than left to override the default.
  */
 export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -65,6 +84,18 @@ export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, st
     if (value !== undefined) out[name] = value;
   }
   out["TERM"] ??= "xterm-256color";
+  // POSIX precedence, not "any of them mentions UTF-8": LC_ALL overrides LC_CTYPE, which overrides
+  // LANG. Asking whether ANY of the three says UTF-8 gets two real environments wrong - `LC_ALL=C`
+  // alone (the LC_CTYPE default is then inert, because LC_ALL outranks it) and
+  // `LANG=en_US.UTF-8 LC_CTYPE=C` (LANG matches, nothing is defaulted, and LC_CTYPE=C wins). Both
+  // produce a non-UTF-8 client and so the mangled `list-sessions` output described above.
+  const winner = ["LC_ALL", "LC_CTYPE", "LANG"].find((name) => out[name] !== undefined);
+  if (winner === undefined || !/utf-?8/i.test(out[winner] ?? "")) {
+    // baseEnv builds the environment from scratch, so it can simply not pass on an LC_ALL that
+    // would override the default rather than be silently beaten by it.
+    delete out["LC_ALL"];
+    out["LC_CTYPE"] = "UTF-8";
+  }
   return out;
 };
 
@@ -136,6 +167,13 @@ export class Tmux {
         await run("tmux", ["-L", this.socket, ...args], {
           encoding: "utf8",
           env: { ...baseEnv(), ...extra },
+          // execFile's default is 1MB, and `capture-pane -e` over HISTORY_LINES is agent-sized
+          // output: 2000 lines with escape sequences goes past that without trying, and a session
+          // that wants to can do it deliberately. Exceeding it rejects with
+          // ERR_CHILD_PROCESS_STDIO_MAXBUFFER, which is neither a missing session nor an empty
+          // server, so it propagates - and a snapshot is built on the attach path. Sized for the
+          // capture rather than left implicit.
+          maxBuffer: 16 * 1024 * 1024,
         }));
   }
 
@@ -157,6 +195,19 @@ export class Tmux {
   ): Promise<{ attached: boolean }> {
     const existed = await this.has(id);
     if (!existed) {
+      // Make sure a server EXISTS before the client carrying the secrets runs, because whichever
+      // client starts the tmux server donates its whole environment to the server's GLOBAL
+      // environment - and the chain below runs with `AGENTDECK_SECRET` and every profile key in
+      // its environment by design. The per-session unsets at the end of that chain clear the
+      // SESSION environment; they do nothing about the global one. Verified by hand on tmux 3.7b:
+      // run that exact chain against a socket with no server and `show-environment -g` prints the
+      // secret and the API key, and every pane forked afterwards inherits both.
+      //
+      // ensureServer is idempotent and passes no `extra`, so the server is always started by a
+      // client holding nothing but `baseEnv()`. It was called once at boot, which was enough only
+      // while the tmux server could not outlive it - `exit-empty off` is set on OUR server, but a
+      // server that dies with its last session and is restarted by a create gets no such setting.
+      await this.ensureServer();
       // -d so creating a session does not attach this process to it. The VALUES never appear in
       // an argument, and that is the point of the shape below.
       //
@@ -368,9 +419,29 @@ export class Tmux {
       throw error;
     }
 
-    return stdout
-      .split("\n")
-      .filter((line) => line !== "")
+    const lines = stdout.split("\n").filter((line) => line !== "");
+
+    // Loud, not lenient - but only for the failure this refusal was written for. Under the locale
+    // mangling (see `baseEnv`) tmux rewrites EVERY U+001F, so no line at all carries a separator
+    // and no field is recoverable; that is the m0/create-500 case, where `id` became the whole
+    // line, `Registry.list()` silently dropped the session, and `create` reported failure over a
+    // session that was running. A single separator-less line is a different animal:
+    // `#{session_path}` is last in the format and a path may legally contain a newline, so one
+    // odd session splits into a parseable line plus a remainder. That must cost at most that one
+    // session, never `list()` for every other one - anything running as this user can create such
+    // a session, and killing the whole list is exactly the denial of service the allowlist exists
+    // to prevent.
+    if (lines.length > 0 && !lines.some((line) => line.includes(SEP))) {
+      throw new Error(
+        `tmux returned list-sessions output with no field separator: ${JSON.stringify(lines[0])}. ` +
+          `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
+          `set a UTF-8 locale for the process running agentdeck - and note LC_ALL outranks ` +
+          `LC_CTYPE and LANG, so a non-UTF-8 LC_ALL must be changed or unset, not worked around.`,
+      );
+    }
+
+    return lines
+      .filter((line) => line.includes(SEP))
       .map((line) => {
         const [id = "", dead = "0", status = "", created = "0", path = ""] = line.split(SEP);
         return {
@@ -383,6 +454,37 @@ export class Tmux {
           startedAt: Number(created) * 1000,
         };
       });
+  }
+
+  /**
+   * One session's path and creation time, asked for by exact target.
+   *
+   * Deliberately not `list()`: the caller is `Registry.#undoCreate`, which runs precisely when
+   * `list()` has just thrown or come back wrong, so verifying with the call that failed would
+   * refuse the one kill that is definitely ours. `display-message -p` is a different code path and
+   * answers about one target.
+   *
+   * `undefined` when tmux cannot answer at all - a caller that cannot confirm must not act.
+   */
+  async describe(id: string): Promise<{ path: string; startedAt: number } | undefined> {
+    try {
+      const stdout = await this.#tmux([
+        "display-message",
+        "-p",
+        // A WINDOW target, not a session one. `-t =name` answers with empty fields rather than an
+        // error - verified on tmux 3.7b, `display-message -p -t =probe` printed `|` while
+        // `-t =probe:` printed the path and the timestamp. An empty answer here reads as "cannot
+        // confirm", so the wrong target form silently disables the check it exists to make.
+        "-t",
+        exactWindowTarget(id),
+        ["#{session_path}", "#{session_created}"].join(SEP),
+      ]);
+      const [path = "", created = ""] = stdout.trim().split(SEP);
+      if (path === "" || created === "") return undefined;
+      return { path, startedAt: Number(created) * 1000 };
+    } catch {
+      return undefined;
+    }
   }
 
   async kill(id: string): Promise<void> {

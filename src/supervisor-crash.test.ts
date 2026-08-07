@@ -95,13 +95,12 @@ const start = async (): Promise<ChildProcess> => {
       AGENTDECK_PORT: String(port),
       AGENTDECK_MOUNTS: work,
       AGENTDECK_PROFILES: profiles,
-      // LANG is not decoration. `Tmux.list()` formats its fields with \u001f as the separator,
+      // No LANG and no LC_* here, deliberately. `Tmux.list()` separates its fields with U+001F,
       // and tmux renders that byte as `_` unless it believes the locale is UTF-8 - so with LANG
-      // unset every field of every session parses into one string, `list()` reports a session
-      // with an empty path, and nothing is ever listed. Passed here for the same reason PATH is:
-      // this test is about the crash, not about that. It is worth knowing at m4, where launchd
-      // hands a job an environment with no LANG at all.
-      LANG: process.env["LANG"] ?? "en_US.UTF-8",
+      // unset every field of every session parsed into one string and nothing was ever listed.
+      // That was m0/create-500, and it is fixed at its cause in `baseEnv` - so LANG is NOT passed
+      // any more, and this test now also crosses the locale-less environment launchd will hand
+      // the job at m4.
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

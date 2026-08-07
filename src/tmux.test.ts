@@ -93,6 +93,47 @@ void describe("listing sessions", () => {
     assert.deepEqual(await tmux.list(), []);
   });
 
+  void test("mangled output fails the whole list rather than being read as sessions", async () => {
+    // m0/create-500. A client tmux does not believe is UTF-8 gets `_` in place of every byte tmux
+    // considers non-printable, including the U+001F this format is built on. Reading such a line
+    // leniently gave every session the whole line as its id, which `Registry.list()` then dropped
+    // for having no metadata - a create that had worked, reported as a 500, agent still running.
+    // Refusing is the point: half a list is worse than an error, because nothing downstream can
+    // tell it from a machine with fewer sessions on it. The mangled line is the one the real tmux
+    // returned on the reported run, byte for byte. The mangling rewrites EVERY U+001F, so the
+    // signature is that no line at all carries a separator.
+    const { tmux } = fake({
+      "list-sessions": "a-claude-1_0__1700000000_/a\nrepo-sh-df464c46_0__1786113059_/x\n",
+    });
+    await assert.rejects(async () => await tmux.list(), /field separator[\s\S]*UTF-8/);
+  });
+
+  void test("a newline in one session's path costs that session, not the whole list", async () => {
+    // `#{session_path}` is last in the format and a path may legally contain a newline, so a
+    // session created in `/tmp/ro\ngue` splits into a parseable record plus a separator-less
+    // remainder. Anything running as this user can create one; if that remainder failed `list()`
+    // every 2s tick, one rogue session would take every other session's stream and every tab
+    // with it, with no supervisor to restart the process. It must cost at most itself.
+    const { tmux } = fake({
+      "list-sessions": `${line("a-claude-1", "0", "")}${SEP}/tmp/ro\ngue\n${line("b-claude-2", "0", "")}${SEP}/tmp/ok\n`,
+    });
+    const sessions = await tmux.list();
+    assert.deepEqual(
+      sessions.map((s) => s.id),
+      ["a-claude-1", "b-claude-2"],
+    );
+  });
+
+  void test("a session name containing the separator is still parsed, not called mangled", async () => {
+    // The refusal above must fire on the mangling and nothing else. Session names are attacker-
+    // adjacent - anything running as this user can create one - but a name can only ADD
+    // separators to the line, never remove them, so it cannot reach the refusal. It also cannot
+    // impersonate one of ours: the id it parses to is not the id `Registry` has metadata for.
+    const { tmux } = fake({ "list-sessions": `${line(`odd${SEP}name`, "0", "")}\n` });
+    const [session] = await tmux.list();
+    assert.equal(session?.id, "odd");
+  });
+
   void test("any other failure propagates", async () => {
     const error = Object.assign(new Error("exited"), { stderr: "permission denied" });
     const { tmux } = fake({ "list-sessions": error });
@@ -326,7 +367,11 @@ void describe("the environment a tmux server is started with", () => {
       AWS_SECRET_ACCESS_KEY: "sk-live",
       SEKRIT: "marker",
     });
-    assert.deepEqual(Object.keys(built).sort(), ["HOME", "PATH", "TERM"]);
+    // LC_CTYPE is there because nothing on the input declared a UTF-8 locale - see `baseEnv`, and
+    // src/create-500.test.ts for what a non-UTF-8 tmux client did to `list-sessions` output.
+    assert.deepEqual(Object.keys(built).sort(), ["HOME", "LC_CTYPE", "PATH", "TERM"]);
+    assert.equal(built["LC_CTYPE"], "UTF-8");
+    assert.equal(baseEnv({ PATH: "/usr/bin", LANG: "ja_JP.UTF-8" })["LC_CTYPE"], undefined);
     assert.equal(built["SSH_AUTH_SOCK"], undefined);
     assert.equal(built["SEKRIT"], undefined);
   });
@@ -338,6 +383,47 @@ void describe("the environment a tmux server is started with", () => {
     for (const name of BASE_ENV_NAMES) {
       assert.doesNotMatch(name, /KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL/i, name);
     }
+  });
+
+  void test("an operator's own UTF-8 locale is kept, in whichever variable declares it", () => {
+    // Defaulted, not forced. Overwriting LC_CTYPE on a machine whose operator has chosen a locale
+    // would change how their agents render text, to fix a problem they do not have.
+    for (const name of ["LC_ALL", "LC_CTYPE", "LANG"]) {
+      const built = baseEnv({ PATH: "/usr/bin", [name]: "ja_JP.UTF-8" });
+      assert.equal(built[name], "ja_JP.UTF-8", name);
+      assert.equal(built["LC_CTYPE"], name === "LC_CTYPE" ? "ja_JP.UTF-8" : undefined, name);
+    }
+    assert.equal(baseEnv({ PATH: "/usr/bin", LANG: "en_US.utf8" })["LC_CTYPE"], undefined);
+  });
+
+  void test("a non-UTF-8 locale is fixed in the variable that actually wins", () => {
+    // POSIX precedence, not "any of the three mentions UTF-8". Both of these environments used to
+    // yield a non-UTF-8 tmux client - and therefore `_` where the field separator should be, and
+    // therefore a `Tmux.list()` that throws for every session on the socket.
+    //
+    // (a) LC_ALL=C alone: defaulting LC_CTYPE is inert, because LC_ALL outranks it. The only fix
+    //     is to stop passing that LC_ALL on, which baseEnv is free to do - it builds the
+    //     environment from scratch rather than mutating the shell's.
+    const allC = baseEnv({ PATH: "/usr/bin", LC_ALL: "C" });
+    assert.equal(allC["LC_ALL"], undefined);
+    assert.equal(allC["LC_CTYPE"], "UTF-8");
+
+    // (b) LANG says UTF-8 but LC_CTYPE says C: LC_CTYPE wins, so a match on LANG proves nothing.
+    const ctypeC = baseEnv({ PATH: "/usr/bin", LANG: "en_US.UTF-8", LC_CTYPE: "C" });
+    assert.equal(ctypeC["LC_CTYPE"], "UTF-8");
+    assert.equal(ctypeC["LC_ALL"], undefined);
+
+    // And the mirror image: an LC_ALL that IS UTF-8 outranks a non-UTF-8 LC_CTYPE, so nothing is
+    // touched.
+    const allUtf8 = baseEnv({ PATH: "/usr/bin", LC_ALL: "C.UTF-8", LC_CTYPE: "C" });
+    assert.equal(allUtf8["LC_ALL"], "C.UTF-8");
+    assert.equal(allUtf8["LC_CTYPE"], "C");
+  });
+
+  void test("LC_CTYPE is on the name list, so the global-environment sweep does not strip it", () => {
+    // ensureServer unsets every global variable that is NOT on this list. Off the list, the
+    // locale a tmux client needs would be swept away by the next boot that found it.
+    assert.ok(BASE_ENV_NAMES.includes("LC_CTYPE"));
   });
 
   void test("a process started with no TERM still gets a usable terminal", () => {
@@ -464,6 +550,41 @@ void describe("what a real tmux server hands a real pane", () => {
     } finally {
       delete process.env["SEKRIT_MARKER"];
       delete process.env["SSH_AUTH_SOCK"];
+    }
+  });
+
+  void test("the client carrying the secrets never starts the tmux server", async () => {
+    // Whichever client starts a tmux server donates its whole environment to that server's GLOBAL
+    // environment, and the create chain runs with AGENTDECK_SECRET and every profile key in its
+    // environment by design. The per-session unsets at the end of that chain clear the SESSION
+    // environment and do nothing about the global one. ensureServer was called once at boot,
+    // which was enough only while the tmux server could not outlive the node process - a server
+    // that dies with its last session and is restarted by a create gets no such setting.
+    //
+    // Verified by hand on tmux 3.7b before it was fixed: with no server on the socket, that exact
+    // chain left `show-environment -g` printing the secret and the API key, and a pane forked
+    // afterwards saw both.
+    const fresh = `${socket}-nosrv`;
+    const freshTmux = new Tmux({ socket: fresh });
+    try {
+      await freshTmux.createOrAttach("secretprobe", tmpdir(), "/bin/sh", ["-c", "sleep 5"], {
+        AGENTDECK_SECRET: "leak-canary-value",
+        AGENTDECK_SESSION_ID: "secretprobe",
+      });
+      const globals = execFileSync("tmux", ["-L", fresh, "show-environment", "-g"], {
+        encoding: "utf8",
+      });
+      assert.doesNotMatch(
+        globals,
+        /leak-canary-value/,
+        "the secret reached the tmux server's global environment, where every pane inherits it",
+      );
+    } finally {
+      try {
+        execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });
+      } catch {
+        // Already gone.
+      }
     }
   });
 

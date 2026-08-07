@@ -264,3 +264,58 @@ void describe("refusals", () => {
     client.socket.close();
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+// The snapshot path reaches capture-pane, and `Tmux` rethrows anything that is not a missing
+// session or an empty server. `socket.on("message")` discarded the promise, so one failing capture
+// was an unhandled rejection - which exits Node, on a process nothing restarts (see
+// src/supervisor-crash.test.ts). A capture big enough to pass execFile's buffer is the ordinary
+// way to trigger it: 2000 lines of `capture-pane -e` is agent-sized output, and a session that
+// wants to can produce it deliberately. One phone's message must not cost every phone its socket.
+void describe("a failing capture costs one message, not the process", () => {
+  let failServer: ReturnType<typeof createServer>;
+  let failClose: () => void;
+  let failUrl: string;
+  const failStream = new SessionStream({ sessionId: "s1" });
+
+  before(async () => {
+    failServer = createServer();
+    failClose = attachWebSocketServer(failServer, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? failStream : undefined),
+      captureHistory: async () => {
+        await Promise.resolve();
+        throw new Error("stdout maxBuffer length exceeded");
+      },
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    }).close;
+    await new Promise<void>((done) => failServer.listen(0, "127.0.0.1", done));
+    failUrl = `ws://127.0.0.1:${String((failServer.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    failClose();
+    failServer.close();
+  });
+
+  void test("the client is told, the socket lives, and the process does not exit", async () => {
+    const socket = new WebSocket(failUrl, TOKEN, { origin: ORIGIN });
+    const frames: Frame[] = [];
+    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+
+    socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    // Long enough that an unhandled rejection would have taken the runner down by now.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(frames.at(-1)?.["t"], "error", "the client was never told the capture failed");
+    assert.equal(socket.readyState, socket.OPEN, "the socket did not survive the failure");
+    socket.close();
+  });
+});
