@@ -703,6 +703,46 @@ void describe("the client-visible heartbeat", () => {
     assert.deepEqual(h.rendered, [], "the tab was not idle, so this proves nothing");
   });
 
+  void test("a nonsense stated interval falls back to the default rather than bricking the tab", () => {
+    // `#receive` runs no parser over a server frame, so `intervalMs` is a wire value used as a
+    // control parameter. Absent, zero, negative, NaN or overflowing, an unchecked value arms a
+    // bound that expires on the next tick - and because the interval is Connection state rather
+    // than socket state, the same instantly-expiring bound is re-armed on every replacement
+    // socket, so one bad frame reconnects forever against a healthy server.
+    const bad: unknown[] = [undefined, 0, -1, NaN, Infinity, 1e308, "15000", null, 1, 1e9];
+    for (const intervalMs of bad) {
+      const h = openHarness();
+      h.last().deliver({ t: "ping", intervalMs } as unknown as ServerMessage);
+      assert.deepEqual(
+        h.timers.map((timer) => timer.delayMs),
+        [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+        `intervalMs ${String(intervalMs)} armed a bound the default does not cover`,
+      );
+
+      // And the socket survives the next tick of the clock the ping was supposed to reset: the
+      // pending bound is the default one, so firing it is the first thing that touches the socket.
+      assert.equal(h.sockets.length, 1, `intervalMs ${String(intervalMs)} dropped a live socket`);
+      assert.equal(h.last().closed, false);
+      assert.deepEqual(h.statuses, ["connecting", "open"]);
+    }
+  });
+
+  void test("a poisoned interval does not survive into the next socket", () => {
+    // The permanent half of the failure: a replacement socket arms its bound from Connection
+    // state, so a value that was never clamped would outlive the socket that carried it. Only a
+    // page reload clears that, and the tab shows "Reconnecting..." the whole time.
+    const h = openHarness();
+    h.last().deliver({ t: "ping", intervalMs: 0 } as unknown as ServerMessage);
+    h.last().handlers.closed();
+    h.fire(); // the reconnection backoff
+    h.last().handlers.opened();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+      "the replacement socket inherited an instantly-expiring bound",
+    );
+  });
+
   void test("the heartbeat costs the tab nothing to answer", () => {
     // It is answered with nothing at all - the frame having arrived is the whole proof - so an
     // idle tab spends none of a user's typing allowance on staying alive.

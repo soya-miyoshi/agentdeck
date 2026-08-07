@@ -99,6 +99,33 @@ export const MAX_PENDING_INPUT_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 export const HEARTBEAT_GRACE_INTERVALS = 2;
 
+/**
+ * The range a stated interval has to fall in to be believed.
+ *
+ * `intervalMs` is the one wire value this client uses as a control parameter rather than as data
+ * handed to the terminal, and #receive does not run the frame through a parser - so an absent,
+ * zero, negative, NaN or absurd field would arm a bound that expires on the next tick. Because
+ * the interval is Connection state rather than socket state, that bound would then be re-armed on
+ * every replacement socket: open, drop, back off, open, forever, against a server that is
+ * answering correctly. Anything outside the range falls back to the compiled-in default, which is
+ * the same value the pre-first-frame window is timed against.
+ *
+ * The floor is well below any interval a real deployment would choose, because its job is only to
+ * exclude values no clock can honour - src/half-open.test.ts drives a real server at 300 ms to
+ * make its bounds observable in a test's lifetime, and that has to keep working.
+ */
+export const MIN_HEARTBEAT_INTERVAL_MS = 100;
+export const MAX_HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+
+/** The stated interval if it is usable, the default otherwise. */
+const usableHeartbeatInterval = (stated: unknown): number =>
+  typeof stated === "number" &&
+  Number.isFinite(stated) &&
+  stated >= MIN_HEARTBEAT_INTERVAL_MS &&
+  stated <= MAX_HEARTBEAT_INTERVAL_MS
+    ? stated
+    : DEFAULT_HEARTBEAT_INTERVAL_MS;
+
 const encoder = new TextEncoder();
 
 /**
@@ -436,10 +463,15 @@ export class Connection {
    */
   #noteTraffic(): void {
     this.#cancelSilence?.();
-    this.#cancelSilence = this.#schedule(() => {
-      this.#cancelSilence = undefined;
-      this.#dropSocket?.();
-    }, this.#heartbeatIntervalMs * HEARTBEAT_GRACE_INTERVALS);
+    this.#cancelSilence = this.#schedule(
+      () => {
+        this.#cancelSilence = undefined;
+        this.#dropSocket?.();
+        // The floor is applied here too, not only where the interval is stored, so no path can arm
+        // a bound that expires before a healthy server could possibly have spoken again.
+      },
+      usableHeartbeatInterval(this.#heartbeatIntervalMs) * HEARTBEAT_GRACE_INTERVALS,
+    );
   }
 
   #stopWatchingSilence(): void {
@@ -611,7 +643,7 @@ export class Connection {
         // Nothing is sent back. The proof of life is that the frame arrived at all, and a reply
         // would put periodic traffic through the same window a user's typing is budgeted against -
         // an idle tab would spend part of its input allowance on saying nothing.
-        this.#heartbeatIntervalMs = message.intervalMs;
+        this.#heartbeatIntervalMs = usableHeartbeatInterval(message.intervalMs);
         // Re-armed, because the bound set moments ago was measured against the previous interval.
         this.#noteTraffic();
         return;
