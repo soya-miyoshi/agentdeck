@@ -480,7 +480,11 @@ void describe("the tmux half tells an empty server apart from a missing one", ()
 // -----------------------------------------------------------------------------------------
 
 const entryFor = (todo: string, branch: string): string => {
-  const start = todo.indexOf(`\`${branch}\``);
+  // The DEFINITION, which is bold, not the first mention. One item citing another in its prose -
+  // `m0/create-500` was filed against a bug found while verifying `m0/supervisor-crash-test` -
+  // otherwise silently retargets every assertion below onto the wrong entry, and the failure reads
+  // as the cited item having lost its own text.
+  const start = todo.indexOf(`**\`${branch}\`**`);
   assert.ok(start >= 0, `TODO.md has no ${branch} entry`);
   const from = todo.lastIndexOf("\n- ", start);
   const next = todo.indexOf("\n- ", start);

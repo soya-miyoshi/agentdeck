@@ -176,6 +176,33 @@ void describe("the settings fragment", () => {
     assert.throws(() => hookCommand(7777, "node"), /absolute path/);
   });
 
+  void test("a stranger's hook whose command contains the marker is not ours to delete", () => {
+    // The marker used to be `/api/hooks/$AGENTDECK_SESSION_ID`. It became the generic
+    // `/api/hooks/` when the command grew a node script and the interpolation moved inside it,
+    // which turned `isOurHook` into a substring test matching any hook posting to any local
+    // service with that path. installHookSettings re-runs at every boot and deletes what it
+    // thinks is ours, so a stranger's guard hook would disappear silently.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-hooks-"));
+    const path = join(dir, "settings.json");
+    const stranger = "curl -s 127.0.0.1:9000/api/hooks/mine";
+    writeFileSync(
+      path,
+      `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: stranger }] }] } })}\n`,
+    );
+
+    installHookSettings(path, 7777);
+    installHookSettings(path, 7777);
+
+    const hooks = (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["hooks"] as
+      | Record<string, unknown[]>
+      | undefined;
+    assert.match(
+      JSON.stringify(hooks?.["Stop"] ?? []),
+      /9000\/api\/hooks\/mine/,
+      "a hook agentdeck did not write was deleted as if it had",
+    );
+  });
+
   void test("merges once and idempotently, preserving keys it did not write", () => {
     const dir = mkdtempSync(join(tmpdir(), "agentdeck-hooks-"));
     const path = join(dir, "settings.json");

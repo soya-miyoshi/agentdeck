@@ -434,3 +434,71 @@ rest are recorded and open.
   who owns it. Plan 005 records a distinct uid for agent sessions as the only real fix. Not taken.
 - **The allowlist is a filter on where a session is**, not proof agentdeck started it. A same-uid
   process still owns the socket.
+
+---
+
+## m0/supervisor-crash-test - final whole-codebase pass - 2026-08-07
+
+The crash test, not a supervisor: `src/supervisor-crash.test.ts` kills the node process and asserts
+that tmux sessions created beforehand are alive with the same ids afterwards, and that nothing
+restarted the server. Plan 003 carries the same sentence. The item's own "known gap" prose was
+stale and was corrected rather than certified: since `m0/host-boundary` gated `Registry.list()` on
+`#meta` as well as the allowlist, a session that outlives the server is not listed AT ALL, rather
+than listed under its raw id.
+
+Two of the audit's findings were regressions this branch introduced with the `curl` -> `node -e`
+change and are fixed here. The rest are recorded and open.
+
+### Findings
+
+- [medium] src/claude-hooks.ts:134 - Widening `HOOK_MARKER` to the generic `/api/hooks/` turned
+  `isOurHook` into a substring test that matches strangers. `mergeHookSettings` promises to
+  preserve hooks it did not write and `installHookSettings` re-runs at every boot, so an operator's
+  own guard hook posting to any local service with `/api/hooks/` in its path would be deleted
+  silently, with no log line. A deleted deny/guard hook is a security downgrade performed by the
+  component whose contract is not to touch other people's entries. Status: FIXED on this branch.
+  `isOurHook` now requires both `/api/hooks/` and `AGENTDECK_SESSION_ID`, which every form we have
+  emitted contains, so the upgrade path is kept. Covered by a test that fails without it.
+
+- [medium] src/claude-hooks.ts:167 - `curl -m 2` was a cap on the whole operation; the node form
+  lost it. `http.request` is only constructed inside the stdin `end` handler, so `timeout: 2000` -
+  itself only a socket-inactivity timer - cannot start until stdin closes, and nothing bounds the
+  stdin read or the `b += c` buffer. A hook whose stdin is inherited and never closed leaves a Node
+  runtime resident for the life of the session, accumulating the payload in heap. Status: FIXED on
+  this branch: an unref'd 2s `setTimeout(...process.exit(0))` as the first statement, and the
+  buffer stops appending past 64KB, which is the body size the server refuses anyway.
+
+- [medium] src/server.ts:131 - `AGENTDECK_AGENT_STATE_DIR` gets none of the allowlist-containment
+  guard applied to the token and profiles files, though `installHookSettings` writes a file there
+  whose `command` strings the agent runs through a shell on every tool call, and `mergeHookSettings`
+  deliberately preserves entries it does not recognise. Point it at a repository on
+  `AGENTDECK_MOUNTS` and an agent's ordinary write of one hooks entry becomes host execution on its
+  next tool call and every later session, surviving reboots, with no review gate covering the file.
+  Status: OPEN. Three lines to fix and it makes the rule the code already states apply to the third
+  file of three; not taken here because it is `m0/host-boundary`'s rule and belongs with its
+  siblings, and this branch is a measurement.
+
+- [medium] src/server.ts:142 - The documented way to make the hook fire swaps the operator's whole
+  Claude config. `CLAUDE_CONFIG_DIR` replaces the directory, not just the hooks fragment, so
+  `permissions.deny`, allowed-tools and the operator's own hooks stop applying to every agentdeck
+  session - on a machine the README already describes as having no boundary between an agent and
+  the home directory. The obvious workaround, pointing `AGENTDECK_AGENT_STATE_DIR` at `~/.claude`,
+  is what hands the merge above the live settings file. Neither consequence is stated anywhere.
+  Status: OPEN, and it is a documentation debt with a security shape.
+
+- [medium] src/claude-hooks.ts:171 - The hook client authenticates to nobody: it posts to
+  127.0.0.1 on a fixed port with no check on what is listening. This branch is the one that
+  establishes the window - nothing restarts the server, so the port is free for as long as the
+  crash lasts - and any same-uid process that takes it harvests prompts, tool inputs and the
+  per-session secret. Status: OPEN. The honest fix is the same-uid one this file keeps returning
+  to; a shared secret in the other direction would narrow it.
+
+### Open after this iteration
+
+- **`POST /api/sessions` answers 500 on a real server run** and leaves the session it created
+  orphaned on the socket. Found by hand during verification of this branch, reproduced on `main`,
+  so it arrived with `m0/host-boundary`. Filed as `m0/create-500` with the reproduction and what is
+  known: `Registry.list()` receives the entire unsplit `list-sessions` line as the entry id, so
+  `#meta` misses. Not root-caused. **This blocks M1 in practice** - the endpoint M1 is built on
+  does not work outside the fake-tmux tests.
+- **Same-uid**, unchanged.

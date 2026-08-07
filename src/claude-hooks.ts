@@ -165,8 +165,14 @@ export const hookCommand = (port: number, interpreter: string = process.execPath
   }
   const quoted = `'${interpreter.split("'").join(`'\\''`)}'`;
   const script =
+    // curl had `-m 2`, a cap on the whole operation. `timeout` below is only a socket-inactivity
+    // timer and cannot even start until stdin closes, so without this a hook whose stdin is never
+    // closed leaves a Node runtime resident for the life of the session, buffering as it goes.
+    `setTimeout(()=>process.exit(0),2000).unref();` +
     `let b="";` +
-    `process.stdin.on("data",(c)=>{b+=c}).on("end",()=>{` +
+    // The server refuses bodies over 64KB, so anything past that is buffering guaranteed to be
+    // thrown away.
+    `process.stdin.on("data",(c)=>{if(b.length<65536)b+=c}).on("end",()=>{` +
     `const r=require("http").request({` +
     `host:"127.0.0.1",port:${String(port)},` +
     `path:"${HOOK_MARKER}"+encodeURIComponent(process.env.AGENTDECK_SESSION_ID||""),` +
@@ -189,8 +195,18 @@ const ours = (port: number): HookEntry => ({
   hooks: [{ type: "command", command: hookCommand(port) }],
 });
 
+// Both halves, because the marker alone is a generic path segment. It was
+// `/api/hooks/$AGENTDECK_SESSION_ID` before the command grew a node script and the interpolation
+// moved inside it; widening it to `/api/hooks/` made this a substring test that matches any hook
+// posting to any local service with that path. `mergeHookSettings` deletes what it recognises as
+// ours and installHookSettings re-runs at every boot, so a stranger's PreToolUse guard hook would
+// vanish silently - a security downgrade performed by the one component that promises not to
+// touch other people's entries. Every form we have ever emitted contains both strings.
 const isOurHook = (hook: unknown): boolean =>
-  isRecord(hook) && typeof hook["command"] === "string" && hook["command"].includes(HOOK_MARKER);
+  isRecord(hook) &&
+  typeof hook["command"] === "string" &&
+  hook["command"].includes(HOOK_MARKER) &&
+  hook["command"].includes("AGENTDECK_SESSION_ID");
 
 /**
  * Merge the fragment into whatever the settings file already holds.
