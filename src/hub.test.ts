@@ -70,7 +70,6 @@ const build = () => {
   const hub = new Hub({
     tmux,
     registry,
-    allowlist,
     socket: "test",
     createPty: (sessionId) => {
       created.push(sessionId);
@@ -161,7 +160,6 @@ void describe("reconciling against tmux", () => {
     const hub = new Hub({
       tmux,
       registry,
-      allowlist,
       socket: "test",
       createPty: (sessionId) => {
         if (sessionId.startsWith("a-")) throw new Error("posix_spawnp failed.");

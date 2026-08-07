@@ -5,7 +5,7 @@ import { summarise } from "./agent-profiles.ts";
 import { mapHookEvent } from "./claude-hooks.ts";
 import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
-import { AgentUnavailableError, CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
+import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
 
@@ -133,7 +133,7 @@ export const createHandler = (deps: HttpDeps) => {
       if (typeof body !== "object" || body === null) {
         return { status: 400, body: { error: "expected a JSON object" } };
       }
-      const record: Record<string, unknown> = body as Record<string, unknown>;
+      const record = body as Record<string, unknown>;
       const cwd = asString(record["cwd"]);
       const agent = asString(record["agent"]);
       if (cwd === undefined || agent === undefined) {
@@ -150,9 +150,6 @@ export const createHandler = (deps: HttpDeps) => {
           return { status: 403, body: { error: error.message } };
         if (error instanceof UnknownAgentError)
           return { status: 404, body: { error: error.message } };
-        if (error instanceof AgentUnavailableError) {
-          return { status: 409, body: { error: error.message } };
-        }
         throw error;
       }
     }

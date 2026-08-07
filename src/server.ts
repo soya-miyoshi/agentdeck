@@ -54,12 +54,13 @@ export const defaultTokenFile = (): string => join(homedir(), ".agentdeck", "tok
 export const tokenInsideAllowlist = (
   tokenPath: string,
   allowedPaths: readonly string[],
-): string | undefined =>
-  allowedPaths.find((allowed) => {
+): string | undefined => {
+  const token = resolve(tokenPath);
+  return allowedPaths.find((allowed) => {
     const root = resolve(allowed);
-    const token = resolve(tokenPath);
     return token === root || token.startsWith(`${root}/`);
   });
+};
 
 /**
  * The token, generated on first run and stored 0600.
@@ -120,10 +121,10 @@ export const main = async (): Promise<void> => {
   // Where a profile's relative `waiting.settings` lands: agentdeck's own agent-state directory,
   // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004).
   //
-  // The fallback used to be CLAUDE_CONFIG_DIR, which is the operator's live Claude config. That made an unset variable mean
-  // "rewrite, on every boot, the settings file every Claude Code session on this machine reads,
-  // including the ones agentdeck has nothing to do with". A directory of agentdeck's own is the
-  // only fallback that is agentdeck's to write.
+  // The fallback used to be CLAUDE_CONFIG_DIR, which is the operator's live Claude config. That
+  // made an unset variable mean "rewrite, on every boot, the settings file every Claude Code
+  // session on this machine reads, including the ones agentdeck has nothing to do with". A
+  // directory of agentdeck's own is the only fallback that is agentdeck's to write.
   const agentStateDir = env(
     "AGENTDECK_AGENT_STATE_DIR",
     join(homedir(), ".agentdeck", "agent-state"),
@@ -234,7 +235,7 @@ export const main = async (): Promise<void> => {
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
-  const hub = new Hub({ tmux, registry, allowlist, socket });
+  const hub = new Hub({ tmux, registry, socket });
 
   // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
   // finish, or did I lose it", and expiring it after five minutes puts the question back.
@@ -297,7 +298,7 @@ export const main = async (): Promise<void> => {
 
   // Loopback only. `tailscale serve` on the host is the single place where remote exposure is
   // decided, and binding the tailnet address here would make that two places.
-  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  await new Promise<void>((listening) => server.listen(port, "127.0.0.1", listening));
   console.log(`agentdeck: listening on 127.0.0.1:${String(port)}`);
   console.log(
     `agentdeck: ${String(profiles.size)} agent profile(s), ${String(mounts.length)} mount(s)`,
