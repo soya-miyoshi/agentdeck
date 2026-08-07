@@ -325,7 +325,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ## Found while building, not in the original plan
 
-- [ ] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
+- [x] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
       everything else. Plan 001's Authentication section now settles who serves it: this server
       does, from `dist/client`, on every path that is not an API or socket route — unauthenticated
       by necessity, since the page has to load before a token exists. Resolve strictly within the
@@ -333,6 +333,15 @@ Agent-agnostic signals first, so the generic path is the proven one.
       `/ws` alone.
       **Done when:** opening the `ts.net` URL on a phone loads the client with no token, and the
       first thing it shows is the paste field.
+      **Verified by hand against a live server:** encoded traversal is 403, unencoded traversal
+      falls through to the SPA fallback rather than serving a file, and symlinks planted inside
+      `dist/client` pointing at the bearer token and at a canary outside are both 403. `/api/*`
+      still answers JSON. The `ts.net` half waits on `m4/tailscale-serve`; what is demonstrated here
+      is the same page over loopback with no token.
+      **Found by the audit and fixed before merge:** publishing a directory made it a second place a
+      secret must never sit, invisible to the allowlist rule — the server now refuses to start if
+      the token or profiles file resolves inside it — and the unbuilt-client 503 was naming the
+      absolute build path to unauthenticated callers.
 
 - [ ] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
       ping intervals should reconnect, and that is not implementable as written: the server's
