@@ -11,6 +11,7 @@ import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
+import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
@@ -23,6 +24,11 @@ const HEALTH_TIMEOUT_MS = 3000;
 // Depth of scrollback a cold snapshot carries. Not a knob: plan 002 refuses pagination outright,
 // so this is the one fixed depth, and reading further back would be a plan rather than a param.
 const HISTORY_LINES = 2000;
+
+// The built client, served unauthenticated on every path no API or socket route owns (plan 001).
+// Relative to this file rather than the working directory, so `pnpm start` from anywhere finds
+// the same build, and fixed rather than configurable: one process serves one build.
+const CLIENT_DIR = resolve(import.meta.dirname, "..", "dist", "client");
 
 // How often the hub reconciles against tmux. This is what makes a session someone started by
 // hand in a terminal appear in the strip, and what notices an agent that exited while nobody was
@@ -277,21 +283,24 @@ export const main = async (): Promise<void> => {
   }
 
   const server = createServer(
-    createHandler({
-      onSessionsChanged: () => {
-        hub.sync().catch((error: unknown) => {
-          console.error("agentdeck: sync failed:", error);
-        });
-      },
-      registry,
-      profiles,
-      allowlist,
-      token,
-      version: VERSION,
-      origin: process.env["AGENTDECK_ORIGIN"],
-      probe: async () => await probeTmux(socket),
-      streamFor: (id) => hub.streamFor(id),
-    }),
+    withClient(
+      createHandler({
+        onSessionsChanged: () => {
+          hub.sync().catch((error: unknown) => {
+            console.error("agentdeck: sync failed:", error);
+          });
+        },
+        registry,
+        profiles,
+        allowlist,
+        token,
+        version: VERSION,
+        origin: process.env["AGENTDECK_ORIGIN"],
+        probe: async () => await probeTmux(socket),
+        streamFor: (id) => hub.streamFor(id),
+      }),
+      CLIENT_DIR,
+    ),
   );
 
   const ws = attachWebSocketServer(server, {
