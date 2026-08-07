@@ -99,9 +99,10 @@ void describe("listing sessions", () => {
     // leniently gave every session the whole line as its id, which `Registry.list()` then dropped
     // for having no metadata - a create that had worked, reported as a 500, agent still running.
     // Refusing is the point: half a list is worse than an error, because nothing downstream can
-    // tell it from a machine with fewer sessions on it.
+    // tell it from a machine with fewer sessions on it. The mangled line is the one the real tmux
+    // returned on the reported run, byte for byte.
     const { tmux } = fake({
-      "list-sessions": `${line("a-claude-1", "0", "")}\nb-claude-2_0__1700000000_/x\n`,
+      "list-sessions": `${line("a-claude-1", "0", "")}\nrepo-sh-df464c46_0__1786113059_/x\n`,
     });
     await assert.rejects(async () => await tmux.list(), /field separator[\s\S]*UTF-8/);
   });

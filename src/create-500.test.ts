@@ -152,9 +152,10 @@ void describe("POST /api/sessions against the real tmux, from a server with no l
 
     const created = (await response.json()) as { session: { id: string; cwd: string } };
     assert.equal(created.session.cwd, work);
+    const held = sessionNames();
     assert.ok(
-      sessionNames().includes(created.session.id),
-      `tmux does not hold the session the 201 named; it holds ${sessionNames().join(", ")}`,
+      held.includes(created.session.id),
+      `tmux does not hold the session the 201 named; it holds ${held.join(", ")}`,
     );
 
     // And the same session is listed afterwards, which is the assertion the parse bug broke: it
@@ -181,7 +182,7 @@ void describe("a create that fails for any other reason leaves no orphan", () =>
     const tmux = new Tmux({
       socket: orphanSocket,
       exec: async (args, extra) => {
-        if (args[0] === "new-session" || args.includes("new-session")) creates++;
+        if (args.includes("new-session")) creates++;
         if (args[0] === "list-sessions" && creates > 0) {
           throw new Error("tmux is not answering, as far as this call is concerned");
         }
@@ -211,21 +212,5 @@ void describe("a create that fails for any other reason leaves no orphan", () =>
       .trim();
     execFileSync("tmux", ["-L", orphanSocket, "kill-server"], { stdio: "ignore" });
     assert.equal(held, "", `the failed create left ${held} running on the socket`);
-  });
-});
-
-void describe("the parser refuses a mangled line rather than reading it", () => {
-  void test("a line with no separator is an error naming the locale, not four empty fields", async () => {
-    // Exactly what tmux returned before the fix, byte for byte.
-    const tmux = new Tmux({
-      socket: "unused",
-      exec: async () =>
-        await Promise.resolve({ stdout: "repo-sh-df464c46_0__1786113059_/x\n", stderr: "" }),
-    });
-    await assert.rejects(
-      async () => await tmux.list(),
-      /field separator[\s\S]*UTF-8/,
-      "a mangled line parsed into a session instead of being refused",
-    );
   });
 });
