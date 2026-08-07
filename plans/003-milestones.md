@@ -8,42 +8,30 @@ work, and nothing lands that is not used by the milestone after it.
 `mise.toml` (Node 22, pnpm), `package.json`, TypeScript config, lint, and a `GET /api/health`
 that answers. CI runs typecheck, lint, and tests from the first commit.
 
-**Also the Dockerfile and compose file** (plan 005) — non-root user, port published to
-`127.0.0.1` only, pinned arm64 base image, `restart: unless-stopped`, and the `healthcheck` block
-from plan 006. Multi-stage, with `python3`/`make`/`g++` in the builder only: `node-pty` installs
-as `prebuild || node-gyp rebuild` and the fallback has to be able to succeed. An HTTP client in
-the runtime stage too — `curl`, or `node -e` — because M3's hook has to call back in.
-
-Every later milestone is developed and tested *inside* the container. Retrofitting containment at
-the end means meeting the uid, mount and native-build problems all at once, which is how a "just
-add Docker" task becomes a week.
+**Not a container** (plan 005 is superseded). agentdeck runs on the Mac directly, as the user, and
+every milestone is developed and tested on the host toolchain — `pnpm typecheck`, `pnpm lint`,
+`pnpm test`. The server listens on `127.0.0.1` only, which is the one property the earlier
+packaging was relied on for that still has to be true. How this is eventually deployed is
+deliberately left open; the packaging files are kept on disk unbuilt, and TODO's M0 note says why.
 
 **One minute of Tailscale admin, now rather than at M4.** HTTPS certificates and MagicDNS are off
 by default for a tailnet and `tailscale serve` needs both (plan 001). Nothing before M4 uses it,
 and M4 is a bad afternoon to find out.
 
-**PID 1 is an init that owns tmux and supervises Node**, not the Node process itself (plan 005).
-This belongs at M0 and nowhere later: it is four lines of entrypoint written now, and a rewrite of
-how the process tree is laid out if it is discovered at M3 — by which point everything has been
-built and tested on a container whose crash behaviour is wrong. Zombie reaping and a restart that
-backs off rather than loops are part of it.
+**Nothing supervises Node.** On the host the tmux server is a daemon of its own, so a crash of the
+Node process leaves every agent alive — but leaves the server down until a person restarts it.
+That is the one thing the discarded PID-1 supervisor did buy, and it is not replaced at M0. It is
+answered at M4 by the `launchd` agent (plan 006), and stated here so it is a known gap rather than
+an assumption M1 onwards quietly makes.
 
 `/api/health` must prove the event loop is turning, not merely that a socket accepts — it does a
 hard-timed `tmux list-sessions` round trip and touches nothing else (plan 006).
 
-**CI does not build the arm64 image**, because nothing in CI would then run it. Typecheck, lint
-and test on the runner directly; the image is built on the Mac, where it is also used.
+**CI runs the suite on the runner directly** — typecheck, lint and test, and nothing else. It
+builds no artifact, because there is no artifact anything consumes.
 
-Not for the reason an earlier draft gave. It said GitHub's hosted runners are x86 and the only
-option was qemu; GitHub now offers hosted arm64 runners (`ubuntu-24.04-arm`, free for public
-repos), so if the image ever does need proving in CI the escape hatch exists today rather than
-hypothetically. The argument against building it is that it is an artifact nothing consumes — and
-that argument does not depend on the architecture, which is why it is the one to keep.
-
-Done when: `docker compose up` serves health on host loopback, CI is green on an empty test suite,
-`docker inspect` reports the container `healthy`, and **killing the Node process inside the
-container brings it back without the container restarting** — which is the property M1 onwards
-depends on and the one that silently does not hold if PID 1 is wrong.
+Done when: `pnpm start` serves health on host loopback, `scripts/healthcheck.mjs` passes against
+it and fails when the server is down, and CI is green on the suite.
 
 ## M1 — Sessions, no streaming
 
@@ -54,10 +42,11 @@ The tmux-backed session registry and the HTTP routes. Driven from `curl` only; n
   reaping on `DELETE` or at server start rather than on a timer
 - Agent profiles loaded and validated (plan 004); `GET /api/agents`; create takes a profile id,
   never a command line
-- `GET /api/cwds`, serving the mount list with the live sessions in each — the picker cannot be
-  built without it, and a phone user typing an absolute container path is not the alternative
-- `cwd` allowlist validation on create — which, containerised, is the **mount list**: a short list
-  of repositories actually worked in, never the whole `~/ghq` tree (plan 005)
+- `GET /api/cwds`, serving the allowlist with the live sessions in each — the picker cannot be
+  built without it, and a phone user typing an absolute path into a soft keyboard is not the
+  alternative
+- `cwd` allowlist validation on create: a short list of repositories actually worked in, never the
+  whole `~/ghq` tree
 - `warning` when the cwd already has a live session
 - Bearer token generated on first run, `0600`, in an alphabet `Sec-WebSocket-Protocol` accepts —
   unpadded base64url or hex, never padded base64 (plan 001)
@@ -68,10 +57,10 @@ The tmux-backed session registry and the HTTP routes. Driven from `curl` only; n
 - A per-session secret in the spawn environment, ready for the hook route at M3
 - The credential decision from plan 005 gets made here: agent API keys in, git push credentials
   out. The agent commits; the human pushes.
-- **The mount list is pre-declared** (plan 005): the repos actually worked in, added by a compose
-  edit at a chosen moment, because adding one costs every running session. A create for an
-  unmounted `cwd` is refused with a sentence that says exactly that, not a generic 403 — this is
-  the refusal a person will meet most often, and it has to tell them what to do next.
+- **The allowlist is pre-declared**: the repos actually worked in, named in the server's
+  environment rather than discovered. A create for a `cwd` outside it is refused with a sentence
+  that says exactly what would have to change, not a generic 403 — this is the refusal a person
+  will meet most often, and it has to tell them what to do next.
 
 Done when: creating a session, restarting the server, and listing again shows the same session
 still running with the same id; a session can be started under either the `claude` profile or the
@@ -120,10 +109,10 @@ The mechanism for `claude` is its **hooks**, not a prompt regex (plan 001 record
 the earlier plan had this wrong). Concretely, this milestone builds:
 
 - `POST /api/hooks/:sessionId` and the per-session secret from M1 that authenticates it
-- The settings fragment, merged once and idempotently into the container's agent-state volume at
-  container start — it is one shared file for every session of that agent, so merging per session
-  is concurrent writes for an identical result — with the session id and secret injected through
-  the environment, which is the part that genuinely varies (plan 004)
+- The settings fragment, merged once and idempotently into the agent-state directory at server
+  start — it is one shared file for every session of that agent, so merging per session is
+  concurrent writes for an identical result — with the session id and secret injected through the
+  environment, which is the part that genuinely varies (plan 004)
 - The event mapping: prompt and tool events to `working`, `Stop` and `Notification` to `waiting`.
   An unrecognised `notification_type` *within* `Notification` is actionable; an unrecognised event
   **name** is logged and changes no state. The denylist applies at the layer it was learned at and
@@ -161,17 +150,19 @@ it.
 
 **Plus the `launchd` watchdog** (plan 006). It belongs here rather than earlier: being unreachable
 only starts to cost something once the phone is the way in, and the watchdog supervises
-`tailscale serve`, which does not exist before this milestone. It runs on the host — not as a
-container with the Docker socket mounted, which plan 005 rules out — and is therefore also the
-only thing that can fix OrbStack not running or a dropped `serve` config.
+`tailscale serve`, which does not exist before this milestone. It runs on the host, which is
+also the only place that can fix a dropped `serve` config or a Mac that came back from a reboot
+with nothing started — and it is what finally supervises the Node process, which nothing does
+before this milestone (plan 006).
 
-Restarting is destructive (it kills tmux sessions), so the watchdog acts only after consecutive
-failures, backs off, gives up rather than crash-looping, and announces every restart.
+Restarting the server is not destructive on the host — tmux keeps the sessions — but it is still
+only worth doing on evidence, so the watchdog acts after consecutive failures, backs off, gives up
+rather than crash-looping, and announces every restart.
 
 Done when: it is installed on the phone, reached over cell (not wifi), **used to answer a real
-permission prompt with the key row and not merely to watch one** — and killing the container's
-process group results in an automatic recovery with a notification, while a deliberately
-slow-but-alive server is NOT restarted.
+permission prompt with the key row and not merely to watch one** — and killing the server
+process results in an automatic recovery with a notification, with the tmux sessions still alive
+afterwards, while a deliberately slow-but-alive server is NOT restarted.
 
 ## M5 — Push (optional)
 

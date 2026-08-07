@@ -70,7 +70,7 @@ export const createHandler = (deps: HttpDeps) => {
     const method = req.method ?? "GET";
     const path = url.pathname;
 
-    // Health is deliberately unauthenticated: it is the container's own probe, it reveals only
+    // Health is deliberately unauthenticated: it is what the watchdog probes, it reveals only
     // liveness and a version, and requiring a token would mean the health check needs the
     // credential that starts processes.
     if (method === "GET" && path === "/api/health") {

@@ -57,7 +57,7 @@ void describe("creating sessions", () => {
       async () => await registry.create("/workspace/not-mounted", "claude"),
       (error: Error) => {
         assert.ok(error instanceof CwdNotAllowedError);
-        assert.match(error.message, /docker-compose\.yml/);
+        assert.match(error.message, /AGENTDECK_MOUNTS/);
         return true;
       },
     );

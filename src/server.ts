@@ -31,13 +31,14 @@ const SYNC_INTERVAL_MS = 2000;
 /**
  * The token, generated on first run and stored 0600.
  *
- * The path is deliberately outside every bind mount. At the root of a mounted repository an agent
- * would meet it in an ordinary `ls -la` of its own working tree, and this token starts sessions in
- * any mounted repo, kills live ones, and attaches to every other agent's terminal. Same uid means
- * the mode hides nothing between the server and the agents - placement is the only control left,
- * and it hides rather than isolates (plan 005).
+ * Where the path should be is open, recorded in plan 005's superseded header: the old answer was
+ * reasoned from a container boundary that no longer exists. What survives is the requirement, not
+ * the reasoning - this token starts sessions in any allowed repo, kills live ones, and attaches to
+ * every other agent's terminal, and same uid means the mode hides nothing between the server and
+ * the agents. So it is never at the root of a tree a session is pointed at, where `ls -la` or
+ * `grep -rn token .` puts it in a transcript. Placement hides rather than isolates.
  */
-const loadToken = (path: string): string => {
+export const loadToken = (path: string): string => {
   try {
     const existing = readFileSync(path, "utf8").trim();
     if (existing !== "") return existing;
@@ -45,8 +46,22 @@ const loadToken = (path: string): string => {
     // Absent is the first-run case, not an error.
   }
   const token = generateToken();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  } catch (error) {
+    // The default path is a leftover from the container and is not writable on a Mac, so this is
+    // the first thing a plain `pnpm start` hits. An unhandled EACCES names no variable and offers
+    // no next step, which is how a token ends up wherever happened to be writable - including the
+    // one place it must not be. A sentence, like EADDRINUSE above it.
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `could not write the bearer token to ${path}: ${reason}. Set AGENTDECK_TOKEN_FILE to a ` +
+        `path this user can write. Not inside a directory a session is pointed at: an agent's ` +
+        `own \`ls -la\` or \`grep -rn token .\` would put the token in a transcript. Where it ` +
+        `should live now that there is no container is open - see plan 005's superseded header.`,
+    );
+  }
   return token;
 };
 
@@ -78,9 +93,9 @@ export const main = async (): Promise<void> => {
   const port = Number(env("AGENTDECK_PORT", "7777"));
   const tokenFile = env("AGENTDECK_TOKEN_FILE", "/var/lib/agentdeck/token");
 
-  // Where a profile's relative `waiting.settings` lands: the agent-state directory, which is the
-  // container's own bind mount and never the host's ~/.claude (plan 005). For claude that is the
-  // same directory the agent reads, which is what CLAUDE_CONFIG_DIR points the agent at. The
+  // Where a profile's relative `waiting.settings` lands: agentdeck's own agent-state directory,
+  // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004). For
+  // claude that is the same directory the agent reads, which CLAUDE_CONFIG_DIR points it at. The
   // fallback is deliberately somewhere disposable: a misconfigured server should merge into a
   // file nothing reads rather than into whichever config directory it happened to guess.
   const agentStateDir = env("AGENTDECK_AGENT_STATE_DIR", env("CLAUDE_CONFIG_DIR", "/tmp"));
@@ -102,8 +117,23 @@ export const main = async (): Promise<void> => {
     );
   }
 
-  // The mount list, which is also the cwd allowlist and what the picker is served. One list with
-  // three jobs, so it has exactly one source.
+  // Plan 001 states the Origin check as a property of the server, but the implementation is
+  // present-but-off: src/http.ts and src/ws.ts both short-circuit when no expected origin is
+  // configured, and AGENTDECK_ORIGIN is read here and set nowhere. Unset, every /api request and
+  // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
+  // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
+  // than leaving a stated protection whose enable switch is invisible.
+  if (process.env["AGENTDECK_ORIGIN"] === undefined) {
+    console.error(
+      "agentdeck: AGENTDECK_ORIGIN is not set, so the Origin check plan 001 describes is off. " +
+        "Any page a browser visits can call /api and open /ws with a token it has. Set it to the " +
+        "https://<host>.ts.net origin the phone loads.",
+    );
+  }
+
+  // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
+  // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of
+  // bind mounts; the list outlived the mounts.
   const mounts = env("AGENTDECK_MOUNTS", "")
     .split(":")
     .filter((entry) => entry !== "");
@@ -131,9 +161,9 @@ export const main = async (): Promise<void> => {
     }
   }
 
-  // Once, here, and not once per session: one container has one agent-state directory and so one
-  // settings file, shared by every session of that agent. What genuinely varies per session is the
-  // id and the secret, and those go through the environment at spawn (plan 004).
+  // Once, here, and not once per session: one agent-state directory means one settings file,
+  // shared by every session of that agent. What genuinely varies per session is the id and the
+  // secret, and those go through the environment at spawn (plan 004).
   for (const profile of profiles.values()) {
     if (profile.waiting?.via !== "hook") continue;
     const settingsPath = isAbsolute(profile.waiting.settings)
@@ -153,9 +183,9 @@ export const main = async (): Promise<void> => {
   }
 
   const tmux = new Tmux({ socket });
-  // Before anything asks tmux a question. Idempotent, so it costs nothing when the container's
-  // entrypoint already did it, and it is what lets the server work standalone - without it,
-  // /api/health reports 503 at boot on any machine where nothing else started tmux first.
+  // Before anything asks tmux a question. Idempotent, so it costs nothing when a tmux server is
+  // already up, and it is what lets the server start standalone - without it, /api/health reports
+  // 503 at boot on any machine where nothing else started tmux first.
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
@@ -166,7 +196,13 @@ export const main = async (): Promise<void> => {
   const reaped = await registry.reap();
   if (reaped.length > 0) console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
 
-  const token = loadToken(tokenFile);
+  let token: string;
+  try {
+    token = loadToken(tokenFile);
+  } catch (error) {
+    console.error(`agentdeck: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const server = createServer(
     createHandler({
@@ -205,9 +241,8 @@ export const main = async (): Promise<void> => {
   server.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE") {
       console.error(
-        `agentdeck: port ${String(port)} is already in use. Another agentdeck, or the container ` +
-          `(docker compose publishes this port), or something else. Stop it, or set ` +
-          `AGENTDECK_PORT to a free port.`,
+        `agentdeck: port ${String(port)} is already in use. Another agentdeck, or something ` +
+          `else on this Mac. Stop it, or set AGENTDECK_PORT to a free port.`,
       );
       process.exit(1);
     }

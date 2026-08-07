@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
 import { CwdAllowlist } from "./cwds.ts";
@@ -6,7 +7,7 @@ import { CwdAllowlist } from "./cwds.ts";
 const list = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
 
 void describe("the cwd allowlist", () => {
-  void test("allows exactly what is mounted", () => {
+  void test("allows exactly what is on the list", () => {
     assert.equal(list.allows("/workspace/agentdeck"), true);
     assert.equal(list.allows("/workspace/web"), true);
     assert.equal(list.allows("/workspace/other"), false);
@@ -34,9 +35,37 @@ void describe("the cwd allowlist", () => {
 
   void test("the refusal names what would have to change, and its cost", () => {
     const message = list.refusal("/workspace/newly-cloned");
-    assert.match(message, /docker-compose\.yml/);
-    assert.match(message, /every running session/);
-    assert.match(message, /\/workspace\/agentdeck/, "it should say what IS mounted");
+    assert.match(message, /AGENTDECK_MOUNTS/);
+    assert.match(message, /restart agentdeck/);
+    assert.match(message, /\/workspace\/agentdeck/, "it should say what IS allowed");
+  });
+
+  void test("the refusal does not price the restart at a reconnect", () => {
+    // The registry keeps cwd, agent and the per-session hook secret in memory only, so sessions
+    // that survive the restart come back nameless and never report `waiting` again. A refusal
+    // that says the restart costs "a reconnect" is what makes the losing action sound routine.
+    const message = list.refusal("/workspace/newly-cloned");
+    assert.doesNotMatch(message, /costs a reconnect/);
+    assert.match(message, /waiting detection do not survive/);
+    assert.match(message, /stop reporting when they need you/);
+  });
+
+  void test("the README does not price the restart at a reconnect either", async () => {
+    // The README is the document a person reads first, so it is the one that decides whether the
+    // restart sounds routine. Prose is where this regressed once already.
+    const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+    assert.doesNotMatch(readme, /costs a\s+reconnect/);
+    assert.match(readme, /waiting detection do not survive/);
+    assert.match(readme, /stops reporting when it needs you/);
+  });
+});
+
+void describe("plan 006 prices a restart at what it actually costs", () => {
+  void test("it names the metadata the surviving sessions lose", async () => {
+    const plan = await readFile(new URL("../plans/006-availability.md", import.meta.url), "utf8");
+    assert.match(plan, /hook secret in memory only/);
+    assert.match(plan, /never\s+reports `waiting` again/);
+    assert.match(plan, /known gap/);
   });
 });
 

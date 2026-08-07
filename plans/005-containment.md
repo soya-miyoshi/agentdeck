@@ -16,7 +16,8 @@
 > therefore its hook secret; `cwd` being where a session was pointed rather than a wall it is held
 > behind. The self-mount consequence generalises rather than lifts — the files the host executes
 > (`eslint.config.mjs`, `.prettierrc*`, `package.json` scripts, `pnpm-lock.yaml`,
-> `src/**/*.test.ts`, `mise.toml`, `.claude/`) are agent-writable as before, and there is no
+> `src/**/*.test.ts`, `mise.toml`, `.claude/`, `scripts/` - `package.json`'s own `postinstall` runs
+> `scripts/fix-node-pty-permissions.mjs` on every `pnpm install`) are agent-writable as before, and there is no
 > longer a container between that and the machine. `src/containment.test.ts` tests that this stays
 > written down, and still applies.
 >

@@ -1,14 +1,18 @@
-// The containment claim is a documented property, so it is tested where it is made. agentdeck's
-// own repository is on the compose mount list, which makes the files the HOST executes -
-// Dockerfile, docker-compose.yml, the package.json scripts, eslint.config.mjs, and the
-// node_modules and .pnpm-store trees git cannot see - writable by any
-// agent in the container. README and plan 005 both state a boundary ("damages a container rather
-// than the Mac"); these tests fail if that self-mount consequence stops being stated alongside it.
+// agentdeck runs on the Mac now (plan 005 is superseded), so there is no boundary left to test -
+// only the consequence, which is the same one and worse: an agent working in this repository can
+// write the files the host then executes. The package.json scripts, eslint.config.mjs, and the
+// node_modules and .pnpm-store trees git cannot see are all in reach, and review is the only
+// control. These tests fail if that stops being written down where the claim is made.
+//
+// Plan 005's superseded header says these tests still apply, and this is what that means: the
+// assertions about the container are gone, the assertions about what the container never covered
+// are unchanged.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 const repoRoot = new URL("..", import.meta.url);
@@ -36,10 +40,15 @@ const readDoc = async (name: string): Promise<string> =>
 // privileges — `permissions:` lives inside the file being protected. `.git/config` and
 // `.git/hooks/` are executed by git itself, which makes the prescribed `git diff` its own
 // trigger, and neither is tracked, so the review cannot see them at all.
+//
+// `scripts/` is the one a lockfile-shaped review misses entirely. `package.json` declares
+// `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm always runs the ROOT
+// project's own lifecycle scripts - the pnpm 9 gating caveat above covers dependencies only. So
+// `pnpm install --frozen-lockfile` executes a file in this tree no matter what the lockfile says,
+// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides.
 const hostExecutedFiles = [
-  "Dockerfile",
-  "docker-compose.yml",
   "package.json",
+  "scripts/",
   "pnpm-lock.yaml",
   "eslint.config.*",
   ".prettierrc*",
@@ -52,27 +61,23 @@ const hostExecutedFiles = [
   ".git/hooks/",
 ];
 
-void describe("the self-mount consequence is documented where the containment claim is made", () => {
-  void test("compose still mounts agentdeck into its own container", async () => {
-    // The premise of the other assertions. If this mount ever goes away, they can go too.
-    const compose = await readDoc("docker-compose.yml");
-    assert.match(compose, /soya-miyoshi\/agentdeck:\/workspace\/agentdeck/);
-  });
-
+void describe("the host-execution consequence is documented where the claim is made", () => {
   void test("the README says the host executes agent-writable files from this repo", async () => {
     const readme = await readDoc("README.md");
     for (const file of hostExecutedFiles) {
       assert.ok(readme.includes(file), `README does not name ${file} as agent-writable`);
     }
     assert.match(readme, /agent-writable/);
-    assert.match(readme, /docker compose up --build/);
   });
 
-  void test("the README makes the container the documented place to run the toolchain", async () => {
+  void test("the README says the review is now the only control, not the second of two", async () => {
+    // The container was the first of two. Its removal is the whole reason the review matters
+    // more than it did, and a reader who does not meet that sentence will treat the checklist as
+    // belt-and-braces.
     const readme = await readDoc("README.md");
     const toolchain = readme.slice(readme.indexOf("## Toolchain"));
     assert.ok(toolchain.length > 0, "README has no Toolchain section");
-    assert.match(toolchain, /docker compose exec -T -w \/workspace\/agentdeck app/);
+    assert.match(toolchain, /only control rather than the second of two/);
     assert.match(toolchain, /git status/);
     assert.match(toolchain, /git diff/);
   });
@@ -98,31 +103,28 @@ void describe("the self-mount consequence is documented where the containment cl
     for (const file of hostExecutedFiles) {
       assert.ok(section.includes(file), `plan 005 does not name ${file} as agent-writable`);
     }
-    assert.match(section, /docker\.sock/);
   });
 });
 
-// The naming of the four files above is documentation, and documentation was the whole control.
-// These assertions are about the structure instead, because `git status` cannot see either of the
-// two agent-writable trees the host executes, so no amount of prose makes reviewing them work.
-void describe("the host-executed trees git cannot see are off the bind mount", () => {
+// `git status` cannot see either of these trees, so the ordinary review is blind to them. The
+// container-local volume that used to cover that is gone with the container, which leaves one
+// command - `git status --ignored` over both paths - and the README has to carry it, because
+// nothing else will.
+void describe("the host-executed trees git cannot see are covered by a command that can", () => {
   for (const path of ["node_modules", ".pnpm-store"]) {
-    void test(`compose layers a container-local volume over ${path}`, async () => {
-      const compose = await readDoc("docker-compose.yml");
-      assert.match(
-        compose,
-        new RegExp(
-          `\\n\\s+- agentdeck-[a-z-]+:/workspace/agentdeck/${path.replace(".", "\\.")}\\b`,
-        ),
-        `${path} is still the host's, and it is gitignored so review cannot cover it`,
-      );
-    });
-
-    void test(`${path} is gitignored, which is why the volume is the control`, async () => {
+    void test(`${path} is gitignored, which is why the ordinary review misses it`, async () => {
       const ignored = await readDoc(".gitignore");
       assert.match(ignored, new RegExp(`^${path.replace(".", "\\.")}$`, "m"));
     });
   }
+
+  void test("the README's checklist names the command that can see them", async () => {
+    const readme = await readDoc("README.md");
+    assert.ok(
+      readme.includes("git status --ignored -- node_modules .pnpm-store"),
+      "README does not name a command that can see the two gitignored executed trees",
+    );
+  });
 
   void test("both trees are named as agent-writable where the claim is made", async () => {
     const readme = await readDoc("README.md");
@@ -134,31 +136,17 @@ void describe("the host-executed trees git cannot see are off the bind mount", (
   });
 });
 
-// `.git` is inside the bind mount and none of it is tracked, so the `git status` / `git diff`
-// review is as blind to `.git/config` and `.git/hooks/` as it is to node_modules. An earlier
-// version of this comment said it could not be masked because the container needs the
-// repository's git metadata; that was wrong about the requirement. This pipeline's agents run
-// git on the HOST, so an empty volume over .git costs the container nothing it actually uses and
-// removes the surface instead of documenting it.
-//
-// Both controls stay, because they cover different sides. The mask stops a container session
-// from writing the surfaces; the host hardening and the two review commands still matter, since
-// host git runs against the real .git that the mask does not touch.
+// None of `.git` is tracked, so the `git status` / `git diff` review is as blind to
+// `.git/config` and `.git/hooks/` as it is to node_modules - and `git diff` is itself what fires
+// a `[core] pager` entry. The volume that used to mask `.git` from a container session is gone
+// with the container, so what remains is the pair of commands that can see the surfaces and the
+// hardening on every git command this pipeline runs.
 const docs: readonly (readonly [string, string])[] = [
   ["README.md", "README.md"],
   ["plan 005", "plans/005-containment.md"],
 ];
 
 void describe("git's own execution surfaces are covered where review cannot see them", () => {
-  void test("compose masks .git so a container session cannot reach the surfaces at all", async () => {
-    const compose = await readDoc("docker-compose.yml");
-    assert.match(
-      compose,
-      /\n\s+- agentdeck-git-masked:\/workspace\/agentdeck\/\.git\b/,
-      ".git is still the host's, and nothing under it is tracked, so review cannot cover it",
-    );
-  });
-
   for (const [name, path] of docs) {
     void test(`${name} names the two commands that can see .git`, async () => {
       const doc = await readDoc(path);
@@ -217,19 +205,58 @@ void describe("the review list is stated as a floor rather than the whole job", 
   });
 });
 
-void describe("the user's bearer token is not inside a bind mount", () => {
-  void test("it is a container-local path, and .gitignore no longer puts it at the repo root", async () => {
-    // The repo root IS the bind mount every session can read, and every session runs as the uid
-    // the server runs as, so mode 0600 separates nothing. Placement is the only control left.
+void describe("the user's bearer token is not at the root of a working tree", () => {
+  void test(".gitignore does not put it at the repo root", async () => {
+    // The repo root is a directory sessions are pointed at, and every session runs as the uid the
+    // server runs as, so mode 0600 separates nothing. Placement is the only control left. Where
+    // it should live now that there is no container is open, recorded in plan 005's superseded
+    // header - this asserts only the one place it must not be.
     const ignored = await readDoc(".gitignore");
     assert.doesNotMatch(
       ignored,
       /^\.agentdeck-token$/m,
-      ".agentdeck-token at the repo root is inside the mount every agent session can read",
+      ".agentdeck-token at the repo root is where an agent's own `ls -la` meets it",
     );
-    const compose = await readDoc("docker-compose.yml");
-    assert.match(compose, /AGENTDECK_TOKEN_FILE: \/var\/lib\/agentdeck\/token/);
-    assert.match(compose, /\n\s+- agentdeck-state:\/var\/lib\/agentdeck\b/);
+  });
+
+  void test("neither .gitignore nor loadToken claims a container protects the placement", async () => {
+    // The .gitignore comment is the only tracked file that tells a reader where the token goes,
+    // and loadToken's docstring is the only one a reader of the code meets. Both used to say the
+    // path was outside every bind mount, in a container that no longer exists - a protection a
+    // reader would credit, and so never make the choice plan 005 says is open.
+    for (const [path, text] of [
+      [".gitignore", await readDoc(".gitignore")],
+      ["src/server.ts", (await readDoc("src/server.ts")).slice(0, 3000)],
+    ] as const) {
+      assert.doesNotMatch(text, /bind mount/i, `${path} still credits a bind mount`);
+      assert.doesNotMatch(text, /container-local volume/i, `${path} still credits a volume`);
+    }
+    const ignored = await readDoc(".gitignore");
+    assert.match(ignored, /AGENTDECK_TOKEN_FILE/);
+    assert.match(ignored, /undecided|open in plan 005/i, ".gitignore must say the home is open");
+    assert.match(ignored, /root of a tree a session is\s*#?\s*pointed at/);
+  });
+
+  void test("an unwritable token path is a sentence naming AGENTDECK_TOKEN_FILE", async () => {
+    // The default path is /var/lib/agentdeck/token, which no ordinary user on a Mac can create,
+    // so this is the first thing `pnpm start` hits. An unhandled EACCES names no variable and the
+    // token then lands wherever happened to be writable - including the one place it must not be.
+    const { loadToken } = await import("./server.ts");
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-token-"));
+    try {
+      chmodSync(dir, 0o500);
+      assert.throws(
+        () => loadToken(join(dir, "nested", "token")),
+        (error: Error) => {
+          assert.match(error.message, /AGENTDECK_TOKEN_FILE/);
+          assert.match(error.message, /session is pointed at/);
+          return true;
+        },
+      );
+    } finally {
+      chmodSync(dir, 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   void test("plan 005 lists the token in the blast radius with the same-uid caveat", async () => {
@@ -238,69 +265,5 @@ void describe("the user's bearer token is not inside a bind mount", () => {
     const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
     assert.match(section, /AGENTDECK_TOKEN_FILE/);
     assert.match(section, /distinct uid/);
-  });
-});
-
-// Non-root is worth the distance between the agent's uid and root, and the image's setuid-root
-// helpers make that distance short. These assert the two lines that close it, plus the plan
-// bullet that says why, because "run as node" reads like the whole control and is not.
-void describe("the container cannot escalate to root", () => {
-  void test("compose sets no-new-privileges", async () => {
-    const compose = await readDoc("docker-compose.yml");
-    assert.match(compose, /\n\s+security_opt:\n\s+- "no-new-privileges:true"/);
-  });
-
-  void test("compose drops all capabilities", async () => {
-    const compose = await readDoc("docker-compose.yml");
-    assert.match(compose, /\n\s+cap_drop:\n\s+- ALL\b/);
-  });
-
-  void test("plan 005's container hygiene says why", async () => {
-    const plan = await readDoc("plans/005-containment.md");
-    const start = plan.indexOf("### Container hygiene");
-    assert.ok(start >= 0, "plan 005 has no `Container hygiene` section");
-    const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
-    assert.match(section, /no-new-privileges/);
-    assert.match(section, /cap_drop/);
-    assert.match(section, /setuid/);
-  });
-});
-
-// Asserting the README mentions a command is not evidence the command runs; that is the failure
-// the toolchain suite exists to prevent, and the containment control deserves the same treatment.
-void describe("the documented in-container command actually runs", () => {
-  const containerUp = ((): boolean => {
-    try {
-      const out = execFileSync(
-        "docker",
-        ["compose", "ps", "--status=running", "--format", "{{.Service}}"],
-        {
-          cwd: fileURLToPath(repoRoot),
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        },
-      );
-      return out.includes("app");
-    } catch {
-      return false;
-    }
-  })();
-
-  void test(
-    "pnpm exists in the image at the documented working directory",
-    { skip: !containerUp },
-    () => {
-      const out = execFileSync(
-        "docker",
-        ["compose", "exec", "-T", "-w", "/workspace/agentdeck", "app", "pnpm", "--version"],
-        { cwd: fileURLToPath(repoRoot), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      );
-      assert.match(out.trim(), /^9\./);
-    },
-  );
-
-  void test("the README documents the command with its working directory", async () => {
-    const readme = await readDoc("README.md");
-    assert.match(readme, /docker compose exec -T -w \/workspace\/agentdeck app pnpm lint/);
   });
 });

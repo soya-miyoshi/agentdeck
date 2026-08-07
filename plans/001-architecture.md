@@ -21,10 +21,10 @@ phone is the way in. Checked at M0 costs a minute.
 The server binds loopback and lets `tailscale serve` proxy in, rather than binding the tailnet
 address directly. One listener, one place where exposure is decided.
 
-Containerised (plan 005), that becomes: the container publishes its port to `127.0.0.1` on the
-host, `tailscaled` stays on the host, and `tailscale serve` proxies to that loopback port. The
-container needs no Tailscale, no tailnet identity, and no `--privileged` or `/dev/net/tun`. The
-single-place-where-exposure-is-decided property survives intact.
+On the host (plan 005 is superseded) that is the whole arrangement: the server listens on
+`127.0.0.1`, `tailscaled` is already running there, and `tailscale serve` proxies to that loopback
+port. Nothing needs a second tailnet identity, and the single-place-where-exposure-is-decided
+property is the only thing the design relies on.
 
 **Rejected: a cloud relay (Firestore command documents), which is what MulmoTerminal does.**
 Its purpose is to connect two machines that cannot reach each other. Tailscale already connects
@@ -56,21 +56,21 @@ which is the distinction the strip exists for. Plan 002 has the field and the re
 **Rejected: node-pty alone, no tmux.** Simpler and one less system dependency, but the agent
 dies with the server. For sessions that run for hours unattended, that is the wrong trade.
 
-**Scope of that guarantee, once containerised** (plan 005): tmux and the server both live in the
-container, so restarting the Node process still reattaches to living agents — **but only if the
-Node process is not PID 1.** With the obvious Dockerfile it is, and then a crash exits the
-container, `restart: unless-stopped` recreates it, and tmux dies with every session in it. The
-property this whole dependency was taken on for would evaporate precisely where it was meant to
-apply, and it would look like it was working right up until the first crash.
+**Scope of that guarantee, on the host** (plan 005 is superseded): tmux and the server both run
+on the Mac, as the user, against the `agentdeck` tmux socket. The tmux server is a daemon of its
+own, so restarting the Node process reattaches to living agents rather than orphaning them —
+that property no longer depends on any process tree we lay out, because there is no container and
+therefore no PID 1 to get wrong.
 
-So PID 1 is a small init that owns the tmux server and supervises the Node process, and a Node
-crash is an in-container event. Specified as M0 work in plan 003 and plan 005; stated here
-because it is a precondition of the decision above rather than a packaging detail.
+What it does depend on is **something starting Node again after it dies**, and on the host nothing
+does yet. A crash leaves tmux and every agent alive and the server gone until a person runs it:
+sessions survive, reachability does not. The `launchd` agent in plan 006 is where that is
+answered, at M4; until then a crash is a manual restart, and the honest claim is "the sessions
+survive a crash of the server", not "the server survives a crash".
 
-A **container** restart still takes every session with it. The honest claim is "survives a crash
-or a redeploy of the app code", not "survives everything", and `docker compose down` is a
-destructive act on running work. Keeping tmux on the host instead would punch a hole straight
-through the containment, so this is accepted rather than solved.
+The end of that scope is the machine. A reboot, a `tmux kill-server`, or logging out takes every
+session with it. Nothing here tries to survive that — the working day is the stated persistence
+requirement.
 
 ## Streaming: WebSocket plus a bounded ring buffer
 
@@ -211,7 +211,10 @@ connect at all, which stops being true the moment `tailscale serve` is running.
   hex. Worth writing down because the obvious `randomBytes(32).toString("base64")` is wrong about
   one time in four and right the rest of the time.
 - Reject any request whose `Origin` is not the expected `ts.net` host, so a page the phone
-  visits cannot drive the socket.
+  visits cannot drive the socket. **Present but off until configured:** the expected host comes
+  from `AGENTDECK_ORIGIN`, and with it unset both `/api` and `/ws` accept any `Origin`. That is
+  the state of an ordinary `pnpm start`, so the server says so at boot rather than letting a
+  ticked box stand in for a check that is not running.
 - Never `tailscale funnel`. That publishes to the internet, and nothing in this design is built
   to survive that.
 

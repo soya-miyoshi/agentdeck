@@ -1,26 +1,22 @@
 # Toolchain, pinned so a checkout matches CI.
 #
 #   mise install
-#   docker compose up -d --build
-#   docker compose exec -T -w /workspace/agentdeck app pnpm install --frozen-lockfile
+#   pnpm install --frozen-lockfile
 #
-# The install runs INSIDE the container, and that is a security decision rather than a
-# convenience one. `pnpm install` on the Mac executes this repository's own `pnpm-lock.yaml`
-# and `package.json`, both of which are agent-writable through the mount in
-# docker-compose.yml — and pnpm 9 does not gate dependency lifecycle scripts the way pnpm 10
+# Both run on the Mac, and both are review gates rather than conveniences. `pnpm install`
+# executes this repository's own `pnpm-lock.yaml` and `package.json`, which agents working in
+# this repo can write - and pnpm 9 does not gate dependency lifecycle scripts the way pnpm 10
 # does. So an agent that edits a `resolution: {tarball: ...}` entry, or adds a devDependency
-# with a postinstall, gets code execution on the host with the human's full identity the next
-# time anyone follows the documented install. A thousand-line lockfile diff is exactly the
-# diff nobody reads. Plan 005 has the argument; README's Toolchain section has the workflow.
-#
-# mise still pins node here because CI runs the suite on the runner directly, without the
-# container (plan 003, M0: CI does not build the arm64 image because nothing in CI would
-# then run it).
+# with a postinstall, gets code execution with the human's full identity the next time anyone
+# follows the documented install. A thousand-line lockfile diff is exactly the diff nobody
+# reads. `mise install` is the same shape: mise runs `[env] _.source` and `[tasks]` from files
+# in this tree. README's Toolchain section has the review that has to precede both, and plan
+# 005 has the argument for why a boundary would have been better than a review.
 #
 # Node 22: current LTS, and what the other repos here are pinned to.
 #
 # pnpm rather than yarn: `infra` already uses it, and its strict node_modules layout refuses
-# phantom dependencies — a package can only import what it declares. In a repo whose premise is
+# phantom dependencies - a package can only import what it declares. In a repo whose premise is
 # a dependency set small enough to read, that property is the point, not a preference.
 [tools]
 node = "22"
