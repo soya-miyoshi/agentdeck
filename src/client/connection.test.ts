@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { ServerMessage } from "../protocol.ts";
-import { MAX_FRAME_BYTES } from "../ws.ts";
+import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW } from "../ws.ts";
 import {
   Connection,
   MAX_INPUT_FRAME_BYTES,
@@ -204,6 +204,47 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     assert.equal(
       frames.map((frame) => frame["data"] as string).join(""),
       "\u{1f600}".repeat(60_000),
+    );
+  });
+
+  void test("typing is still one frame per keystroke", () => {
+    // The regression the chunker could quietly introduce at the other end of the range. A
+    // keystroke that arrived as two frames would be two writes into the pty for one key, and the
+    // per-socket frame budget is what a person typing fast would then be spending.
+    const h = harness();
+    const frames = paste(h, "l");
+    assert.equal(frames.length, 1);
+    assert.deepEqual(frames[0], { t: "input", sessionId: "a", data: "l" });
+  });
+
+  void test("every piece is a whole input frame for the same session", () => {
+    // A split that lost the envelope would be bytes with no destination. The server routes on
+    // sessionId per frame, not on what the previous frame said.
+    const h = harness();
+    const frames = paste(h, "x".repeat(200_000));
+    assert.ok(frames.length > 1);
+    for (const frame of frames) {
+      assert.equal(frame["t"], "input");
+      assert.equal(frame["sessionId"], "a");
+      assert.equal(typeof frame["data"], "string");
+      assert.notEqual(frame["data"], "");
+    }
+  });
+
+  void test("an ordinary paste stays well inside the server's per-window frame budget", () => {
+    // The second way the same paste can vanish, and the quieter one. Frames past
+    // MAX_FRAMES_PER_WINDOW are DROPPED by the receiver rather than closing the socket
+    // (src/ws.ts withinRate), so a chunker that cut too finely would trade a 1009 close for a
+    // silently truncated paste - the same lost bytes with less to go on. 500 KB is the top of
+    // what a person pastes into a terminal by hand.
+    const h = harness();
+    const frames = paste(
+      h,
+      "a line of a pasted build log, about sixty bytes long\n".repeat(10_000),
+    );
+    assert.ok(
+      frames.length < MAX_FRAMES_PER_WINDOW / 2,
+      `a 500 KB paste became ${String(frames.length)} frames against a budget of ${String(MAX_FRAMES_PER_WINDOW)} per second`,
     );
   });
 });

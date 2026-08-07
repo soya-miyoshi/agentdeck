@@ -38,7 +38,13 @@ const socket = `agentdeck-e2e-${String(process.pid)}`;
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
 const home = temp("agentdeck-e2e-home-");
+// One working tree per test rather than one for the file. A session id is a pure function of
+// (absolute path, agent id) - plan 002 - so two tests naming the same directory and the same agent
+// would be handed the SAME tmux session by `new-session -A`, and the second would inherit whatever
+// the first left in the pane. That is a shared-state flake waiting for a slow machine, and it
+// would fail as "the shell did not answer" rather than as what it is.
 const work = temp("agentdeck-e2e-work-");
+const pasteWork = temp("agentdeck-e2e-paste-");
 const conf = temp("agentdeck-e2e-conf-");
 
 const profiles = join(conf, "agents.json");
@@ -73,7 +79,7 @@ before(async () => {
       LC_ALL: "en_US.UTF-8",
       TMUX_SOCKET: socket,
       AGENTDECK_PORT: String(port),
-      AGENTDECK_MOUNTS: work,
+      AGENTDECK_MOUNTS: `${work}:${pasteWork}`,
       AGENTDECK_PROFILES: profiles,
       AGENTDECK_AGENT_STATE_DIR: join(conf, "agent-state"),
     },
@@ -117,7 +123,7 @@ after(async () => {
   } catch {
     // Already gone: the desired end state.
   }
-  for (const dir of [home, work, conf]) rmSync(dir, { recursive: true, force: true });
+  for (const dir of [home, work, pasteWork, conf]) rmSync(dir, { recursive: true, force: true });
 });
 
 /** What xterm would have painted, in the order it would have painted it. */
@@ -159,11 +165,11 @@ interface Driven {
  * The render callback is App.vue's, restated: a repaint clears and writes history first, because a
  * snapshot supersedes everything before it.
  */
-const drive = async (): Promise<Driven> => {
+const drive = async (cwd: string): Promise<Driven> => {
   const created = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ cwd: work, agent: "sh" }),
+    body: JSON.stringify({ cwd, agent: "sh" }),
   });
   const body = (await created.json()) as { session?: Session; error?: string };
   assert.equal(created.status, 201, body.error ?? "");
@@ -213,7 +219,7 @@ const drive = async (): Promise<Driven> => {
 
 void describe("an agent driven from the browser, end to end", () => {
   void test("a keystroke reaches the agent and its output paints back", async () => {
-    const driven = await drive();
+    const driven = await drive(work);
     try {
       // Typed the way xterm delivers it: a carriage return, not a newline, because that is what
       // the Enter key produces and what the pty's line discipline turns into one.
@@ -237,9 +243,9 @@ void describe("an agent driven from the browser, end to end", () => {
     // 1009, the client cannot tell that from a phone in a lift, and it runs the ladder and
     // re-attaches every tab with a cold capture-pane each. The paste is gone with no explanation,
     // so the user pastes it again and it repeats.
-    const driven = await drive();
+    const driven = await drive(pasteWork);
     try {
-      const out = join(work, "pasted.txt");
+      const out = join(pasteWork, "pasted.txt");
       // 300 KB of pasted log: five times the frame the receiver will accept, and lines short
       // enough that the tty's canonical-mode line buffer is never the thing being tested.
       const pasted = `${"2026-08-08T09:15:04Z resolved dependency graph".padEnd(59, " ")}\n`.repeat(
