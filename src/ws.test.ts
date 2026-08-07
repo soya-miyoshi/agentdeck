@@ -740,3 +740,100 @@ void describe("a reconnect storm is not a spawn storm", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+// What one `attach` may hold, and for how long. The queue that keeps chunks from arriving ahead
+// of the snapshot is released in a `finally`, so its size is whatever the session printed while
+// the build ran - and the build's own bound is fifteen seconds against a tmux server that has
+// stopped answering. A build, a log tail or an agent printing at a few MB/s fills that window
+// with the stream's own Buffers, per attaching socket.
+void describe("an attach cannot hold the session's whole output while it waits", () => {
+  // Assigned before the attach that triggers the repaint below, which is the only thing that
+  // reads it.
+  let noisyStream: SessionStream | undefined;
+  void test("a flood during the build is dropped and answered from the ring buffer", async () => {
+    const noisy = await ownServer({
+      repaint: async () => {
+        // The screen the repaint describes is the one at THIS position; the flood below arrives
+        // after it, which is what leaves the queue with real work to flush.
+        const target = noisyStream;
+        assert.ok(target, "the repaint ran before the stream was known");
+        const seq = target.buffer.headSeq;
+        for (let index = 0; index < 60; index += 1) {
+          target.write(Buffer.alloc(100 * 1024, "x"));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return { data: "repainted", seq };
+      },
+    });
+    noisyStream = noisy.stream;
+    noisy.attach();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const bytes = noisy.frames
+      .filter((frame) => frame["t"] === "chunk" || frame["t"] === "snapshot")
+      .reduce((total, frame) => total + (frame["data"] as string).length, 0);
+    // The ring buffer is 256 KB. Anything near the 6 MB written is the queue, retained in full.
+    assert.ok(
+      bytes < 1024 * 1024,
+      `the attach held ${String(bytes)} bytes of output instead of dropping to the ring buffer`,
+    );
+    // Dropping must not mean going silent: the client is still caught up.
+    assert.ok(
+      noisy.frames.some(
+        (frame) =>
+          (frame["t"] === "snapshot" || frame["t"] === "chunk") &&
+          String(frame["data"]).includes("x"),
+      ),
+      "the client was left with a hole where the flood was",
+    );
+    noisy.stop();
+  });
+});
+
+// The other bound on the same window: how many OTHER clients' failed builds one attach waits out
+// before it stops joining. Each is up to a whole snapshot timeout, so an unbounded chain of them
+// is an unbounded park - caller k of a storm waits builds 1..k-1 in turn.
+void describe("one attach cannot be parked behind every other attach's failure", () => {
+  void test("a storm where every build fails still settles in a bounded number of builds", async () => {
+    const stormStream = new SessionStream({ sessionId: "s1" });
+    const { url: sUrl, close: sClose } = await privateServer(stormStream, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      throw new Error("stdout maxBuffer length exceeded");
+    });
+    const sockets = Array.from({ length: 8 }, () => new WebSocket(sUrl, TOKEN, { origin: ORIGIN }));
+    const errors: number[] = [];
+    await Promise.all(
+      sockets.map(
+        async (socket) =>
+          await new Promise<void>((resolve, reject) => {
+            socket.once("open", resolve);
+            socket.once("error", reject);
+          }),
+      ),
+    );
+    const started = Date.now();
+    for (const socket of sockets) {
+      socket.on("message", (raw: Buffer) => {
+        if ((JSON.parse(raw.toString("utf8")) as Frame)["t"] === "error") {
+          errors.push(Date.now() - started);
+        }
+      });
+      socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    for (const socket of sockets) socket.close();
+    sClose();
+
+    assert.equal(errors.length, 8, "not every client was told its snapshot failed");
+    const last = Math.max(...errors);
+    // Three builds is the bound (two inherited failures plus your own): 240 ms of build here.
+    // Chaining one per client would be eight, and the same shape at the real fifteen-second
+    // timeout is two minutes parked while holding a queue.
+    assert.ok(
+      last < 500,
+      `the last client was parked ${String(last)}ms, which is one build per client`,
+    );
+  });
+});
