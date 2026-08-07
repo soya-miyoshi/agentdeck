@@ -127,10 +127,11 @@ export const INSTALLED_EVENTS: readonly string[] = [
 /**
  * How agentdeck's own hook entries are recognised on a later merge.
  *
- * The URL substring rather than the whole command, so changing the port or the flags still
- * replaces the previous entry instead of leaving a stale one beside it.
+ * The URL path prefix rather than the whole command, so changing the port, the transport or the
+ * flags still replaces the previous entry instead of leaving a stale one beside it. It also still
+ * matches the older curl form, whose URL contained this prefix too.
  */
-export const HOOK_MARKER = "/api/hooks/$AGENTDECK_SESSION_ID";
+export const HOOK_MARKER = "/api/hooks/";
 
 /**
  * The one line that runs per event.
@@ -142,12 +143,48 @@ export const HOOK_MARKER = "/api/hooks/$AGENTDECK_SESSION_ID";
  *
  * The session id and secret arrive through the environment because that is per process and needs
  * no coordination - the file itself is shared by every session of this agent (plan 004).
+ *
+ * The transport is `node -e` rather than curl, and that is the whole point of this shape. A shell
+ * expands "$AGENTDECK_SECRET" BEFORE exec, so a curl form puts the literal secret in argv, and
+ * argv - unlike the environment - is readable from any process running as this user
+ * (`ps -Ao args=`). A hook fires dozens of times a turn, so that would broadcast the secret
+ * continuously for the life of the session. Node reads it out of its own environment instead, so
+ * no value ever reaches an argument.
+ *
+ * The interpreter is written out as the ABSOLUTE path of the node this server is running on, not
+ * the bare name `node`. The curl form it replaced needed no PATH beyond `/usr/bin`; a bare `node`
+ * does, and a session started from launchd or any at-boot wrapper gets a minimal PATH with no
+ * Homebrew/mise/nvm node on it. Every hook would then die with `node: command not found`, the
+ * trailing `exit 0` would swallow it, and the strip would silently stop reporting waiting sessions.
+ * `installHookSettings` rewrites the file at every boot, so a moved or rebuilt node self-heals on
+ * the next start.
  */
-export const hookCommand = (port: number): string =>
-  `[ -n "$AGENTDECK_SESSION_ID" ] || exit 0; ` +
-  `curl -sS -m 2 -X POST ` +
-  `-H "X-Agentdeck-Secret: $AGENTDECK_SECRET" -H "Content-Type: application/json" ` +
-  `--data-binary @- "http://127.0.0.1:${String(port)}${HOOK_MARKER}" >/dev/null 2>&1; exit 0`;
+export const hookCommand = (port: number, interpreter: string = process.execPath): string => {
+  if (!interpreter.startsWith("/")) {
+    throw new Error(`hook interpreter must be an absolute path, got ${interpreter}`);
+  }
+  const quoted = `'${interpreter.split("'").join(`'\\''`)}'`;
+  const script =
+    // curl had `-m 2`, a cap on the whole operation. `timeout` below is only a socket-inactivity
+    // timer and cannot even start until stdin closes, so without this a hook whose stdin is never
+    // closed leaves a Node runtime resident for the life of the session, buffering as it goes.
+    `setTimeout(()=>process.exit(0),2000).unref();` +
+    `let b="";` +
+    // The server refuses bodies over 64KB, so anything past that is buffering guaranteed to be
+    // thrown away.
+    `process.stdin.on("data",(c)=>{if(b.length<65536)b+=c}).on("end",()=>{` +
+    `const r=require("http").request({` +
+    `host:"127.0.0.1",port:${String(port)},` +
+    `path:"${HOOK_MARKER}"+encodeURIComponent(process.env.AGENTDECK_SESSION_ID||""),` +
+    `method:"POST",timeout:2000,headers:{` +
+    `"X-Agentdeck-Secret":process.env.AGENTDECK_SECRET||"",` +
+    `"Content-Type":"application/json"}},(res)=>{res.resume()});` +
+    `r.on("error",()=>{});r.on("timeout",()=>{r.destroy()});r.end(b)})`;
+  return (
+    `[ -n "$AGENTDECK_SESSION_ID" ] || exit 0; ` +
+    `${quoted} -e '${script}' >/dev/null 2>&1; exit 0`
+  );
+};
 
 interface HookEntry {
   matcher?: string;
@@ -158,8 +195,18 @@ const ours = (port: number): HookEntry => ({
   hooks: [{ type: "command", command: hookCommand(port) }],
 });
 
+// Both halves, because the marker alone is a generic path segment. It was
+// `/api/hooks/$AGENTDECK_SESSION_ID` before the command grew a node script and the interpolation
+// moved inside it; widening it to `/api/hooks/` made this a substring test that matches any hook
+// posting to any local service with that path. `mergeHookSettings` deletes what it recognises as
+// ours and installHookSettings re-runs at every boot, so a stranger's PreToolUse guard hook would
+// vanish silently - a security downgrade performed by the one component that promises not to
+// touch other people's entries. Every form we have ever emitted contains both strings.
 const isOurHook = (hook: unknown): boolean =>
-  isRecord(hook) && typeof hook["command"] === "string" && hook["command"].includes(HOOK_MARKER);
+  isRecord(hook) &&
+  typeof hook["command"] === "string" &&
+  hook["command"].includes(HOOK_MARKER) &&
+  hook["command"].includes("AGENTDECK_SESSION_ID");
 
 /**
  * Merge the fragment into whatever the settings file already holds.

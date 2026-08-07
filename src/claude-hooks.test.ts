@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -113,9 +114,93 @@ void describe("the settings fragment", () => {
   void test("carries the session id and secret from the environment, not from the file", () => {
     const command = hookCommand(7777);
     assert.match(command, /\$AGENTDECK_SESSION_ID/);
-    assert.match(command, /\$AGENTDECK_SECRET/);
+    assert.match(command, /process\.env\.AGENTDECK_SECRET/);
     // No bearer token anywhere near a file a coding agent reads by design.
     assert.doesNotMatch(command, /Authorization/i);
+  });
+
+  void test("never expands the secret into an argument, where ps would show it", () => {
+    const command = hookCommand(7777);
+    // The shell expands "$AGENTDECK_SECRET" before exec, so any occurrence outside single quotes
+    // would put the literal secret in argv - readable by every process of this user via
+    // `ps -Ao args=`, dozens of times per turn. The value must be read from the environment by
+    // the process itself instead.
+    assert.doesNotMatch(command, /\$AGENTDECK_SECRET/);
+    assert.doesNotMatch(command, /\$\{AGENTDECK_SECRET/);
+
+    // Not by reading the string, though: run the command through a real shell with a marked
+    // secret in the environment and a stand-in on PATH that writes down the argv it was given.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-argv-"));
+    const argvFile = join(dir, "argv");
+    const stub = join(dir, "node");
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > ${argvFile}\n`);
+    chmodSync(stub, 0o755);
+    // The emitted command names an absolute interpreter, so a PATH shim no longer intercepts:
+    // the stub is passed in as the interpreter instead.
+    execFileSync("/bin/sh", ["-c", hookCommand(7777, stub)], {
+      env: {
+        PATH: dir,
+        AGENTDECK_SESSION_ID: "s1",
+        AGENTDECK_SECRET: "s3cret-value",
+      },
+    });
+    const argv = readFileSync(argvFile, "utf8");
+    assert.ok(!argv.includes("s3cret-value"), `secret leaked into argv: ${argv}`);
+  });
+
+  void test("runs the interpreter by absolute path, so a minimal PATH still posts", () => {
+    const command = hookCommand(7777);
+    // A bare `node` resolves against the session's PATH, which is the server's own. Under launchd
+    // that is /usr/bin:/bin:/usr/sbin:/sbin, where no Homebrew/mise/nvm node exists - every hook
+    // would die with `command not found` and `exit 0` would hide it.
+    assert.doesNotMatch(command, /(?:^|[\s;])node -e/);
+    assert.ok(
+      command.includes(`'${process.execPath}' -e`),
+      `expected the running node's absolute path in: ${command}`,
+    );
+
+    // Not by reading the string: run it through a shell with a PATH that has no node at all, and
+    // an interpreter stub reachable only by absolute path.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-abs-"));
+    const marker = join(dir, "ran");
+    const stub = join(dir, "interp");
+    writeFileSync(stub, `#!/bin/sh\nprintf ok > ${marker}\n`);
+    chmodSync(stub, 0o755);
+    execFileSync("/bin/sh", ["-c", hookCommand(7777, stub)], {
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", AGENTDECK_SESSION_ID: "s1" },
+    });
+    assert.equal(readFileSync(marker, "utf8"), "ok");
+  });
+
+  void test("refuses a bare interpreter name rather than emitting one", () => {
+    assert.throws(() => hookCommand(7777, "node"), /absolute path/);
+  });
+
+  void test("a stranger's hook whose command contains the marker is not ours to delete", () => {
+    // The marker used to be `/api/hooks/$AGENTDECK_SESSION_ID`. It became the generic
+    // `/api/hooks/` when the command grew a node script and the interpolation moved inside it,
+    // which turned `isOurHook` into a substring test matching any hook posting to any local
+    // service with that path. installHookSettings re-runs at every boot and deletes what it
+    // thinks is ours, so a stranger's guard hook would disappear silently.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-hooks-"));
+    const path = join(dir, "settings.json");
+    const stranger = "curl -s 127.0.0.1:9000/api/hooks/mine";
+    writeFileSync(
+      path,
+      `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: stranger }] }] } })}\n`,
+    );
+
+    installHookSettings(path, 7777);
+    installHookSettings(path, 7777);
+
+    const hooks = (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)["hooks"] as
+      | Record<string, unknown[]>
+      | undefined;
+    assert.match(
+      JSON.stringify(hooks?.["Stop"] ?? []),
+      /9000\/api\/hooks\/mine/,
+      "a hook agentdeck did not write was deleted as if it had",
+    );
   });
 
   void test("merges once and idempotently, preserving keys it did not write", () => {

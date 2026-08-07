@@ -480,7 +480,11 @@ void describe("the tmux half tells an empty server apart from a missing one", ()
 // -----------------------------------------------------------------------------------------
 
 const entryFor = (todo: string, branch: string): string => {
-  const start = todo.indexOf(`\`${branch}\``);
+  // The DEFINITION, which is bold, not the first mention. One item citing another in its prose -
+  // `m0/create-500` was filed against a bug found while verifying `m0/supervisor-crash-test` -
+  // otherwise silently retargets every assertion below onto the wrong entry, and the failure reads
+  // as the cited item having lost its own text.
+  const start = todo.indexOf(`**\`${branch}\`**`);
   assert.ok(start >= 0, `TODO.md has no ${branch} entry`);
   const from = todo.lastIndexOf("\n- ", start);
   const next = todo.indexOf("\n- ", start);
@@ -523,10 +527,16 @@ void describe("the three M0 items are decided the way the container's removal de
 
   void test("m0/supervisor-crash-test is restated, NOT struck - nothing brought node back", async () => {
     // The one that must survive. PID 1 was what restarted the node process, and on the Mac
-    // nothing does, so striking this item would delete the only record of a real gap. The test
-    // is deliberately the inverse of the two above: still open, still a branch to do.
+    // nothing does, so striking this item would delete the only record of a real gap.
+    //
+    // Ticking it is not striking it, and this test originally conflated the two: it required
+    // `- [ ]` forever, which would have failed the moment the item's own branch closed it. The
+    // item's deliverable is a TEST that proves what a crash costs, not a supervisor - so it can
+    // legitimately be done while the gap it documents is still wide open, and the gap is closed
+    // by m4/launchd-watchdog, a different item. What must never happen is the item being struck
+    // through as moot, which is what would delete the record.
     const entry = entryFor(await readDoc("TODO.md"), "m0/supervisor-crash-test");
-    assert.match(entry, /^\n- \[ \]/, "the item was closed; nothing supervises node yet");
+    assert.match(entry, /^\n- \[[ x]\]/, "the item is neither open nor closed");
     assert.doesNotMatch(entry, /~~/, "the item was struck through; it is not moot");
     assert.doesNotMatch(entry, /\bMOOT\b/);
   });

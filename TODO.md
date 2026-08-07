@@ -42,7 +42,31 @@ Mark an item `[x]` when its branch is merged.
 - [x] ~~**`m0/dockerfile-multistage`**~~ — MOOT. There is no image to build, so there is no builder
       stage to keep `g++` out of.
 
-- [ ] **`m0/supervisor-crash-test`** — the property M1 onwards depends on, and the one thing the
+- [ ] **`m0/create-500`** — **`POST /api/sessions` answers 500 on a real server run, and leaks the
+      session it just made.** Found by hand while verifying `m0/supervisor-crash-test`, reproduced
+      on `main` before that branch, so it arrived with `m0/host-boundary` and no test caught it:
+      every unit test drives a fake tmux, and that branch's own verification demonstrated boot and
+      the token refusal but never a create.
+      **Reproduction, on `main`:** start the server against a scratch allowlist entry
+      (`env -i PATH=… HOME=<empty> TERM=xterm-256color TMUX_SOCKET=… AGENTDECK_PORT=… `
+      `AGENTDECK_MOUNTS=<repo> AGENTDECK_PROFILES=<file> node --experimental-strip-types
+    src/server.ts`) and `POST /api/sessions`. The response is the generic 500; the log says
+      `session <id> was created but tmux does not list it`; `tmux -L <socket> list-sessions` shows
+      the session alive at the right path. So the phone gets an error and the machine gets an
+      orphaned agent — the confidently-wrong output this design refuses, in its worst direction.
+      **What is known:** instrumenting `Registry.list()` shows the entry arriving with `id` set to
+      the ENTIRE unsplit `list-sessions -F` line (`<id>\x1f0\x1f\x1f<created>\x1f<path>`), so
+      `#meta.get(entry.id)` misses and the session is filtered out. `SEP` is `U+001F`
+      (`src/tmux.ts:104`), and tmux 3.7b does emit it intact — verified with `od -c` under both a
+      clean and the operator's `HOME`. The same `Registry.create` call against the same tmux
+      binary succeeds when driven from a standalone script, so the trigger is something about the
+      server process rather than the parser in isolation. **Not root-caused. Do not guess: find
+      why `line.split(SEP)` yields one field there and five here.**
+      **Done when:** a test that drives the REAL tmux through `POST /api/sessions` — not a fake —
+      goes red on today's code and green after; the endpoint returns 201; and no orphan is left on
+      the socket when a create fails for any other reason.
+
+- [x] **`m0/supervisor-crash-test`** — the property M1 onwards depends on, and the one thing the
       discarded PID 1 supervisor genuinely bought. **Nothing supervises the node process on this
       Mac.** tmux is a daemon of its own, so a crash leaves every agent alive and the server gone:
       the work survives, the phone gets nothing, and the recovery is a person opening a terminal.
@@ -54,10 +78,16 @@ Mark an item `[x]` when its branch is merged.
       the server is started again — with the plain statement, in the test and in plan 003, that
       nothing restarted it.
       **Known gap, unsolved:** the sessions survive but their metadata does not. `cwd`, `agent`
-      and the per-session hook secret live only in the registry's memory, so a session that
-      outlives the server comes back named by its raw id, vanishes from `GET /api/cwds` and from
-      the two-agents-in-one-tree warning, and has every hook POST rejected as unsigned — it never
-      reports `waiting` again. True of a crash and of any deliberate restart (plan 006).
+      and the per-session hook secret live only in the registry's memory. Measured by
+      `src/supervisor-crash.test.ts` rather than assumed: since `m0/host-boundary` gated
+      `Registry.list()` on `#meta` as well as on the cwd allowlist, a session that outlives the
+      server is **not listed at all** — not listed under its raw id — so it is absent from
+      `GET /api/sessions`, from `GET /api/cwds` and from the two-agents-in-one-tree warning, while
+      still running untouched in tmux. Every hook POST from it is rejected as unsigned, and
+      recreating the session does not fix that: `new-session -A` attaches to the live session and
+      injects no environment, so the process keeps a secret the new registry never minted. It
+      never reports `waiting` again until the agent itself is restarted. True of a crash and of
+      any deliberate restart (plan 006).
 
 - [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux 3.7b is
       the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was

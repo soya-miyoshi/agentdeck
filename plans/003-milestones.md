@@ -24,6 +24,29 @@ That is the one thing the discarded PID-1 supervisor did buy, and it is not repl
 answered at M4 by the `launchd` agent (plan 006), and stated here so it is a known gap rather than
 an assumption M1 onwards quietly makes.
 
+`src/supervisor-crash.test.ts`, from `m0/supervisor-crash-test`, is that gap made executable: it
+SIGKILLs the server process and
+asserts what an unattended Mac looks like afterwards. Plainly: **nothing restarts the server.** No
+supervisor, no restart loop, no `launchd` plist, no watchdog — every restart in that test is the
+test itself starting the process again, standing in for the person who would otherwise have to.
+What it pins down beyond "the sessions survive":
+
+- the tmux sessions and their processes survive, same ids and same pane pids
+- the registry's `cwd`, agent and per-session hook secret do not — they are memory only, and
+  `Registry.list()` is gated on that memory as well as on the cwd allowlist, so a survivor is
+  **not listed at all** rather than listed under its raw id. `GET /api/sessions` comes back empty
+  and `GET /api/cwds` reports no sessions in the directory, while the agent is still running.
+  Nothing kills or reaps it either; it is left alone. The two-agents-in-one-tree warning is
+  computed from that same list, so starting a second agent in the directory the survivor is
+  working in is answered with no warning at all.
+- every hook POST from the surviving agent is 401, so that tab never reports `waiting` again — and
+  recreating the session does not fix it. `new-session -A` attaches to the live session and
+  injects no environment, so the process keeps the old secret while the registry mints a new one
+  it cannot deliver. Only restarting the agent restores it.
+
+Persisting that metadata is unsolved and not solved here; it belongs with `m4/launchd-watchdog`,
+which makes deliberate restarts routine and therefore makes the loss routine too.
+
 `/api/health` must prove the event loop is turning, not merely that a socket accepts — it does a
 hard-timed `tmux list-sessions` round trip and touches nothing else (plan 006).
 
@@ -62,8 +85,10 @@ The tmux-backed session registry and the HTTP routes. Driven from `curl` only; n
   that says exactly what would have to change, not a generic 403 — this is the refusal a person
   will meet most often, and it has to tell them what to do next.
 
-Done when: creating a session, restarting the server, and listing again shows the same session
-still running with the same id; a session can be started under either the `claude` profile or the
+Done when: creating a session, restarting the server, and **recreating** it hands back the same
+session still running with the same id and the same process — a plain list after a restart shows
+nothing, because the registry's metadata did not survive it (see M0, and
+`src/supervisor-crash.test.ts`); a session can be started under either the `claude` profile or the
 `shell` profile from the same endpoint; **two different agents in one `cwd` produce two sessions
 and a `warning`, while the same agent twice hands back the one already running**; and a session
 whose command has exited still lists, as `exited`, with its code.
