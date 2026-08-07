@@ -20,6 +20,16 @@ export const PING_INTERVAL_MS = 15_000;
 // reconnection ladder never runs either, because from the client's side nothing has gone wrong.
 export const PONG_TIMEOUT_MS = PING_INTERVAL_MS * 2;
 
+// Every frame is handled fire-and-forget, and `resync` reaches capture-pane plus refresh-client
+// without the sender being attached to anything. That was survivable while every client was a
+// person's thumb; it stops being survivable once a client reconnects on its own, because a client
+// stuck in a loop retries without anyone watching it. So one socket gets a frame budget per
+// window; the rest of the window is dropped rather than closed, since a phone whose tab is looping
+// should lose the loop and not its terminal.
+export const RATE_WINDOW_MS = 1000;
+/** Frames one socket may send per window. Far above typing, far below a repaint loop. */
+export const MAX_FRAMES_PER_WINDOW = 100;
+
 export interface WsDeps {
   token: string;
   origin: string | undefined;
@@ -35,6 +45,13 @@ export interface WsDeps {
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
   applyPaneSize: (sessionId: string, cols: number, rows: number) => void;
+  /**
+   * How often to ping. Defaults to PING_INTERVAL_MS.
+   *
+   * Present so the half-open test can run the same mechanism on a scale a test suite can wait
+   * out; nothing in the server sets it.
+   */
+  pingIntervalMs?: number;
 }
 
 interface Client {
@@ -43,6 +60,10 @@ interface Client {
   alive: boolean;
   /** Unsubscribe callbacks for every session this socket is attached to. */
   attached: Map<string, () => void>;
+  windowStart: number;
+  framesThisWindow: number;
+  /** One sentence per window, not one per dropped frame. */
+  toldAboutRate: boolean;
 }
 
 const send = (socket: WebSocket, message: ServerMessage): void => {
@@ -93,6 +114,9 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       socket,
       alive: true,
       attached: new Map(),
+      windowStart: Date.now(),
+      framesThisWindow: 0,
+      toldAboutRate: false,
     };
     clients.add(client);
 
@@ -101,6 +125,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     });
 
     socket.on("message", (raw: Buffer) => {
+      if (!withinRate(client)) return;
       // The third fire-and-forget site, and the one left behind when the two `hub.sync()` calls
       // were hardened. handleMessage reaches capture-pane through the snapshot an attach builds,
       // and Tmux rethrows anything that is not a missing session or an empty server - so one
@@ -122,6 +147,25 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       clients.delete(client);
     });
   });
+
+  const withinRate = (client: Client): boolean => {
+    const now = Date.now();
+    if (now - client.windowStart >= RATE_WINDOW_MS) {
+      client.windowStart = now;
+      client.framesThisWindow = 0;
+      client.toldAboutRate = false;
+    }
+    client.framesThisWindow += 1;
+    if (client.framesThisWindow <= MAX_FRAMES_PER_WINDOW) return true;
+    if (!client.toldAboutRate) {
+      client.toldAboutRate = true;
+      send(client.socket, {
+        t: "error",
+        message: `that tab sent more than ${String(MAX_FRAMES_PER_WINDOW)} messages in a second; the rest of this second was dropped`,
+      });
+    }
+    return false;
+  };
 
   const applySize = (sessionId: string): void => {
     const stream = deps.streamFor(sessionId);
@@ -274,7 +318,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       client.alive = false;
       client.socket.ping();
     }
-  }, PING_INTERVAL_MS);
+  }, deps.pingIntervalMs ?? PING_INTERVAL_MS);
   // Not a reason to keep the process alive.
   heartbeat.unref();
 

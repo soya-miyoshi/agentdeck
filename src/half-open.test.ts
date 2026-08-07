@@ -1,0 +1,220 @@
+import assert from "node:assert/strict";
+import { createServer as createHttpServer, type Server } from "node:http";
+import { createServer as createTcpServer, connect, type AddressInfo, type Socket } from "node:net";
+import { after, before, describe, test } from "node:test";
+
+import { WebSocket } from "ws";
+
+import { SessionStream } from "./stream.ts";
+import {
+  attachWebSocketServer,
+  MAX_FRAMES_PER_WINDOW,
+  PING_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
+} from "./ws.ts";
+
+// THE HALF-OPEN CONNECTION, which is the only failure the ping exists for.
+//
+// A socket that is closed, destroyed or errored proves nothing about this: all three produce an
+// event the server already reacts to without any ping at all. The connection this file drives is
+// genuinely silent in both directions and closed at neither end - a TCP proxy sits between the ws
+// client and the server, forwards both ways, and then simply STOPS forwarding while holding both
+// sockets open. That is the closest honest model of a phone that walked out of signal: the peer is
+// gone, no FIN, no RST, nothing arrives, nothing errors.
+//
+// What the proxy does not model: a real radio drop also stops the SERVER's writes from being
+// acknowledged, so a large enough write would eventually fill the send buffer and time out at the
+// TCP layer. Here the proxy accepts the server's bytes happily. That difference makes the test
+// HARDER rather than easier - the server gets no help from the transport, so the ping is the only
+// thing that can notice, which is precisely what is being demonstrated.
+//
+// The ping runs on a scaled interval so a test suite can wait it out. The mechanism, the phase
+// (mark not-alive, ping, terminate on the next tick if no pong came back) and the two-intervals
+// bound are the production ones; only the length of the interval differs, and the relation
+// between the two production constants is asserted below so the scaling cannot drift.
+
+const TOKEN = "half-open-token";
+const TEST_PING_MS = 300;
+const TEST_PONG_TIMEOUT_MS = TEST_PING_MS * 2;
+
+let server: Server;
+let closeWs: () => void;
+let port: number;
+const dead = new SessionStream({ sessionId: "dead" });
+const live = new SessionStream({ sessionId: "live" });
+const input: string[] = [];
+
+before(async () => {
+  server = createHttpServer();
+  closeWs = attachWebSocketServer(server, {
+    token: TOKEN,
+    origin: undefined,
+    streamFor: (id) => (id === "dead" ? dead : id === "live" ? live : undefined),
+    captureHistory: async () => await Promise.resolve(""),
+    isAlternateScreen: async () => await Promise.resolve(false),
+    repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
+    sendInput: (_id, data) => input.push(data),
+    applyPaneSize: () => undefined,
+    pingIntervalMs: TEST_PING_MS,
+  }).close;
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  port = (server.address() as AddressInfo).port;
+});
+
+after(() => {
+  closeWs();
+  server.close();
+});
+
+interface Proxy {
+  port: number;
+  /** Stop forwarding, in both directions, without closing either side. */
+  freeze: () => void;
+  close: () => void;
+}
+
+const startProxy = async (targetPort: number): Promise<Proxy> => {
+  let frozen = false;
+  const sockets: Socket[] = [];
+  const tcp = createTcpServer((downstream) => {
+    const upstream = connect(targetPort, "127.0.0.1");
+    downstream.on("data", (bytes) => {
+      if (!frozen) upstream.write(bytes);
+    });
+    upstream.on("data", (bytes) => {
+      if (!frozen) downstream.write(bytes);
+    });
+    // Nothing forwards a close either. A proxy that tore the other side down on FIN would hand
+    // the server the event it is not allowed to have.
+    downstream.on("error", () => undefined);
+    upstream.on("error", () => undefined);
+    sockets.push(downstream, upstream);
+  });
+  await new Promise<void>((done) => tcp.listen(0, "127.0.0.1", done));
+  return {
+    port: (tcp.address() as AddressInfo).port,
+    freeze: () => {
+      frozen = true;
+    },
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      tcp.close();
+    },
+  };
+};
+
+const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return predicate();
+};
+
+interface Attached {
+  socket: WebSocket;
+  frames: Record<string, unknown>[];
+  lastStateAt: number;
+}
+
+const attach = async (wsPort: number, sessionId: string): Promise<Attached> => {
+  const socket = new WebSocket(`ws://127.0.0.1:${String(wsPort)}`, TOKEN);
+  const attached: Attached = { socket, frames: [], lastStateAt: 0 };
+  socket.on("message", (raw: Buffer) => {
+    const frame = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+    attached.frames.push(frame);
+    // The only status the client ever hears about. Nothing else pushes `state` on a timer, which
+    // is exactly why a status that stopped changing cannot be read as a dead socket.
+    if (frame.t === "state") attached.lastStateAt = Date.now();
+  });
+  await new Promise<void>((done) => socket.once("open", done));
+  socket.send(JSON.stringify({ t: "attach", sessionId, cols: 80, rows: 24 }));
+  await waitFor(() => attached.lastStateAt > 0, 2000);
+  return attached;
+};
+
+void describe("a half-open connection", () => {
+  void test("production keeps the two-intervals relation this test scales", () => {
+    assert.equal(PONG_TIMEOUT_MS, PING_INTERVAL_MS * 2);
+  });
+
+  void test("is noticed by the ping, and sooner than a status that stopped changing could be", async () => {
+    const proxy = await startProxy(port);
+    const deadClient = await attach(proxy.port, "dead");
+    const liveClient = await attach(port, "live");
+
+    assert.equal(dead.attachedCount, 1);
+    assert.equal(live.attachedCount, 1);
+
+    const framesBeforeFreeze = deadClient.frames.length;
+    const frozenAt = Date.now();
+    proxy.freeze();
+
+    // The server drops the client when the ping goes unanswered: it detaches from the stream in
+    // its close handler, so the attached count falling is the server having NOTICED, observed
+    // where the noticing happens rather than where a socket event happens.
+    const noticed = await waitFor(() => dead.attachedCount === 0, TEST_PONG_TIMEOUT_MS * 3);
+    const pingNoticedMs = Date.now() - frozenAt;
+
+    assert.ok(noticed, "the ping never noticed the half-open connection");
+    assert.ok(
+      pingNoticedMs <= TEST_PONG_TIMEOUT_MS,
+      `ping noticed after ${String(pingNoticedMs)}ms, past the ${String(TEST_PONG_TIMEOUT_MS)}ms bound`,
+    );
+
+    // The connection really was half-open, not closed or errored: the client end is still OPEN and
+    // heard nothing at all after the freeze. Neither of those is true of a socket that was closed
+    // or destroyed, which is the whole reason this test carries a proxy.
+    assert.equal(deadClient.socket.readyState, WebSocket.OPEN);
+    assert.equal(deadClient.frames.length, framesBeforeFreeze);
+
+    // THE OTHER CLOCK. The dead session's status has not changed since its attach - and neither
+    // has the live one's, because an idle agent legitimately says nothing for minutes. Both look
+    // identical from the strip, which is the confidently-wrong tab this design refuses.
+    const deadStatusUnchangedMs = Date.now() - deadClient.lastStateAt;
+    const liveStatusUnchangedMs = Date.now() - liveClient.lastStateAt;
+
+    // The live socket is demonstrably alive at this instant: an input round-trips to the server
+    // while its status has been just as stale as the dead one's.
+    input.length = 0;
+    liveClient.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
+    assert.ok(await waitFor(() => input.length === 1, 2000), "the live socket was not alive");
+
+    // Both timings, in the assertion. Any status-staleness threshold low enough to have called the
+    // dead socket by now would have called the live one at the same moment - so the status clock
+    // cannot beat the ping without being wrong about a healthy session.
+    assert.ok(
+      pingNoticedMs <= deadStatusUnchangedMs && liveStatusUnchangedMs >= pingNoticedMs,
+      `ping noticed at ${String(pingNoticedMs)}ms; the dead session's status had been unchanged for ` +
+        `${String(deadStatusUnchangedMs)}ms and a LIVE session's for ${String(liveStatusUnchangedMs)}ms`,
+    );
+
+    deadClient.socket.terminate();
+    liveClient.socket.close();
+    proxy.close();
+  });
+
+  void test("one socket cannot send frames without a bound", async () => {
+    const client = await attach(port, "live");
+    input.length = 0;
+    const errors: string[] = [];
+    client.socket.on("message", (raw: Buffer) => {
+      const frame = JSON.parse(raw.toString("utf8")) as { t: string; message?: string };
+      if (frame.t === "error" && frame.message !== undefined) errors.push(frame.message);
+    });
+
+    const sent = MAX_FRAMES_PER_WINDOW + 50;
+    for (let i = 0; i < sent; i++) {
+      client.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
+    }
+
+    await waitFor(() => errors.length > 0, 2000);
+    assert.ok(input.length < sent, "every frame was handled, so there is no bound");
+    assert.ok(input.length <= MAX_FRAMES_PER_WINDOW);
+    assert.equal(errors.length, 1, "one sentence per window, not one per dropped frame");
+    assert.match(errors[0] ?? "", /messages in a second/);
+
+    client.socket.close();
+  });
+});
