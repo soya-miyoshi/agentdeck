@@ -38,6 +38,23 @@ void describe("profiles parse", () => {
 });
 
 void describe("a broken waiting mechanism disables the mechanism, not the profile", () => {
+  void test("an absolute or escaping waiting.settings disables the mechanism", () => {
+    // installHookSettings writes this file at every boot, so an absolute path is an
+    // arbitrary-JSON-write primitive a profiles file could aim at the operator's real
+    // ~/.claude/settings.json. Relative to the agent-state directory, and inside it.
+    for (const settings of [
+      "/Users/someone/.claude/settings.json",
+      "../../.claude/settings.json",
+    ]) {
+      const { profiles } = parseProfiles({
+        claude: { command: "/bin/sh", waiting: { via: "hook", settings } },
+      });
+      const profile = profiles.get("claude");
+      assert.equal(profile?.waiting, undefined, `${settings} was accepted`);
+      assert.match(profile?.waitingDisabledReason ?? "", /relative to the agent-state directory/);
+    }
+  });
+
   void test("hook without settings", () => {
     const { profile } = oneProfile({ claude: { command: "claude", waiting: { via: "hook" } } });
     assert.equal(profile.waiting, undefined);

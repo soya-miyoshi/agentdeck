@@ -14,21 +14,29 @@ const SEP = "\u001f";
 const TOKEN = "test-token-value";
 
 const fakeTmux = () => {
-  const sessions = new Map<string, { dead: boolean; status: string }>();
+  const sessions = new Map<string, { dead: boolean; status: string; path: string }>();
   return new Tmux({
     socket: "test",
     exec: async (args) => {
-      const [verb, ...rest] = args;
+      // The interesting command is not always first: a create is preceded by the
+      // `set-option -g update-environment <names>` that keeps the values out of argv.
+      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => args.includes(n));
+      const rest = verb === undefined ? args : args.slice(args.indexOf(verb) + 1);
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]
-          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000"].join(SEP))
+          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000", s.path].join(SEP))
           .join("\n");
         return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
       }
       if (verb === "new-session")
-        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", { dead: false, status: "" });
-      if (verb === "kill-session") sessions.delete(rest[rest.indexOf("-t") + 1] ?? "");
+        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", {
+          dead: false,
+          status: "",
+          path: rest[rest.indexOf("-c") + 1] ?? "",
+        });
+      if (verb === "kill-session")
+        sessions.delete((rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, ""));
       return await Promise.resolve({ stdout: "", stderr: "" });
     },
   });
@@ -325,6 +333,49 @@ void describe("a hook that authenticates routes its event into the session's sta
   });
 });
 
+void describe("an unexpected failure says nothing about itself", () => {
+  void test("the 500 body carries a reference, not the error text", async () => {
+    // Errors are sentences the client renders verbatim, and the ones that reach here are not
+    // sentences anybody wrote: `execFile` alone puts its whole argv - the per-session secret and
+    // every profile-passed API key among it - into one. A fixed sentence plus an id, with the
+    // real text on the server log.
+    class ExplodingRegistry extends Registry {
+      override async list(): Promise<never> {
+        return await Promise.reject(
+          new Error("Command failed: tmux -e AGENTDECK_SECRET=s3cret -e API_KEY=sk-live-xyz"),
+        );
+      }
+    }
+    const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
+    const allowlist = new CwdAllowlist(["/workspace/agentdeck"]);
+    const failing = createServer(
+      createHandler({
+        registry: new ExplodingRegistry(fakeTmux(), profiles, allowlist),
+        profiles,
+        allowlist,
+        token: TOKEN,
+        version: "0.0.0-test",
+        origin: undefined,
+        probe: async () => await Promise.resolve(true),
+      }),
+    );
+    await new Promise<void>((done) => failing.listen(0, "127.0.0.1", done));
+    try {
+      const port = (failing.address() as AddressInfo).port;
+      const response = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(response.status, 500);
+      const text = String(((await response.json()) as Record<string, unknown>)["error"]);
+      assert.doesNotMatch(text, /s3cret/);
+      assert.doesNotMatch(text, /sk-live-xyz/);
+      assert.match(text, /ref [0-9a-f]{12}/);
+    } finally {
+      await new Promise<void>((done) => failing.close(() => done()));
+    }
+  });
+});
+
 void describe("responses", () => {
   void test("an unknown route is 404 and says what it did not match", async () => {
     const { status, body } = await call("/api/nonexistent");
@@ -338,7 +389,9 @@ void describe("responses", () => {
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
       body: "x".repeat(200_000),
     });
-    assert.equal(response.status, 500);
+    // 413 and the sentence someone wrote, not the generic 500: that one now says nothing about
+    // what failed, because arbitrary error text reaches the client verbatim.
+    assert.equal(response.status, 413);
     assert.match(
       String(((await response.json()) as Record<string, unknown>)["error"]),
       /too large/,

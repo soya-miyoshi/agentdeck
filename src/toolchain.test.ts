@@ -178,7 +178,7 @@ void describe("Node runs the TypeScript sources directly", () => {
 
 void describe("erasableSyntaxOnly rejects what Node cannot strip", () => {
   // The three constructs named in the tsconfig comment. Without the flag they type check happily
-  // and then fail at runtime, inside the container, whenever the code first executes - which is
+  // and then fail at runtime, whenever the code first executes - which is
   // exactly the class of error a typecheck step exists to move earlier.
   //
   // TS1294 is the diagnostic observed from tsc 5.8.3: "This syntax is not allowed when

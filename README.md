@@ -73,7 +73,7 @@ an agent that runs `rm -rf ~` or a poisoned `curl | sh` reaches the home directo
 the browser profiles and every other repository. This was a container once, and
 [`plans/005-containment.md`](plans/005-containment.md) is kept as the best account of what that
 bought and what its removal costs. The remaining lever is the `cwd` allowlist — a short list of
-the repositories actually worked in — and it decides where a session *starts*, not where it can
+the repositories actually worked in — and it decides where a session _starts_, not where it can
 reach. A git remote is what protects the work.
 
 The blast radius therefore includes agentdeck's own repository, and that is the one whose contents
@@ -103,18 +103,64 @@ covered by extra commands in the checklist below rather than by a boundary, whic
 stated as such.
 
 The user's bearer token stays out of any directory a session is pointed at, for the same reason:
-`AGENTDECK_TOKEN_FILE` decides where it goes, and the root of a working tree — where an agent's
-`ls -la` or `grep -rn token .` meets it — is the one place it must not be. Where it *should* live
-now that there is no container is recorded as open in plan 005's superseded header, not decided
-here.
+the root of a working tree — where an agent's `ls -la` or `grep -rn token .` meets it — is the one
+place it must not be. It lives in `~/.agentdeck/token`, created 0600 on first run;
+`AGENTDECK_TOKEN_FILE` moves it. **The server refuses to start if that path resolves inside an
+allowlist entry**, which is the rule made executable rather than written down three times.
 
-One consequence worth knowing: adding a newly cloned repo means adding it to the allowlist and
-restarting the server. tmux keeps the processes alive across that restart, but their directory,
-agent and waiting detection do not survive it: the registry holds cwd, agent and the per-session
-hook secret in memory only, so a surviving session comes back named by its raw id, drops out of
-`GET /api/cwds` and the two-agents warning, and stops reporting when it needs you until it is
-recreated. Pick a moment, or recreate the sessions afterwards. Why git push credentials stay away from the agent is in
+The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
+attaches to and streams the sessions whose directory is on it, and ignores everything else on the
+tmux socket. That socket is `/tmp/tmux-<uid>/agentdeck` and every process running as you can write
+it, so without this a `tmux -L agentdeck new-session -d -c / -- /bin/sh` typed by anything at all
+becomes a tab your phone can type into.
+
+Two consequences worth knowing, both deliberate. A session you start by hand under the agentdeck
+tmux socket does **not** appear as a tab — agentdeck only knows a session's directory for the
+sessions it started. And adding a newly cloned repo means adding it to the allowlist and
+restarting the server: tmux keeps the processes alive across that restart, but their directory,
+agent and waiting detection do not survive it — the registry holds cwd, agent and the per-session
+hook secret in memory only — and since the directory is what the allowlist matches on, a surviving
+session stops being listed and stops being streamed until it is recreated. The agent is still
+there (`tmux -L agentdeck attach -t <id>`). Pick a moment, or recreate the sessions afterwards.
+Why git push credentials stay away from the agent is in
 [`plans/005-containment.md`](plans/005-containment.md).
+
+## Environment
+
+Every variable the server reads. All of them are optional; the row says what an unset one means.
+
+| Variable                    | Default                    | Unset means                                                                                                                                                                                                                  |
+| --------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTDECK_PORT`            | `7777`                     | Loopback only either way; `tailscale serve` decides exposure.                                                                                                                                                                |
+| `AGENTDECK_TOKEN_FILE`      | `~/.agentdeck/token`       | Generated 0600 on first run. Never inside an allowlist entry — the server refuses to start.                                                                                                                                  |
+| `AGENTDECK_MOUNTS`          | empty                      | **No directory is startable.** Colon-separated absolute paths; exact match, never prefix.                                                                                                                                    |
+| `AGENTDECK_PROFILES`        | none                       | No agents, so nothing to start. See `agents.example.json`, and copy it somewhere outside every allowlist entry — it decides what command each session runs, and the server refuses to start if it is inside one.             |
+| `AGENTDECK_AGENT_STATE_DIR` | `~/.agentdeck/agent-state` | Hook settings land there, and an agent only reads them if its profile points it there.                                                                                                                                       |
+| `AGENTDECK_ORIGIN`          | none                       | **The Origin check plan 001 describes is off**: `/api` and `/ws` accept any Origin, so any page the browser visits can drive the socket with a token it holds. Set it to the `https://<host>.ts.net` origin the phone loads. |
+| `TMUX_SOCKET`               | `agentdeck`                | The `-L` name. Sessions are found on this socket and nowhere else.                                                                                                                                                           |
+
+A session's own environment is **built, not inherited**: a pane gets `PATH`, `HOME`, `SHELL`,
+`TERM`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`, `LOGNAME`, plus whatever names that agent's profile
+lists in `env`. Nothing else from the shell that ran `pnpm start` reaches it — `SSH_AUTH_SOCK`
+above all, since a forwarded ssh-agent is `git push --force` to every repository that key reaches.
+
+**What that bounds is what a pane INHERITS, and not what its own shell puts back.** `HOME` has to
+be on the list, so a login or interactive shell in the pane reads the operator's dotfiles and
+re-exports whatever they export. If `~/.zprofile` sets `SSH_AUTH_SOCK` to the 1Password or
+`ssh-agent` socket — the setup those tools document — then every shell started under it has the
+forwarded agent again, and so does every command Claude Code runs, since it execs a login-shell
+snapshot of the same rc files. The shipped `agents.example.json` therefore starts `/bin/zsh` with
+no `-l`, but that only covers the profile we ship: keeping a credential out of a session means
+keeping it out of the dotfiles `HOME` points at, and there is no way for this server to enforce
+that.
+
+The inheritance bound holds even when the tmux server was not ours to begin with. `start-server`
+does nothing to a socket that already has a live server — and attaching to an orphaned session,
+which the refusal text tells you to do, starts one from your shell. So at boot agentdeck also
+clears every variable off the server's _global_ environment that is not on the list above, and
+logs the names it cleared. Without that the client half bounds nothing, and emptying
+`update-environment` would make it worse rather than better: tmux's own default list names
+`SSH_AUTH_SOCK`, so the default was overwriting it from our clean client by accident.
 
 ## Non-goals
 
@@ -181,8 +227,13 @@ now, which makes the review below the only control rather than the second of two
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/` and
-`.github/workflows/`. **That
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
+`.github/workflows/` and the agent profiles file `AGENTDECK_PROFILES` points at. That last one is
+the most direct host-execution surface of the lot and had been on none of these lists: a profile's
+`command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
+profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.
+The server refuses to start when that file resolves inside an allowlist entry, the same rule the
+token file gets, so keeping it out of this repository is the supported arrangement. **That
 list is a floor, not the whole job**: the host tools discover their own config, so the exception
 requires reading every added or modified file in the diff, not only the named ones. The same
 review is owed before starting an agent session in this repo,
@@ -192,10 +243,18 @@ blind to
 `.git/hooks/` for the same reason, so three more commands belong in the same checklist:
 
 ```
-git status --ignored -- node_modules .pnpm-store
+rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile
 git config --local --list
 ls -la .git/hooks          # anything without a .sample suffix is a live hook
 ```
+
+The first of those used to be `git status --ignored` over the two paths, which **cannot
+see what it was there for**: `git status` collapses an ignored directory to a single line naming
+the directory, so a rewritten `node_modules/.bin/eslint` produces byte-identical output.
+`--ignored=matching` does list the files, but it lists all fifty thousand of them, which is not a
+review either. Nothing that reads the tree can do this job, so the control is replacing the tree
+instead of inspecting it: reinstall from the lockfile, having reviewed `pnpm-lock.yaml` itself in
+the diff above, since pnpm 9 does not gate dependency lifecycle scripts.
 
 Run the review itself with git's own execution turned off — `git -c core.pager=cat -c
 core.hooksPath=/dev/null status`, and the same for `diff`, `switch` and `merge` — so the command

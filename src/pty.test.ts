@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import type { IPty } from "node-pty";
 
 import { SessionPty } from "./pty.ts";
+import { BASE_ENV_NAMES } from "./tmux.ts";
 
 /** A fake PTY that records what it was told and lets a test drive its callbacks. */
 const fakePty = () => {
@@ -46,7 +47,11 @@ const fakePty = () => {
 
 const build = () => {
   const fake = fakePty();
-  const spawned: { file: string; args: string[]; options: { cols: number; rows: number } }[] = [];
+  const spawned: {
+    file: string;
+    args: string[];
+    options: { cols: number; rows: number; env: Record<string, string> };
+  }[] = [];
   const session = new SessionPty({
     socket: "test",
     sessionId: "web-claude-abc",
@@ -83,12 +88,25 @@ void describe("what gets spawned", () => {
     const { spawned } = build();
     const args = spawned[0]?.args ?? [];
     assert.deepEqual(args.slice(0, 2), ["-L", "test"]);
-    assert.equal(args.at(-1), "web-claude-abc");
+    // Exact: `-t name` would attach to whatever session shares a prefix with a stale id.
+    assert.equal(args.at(-1), "=web-claude-abc");
   });
 
   void test("opens at the size it was given", () => {
     const { spawned } = build();
-    assert.deepEqual(spawned[0]?.options, { cols: 80, rows: 24 });
+    assert.equal(spawned[0]?.options.cols, 80);
+    assert.equal(spawned[0]?.options.rows, 24);
+  });
+
+  void test("attaches with a built environment, not this process's", () => {
+    // A tmux client is a way INTO a session's environment: `update-environment` copies named
+    // variables from the attaching client into the session it attaches to. That option is emptied
+    // on the server, and this is the other end of the same rule.
+    const { spawned } = build();
+    const names = Object.keys(spawned[0]?.options.env ?? {});
+    assert.ok(names.length > 0, "the attach inherited this process's whole environment");
+    for (const name of names)
+      assert.ok(BASE_ENV_NAMES.includes(name), `${name} is not on the list`);
   });
 });
 

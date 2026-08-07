@@ -2,6 +2,7 @@ import type { IPty } from "node-pty";
 import { spawn } from "node-pty";
 
 import { SessionStream } from "./stream.ts";
+import { baseEnv, exactTarget } from "./tmux.ts";
 
 // The producer the stream has been waiting for: a PTY running `tmux attach`.
 //
@@ -21,7 +22,11 @@ export interface PtyOptions {
   cols: number;
   rows: number;
   /** Injected so tests can drive the plumbing without a real tmux. */
-  spawnPty?: (file: string, args: string[], options: { cols: number; rows: number }) => IPty;
+  spawnPty?: (
+    file: string,
+    args: string[],
+    options: { cols: number; rows: number; env: Record<string, string> },
+  ) => IPty;
 }
 
 /** A session's live attachment: the PTY, the stream it feeds, and the way to type into it. */
@@ -43,8 +48,13 @@ export class SessionPty {
     // own arithmetic over a set we do not control.
     this.#pty = spawnFn(
       "tmux",
-      ["-L", options.socket, "attach-session", "-d", "-t", options.sessionId],
-      { cols: options.cols, rows: options.rows },
+      ["-L", options.socket, "attach-session", "-d", "-t", exactTarget(options.sessionId)],
+      // The same explicit environment every other tmux invocation gets. This one is a tmux
+      // CLIENT, and a client is a way into a session's environment: `update-environment` copies
+      // named variables from the attaching client into the session. That option is emptied in
+      // `Tmux.ensureServer`, so this is the belt to that braces - and it costs nothing, because
+      // nothing in this process's environment is anything an attach needs.
+      { cols: options.cols, rows: options.rows, env: baseEnv() },
     );
 
     this.#pty.onData((data: string) => {

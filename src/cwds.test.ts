@@ -41,13 +41,16 @@ void describe("the cwd allowlist", () => {
   });
 
   void test("the refusal does not price the restart at a reconnect", () => {
-    // The registry keeps cwd, agent and the per-session hook secret in memory only, so sessions
-    // that survive the restart come back nameless and never report `waiting` again. A refusal
-    // that says the restart costs "a reconnect" is what makes the losing action sound routine.
+    // The registry keeps cwd, agent and the per-session hook secret in memory only, and the
+    // allowlist is now matched on that cwd - so a session that survives the restart is not listed
+    // and not streamed at all. A refusal that says the restart costs "a reconnect" is what makes
+    // the losing action sound routine.
     const message = list.refusal("/workspace/newly-cloned");
     assert.doesNotMatch(message, /costs a reconnect/);
     assert.match(message, /waiting detection do not survive/);
-    assert.match(message, /stop reporting when they need you/);
+    assert.match(message, /stop being listed and stop being streamed/);
+    // And where the agent still is, because it is still running and reachable by hand.
+    assert.match(message, /tmux -L agentdeck attach/);
   });
 
   void test("the README does not price the restart at a reconnect either", async () => {
@@ -56,7 +59,17 @@ void describe("the cwd allowlist", () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
     assert.doesNotMatch(readme, /costs a\s+reconnect/);
     assert.match(readme, /waiting detection do not survive/);
-    assert.match(readme, /stops reporting when it needs you/);
+    assert.match(readme, /stops being listed and stops being streamed/);
+  });
+});
+
+void describe("the allowlist is a boundary, not only a check on POST /api/sessions", () => {
+  void test("a session whose directory is unknown is never allowed", () => {
+    // What a session started by hand on the tmux socket reports, and what one that outlived the
+    // process that created it reports. `resolve("")` is the SERVER's working directory, so
+    // without this an agentdeck started inside an allowlisted repository would adopt every
+    // unknown session on the socket - the exact case the boundary exists for.
+    assert.equal(list.allows(""), false);
   });
 });
 

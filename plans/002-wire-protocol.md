@@ -26,7 +26,7 @@ route not called by the phone authenticates differently, for reasons given under
 interface Session {
   id: string;          // stable across restarts; derived from the tmux session name
   name: string;        // repo basename, what the tab shows
-  cwd: string;         // absolute path inside the container, matching a Cwd.path
+  cwd: string;         // absolute path on the Mac, matching a Cwd.path
   agent: string;       // profile id: "claude", "gemini", "shell", ... (plan 004)
   state: SessionState;
   startedAt: number;   // unix ms. Not to be confused with the stream `epoch` below
@@ -44,16 +44,15 @@ interface AgentSummary {
 }
 
 interface Cwd {
-  path: string;            // absolute path inside the container
+  path: string;            // absolute path on the Mac
   name: string;            // basename, what the picker shows
   sessions: string[];      // ids of live sessions already in this directory
 }
 ```
 
 **`GET /api/cwds` exists because the client cannot construct a valid `cwd` on its own.** The
-allowlist is the container's mount list (plan 005), which lives in compose and is knowable only
-to the server; a phone user typing an absolute container path into a soft keyboard is not a
-design. The new-session picker is built from this route — pick a directory, pick an agent — and
+allowlist is `AGENTDECK_MOUNTS` (plan 005) and is knowable only to the server; a phone user
+typing an absolute path into a soft keyboard is not a design. The new-session picker is built from this route — pick a directory, pick an agent — and
 `sessions` is what lets it show the two-agents-in-one-tree warning below *before* the session is
 created rather than in the response to creating it.
 
@@ -100,13 +99,14 @@ agent's tab without a needs-you indicator rather than inventing one.
 **The client names an agent, never a command.** `POST /api/sessions` takes a profile id and the
 server owns what that profile executes. A remote client supplying a command line is remote code
 execution with extra steps — the same reasoning that keeps paths out of the request. `cwd` is
-validated against a configured allowlist, which containerised is the **mount list** — the
-individual repositories mounted in, not a root they sit under (plan 005). MulmoTerminal's
+validated against a configured allowlist, which is the **individual repositories chosen**, not
+a root they sit under (plan 005) — and which, since 2026-08-07, also bounds the session set the
+server will list and stream at all, not only what it will create. MulmoTerminal's
 protocol doc calls the allowlist out as a standing rule, and it is right.
 
 A `cwd` that is not on it is refused with a sentence naming what would have to change, because
-that refusal is the one a person meets most often — a repository cloned since the container was
-created is not mounted, and cannot be until it is restarted.
+that refusal is the one a person meets most often — a repository cloned since the server
+started is not on the list, and cannot be until it is restarted.
 
 `warning` is set whenever the new session's `cwd` already has a live session, in either of the two
 shapes above — two agents in one working tree, which is allowed but worth surfacing, or the same
@@ -115,7 +115,7 @@ agent handed back rather than started twice (plan 004).
 ### `POST /api/hooks/:sessionId`
 
 The inbound half of the `hook` mechanism in [plan 004](004-agent-profiles.md), and the only route
-the phone never calls. The agent calls it from inside the container over loopback; the body is
+the phone never calls. The agent calls it over loopback; the body is
 whatever that agent's hook payload is, parsed by the profile's handler rather than by the route,
 and mapped to a `state` message on the socket.
 
@@ -127,11 +127,34 @@ hook sends back and the route checks against that session id.
 The asymmetry is the point: a leaked session secret can lie about one session's status, while the
 user's token can start processes.
 
-**What the secret is not is a wall between sessions.** Every session runs as the same user in the
-same container, so an agent that goes looking can read `/proc/<pid>/environ` and find every other
-session's secret, and the agent API keys with them. This bounds what a *remote* caller can do with
-a stolen one; it bounds nothing between two agents on the same machine, and plan 005 is explicit
-about why no such boundary exists.
+**What the secret is not is a wall between sessions.** Every session runs as the same user on
+the same Mac, and this used to be written down as one agent reading another's
+`/proc/<pid>/environ` — a path macOS does not have. Stating the mechanism this host actually has
+matters, because the Linux one being absent reads like the hazard being absent:
+
+- **What did exist, and was easier.** `tmux new-session -e NAME=VALUE` stores the variable in the
+  tmux *session* environment, so `tmux -L <socket> show-environment -t <session>` printed every
+  session's `AGENTDECK_SECRET`, and the agent API keys with it, to any process running as this
+  user. No debugger, no privileged call. Closed on 2026-08-07: `src/tmux.ts` unsets those
+  variables from the session environment in the same invocation that forks the pane, which leaves
+  the value with the agent and takes it from the reader.
+- **What that first fix left behind, and is also closed.** Removing a value from the session
+  environment did nothing about the `-e NAME=VALUE` still sitting in the tmux client's *argv*, and
+  macOS hides another process's environment from `ps` while showing it every process's argv —
+  verified here, `ps -Ao args=` printed a sibling's full command line. An agent sampling `ps` in a
+  loop needed only the tens of milliseconds a `new-session` client lives to read the next session's
+  secret and the operator's API key. Closed the same day: no value is passed as an argument at
+  all. They travel in the creating client's own environment, and a `update-environment` name list —
+  set immediately before `new-session` and emptied immediately after, in the same invocation — is
+  what copies them into the session tmux then forks the pane from.
+- **What still exists.** Same uid means one agent can attach a debugger to another agent's
+  process, and can read every file this user owns — the other sessions' transcripts, and whatever
+  credentials are on disk. macOS will not show another process's environment to `ps`, which makes
+  this harder than `cat /proc/<pid>/environ`; it does not make it a boundary. It also says nothing
+  about argv, which `ps` does show — hence the bullet above.
+
+So the secret bounds what a *remote* caller can do with a stolen one; it bounds nothing between
+two agents on the same machine, and plan 005 is explicit about why no such boundary exists.
 
 ## WebSocket
 

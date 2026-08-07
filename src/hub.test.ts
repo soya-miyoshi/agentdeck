@@ -12,22 +12,32 @@ import { Tmux } from "./tmux.ts";
 const SEP = "\u001f";
 
 const fakeTmux = () => {
-  const sessions = new Map<string, { dead: boolean; status: string }>();
+  const sessions = new Map<string, { dead: boolean; status: string; path: string }>();
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
-      const [verb, ...rest] = args;
+      // The interesting command is not always first: a create is preceded by the
+      // `set-option -g update-environment <names>` that keeps the values out of argv.
+      const verb = ["list-sessions", "new-session", "kill-session", "capture-pane"].find((n) =>
+        args.includes(n),
+      );
+      const rest = verb === undefined ? args : args.slice(args.indexOf(verb) + 1);
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]
-          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000"].join(SEP))
+          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000", s.path].join(SEP))
           .join("\n");
         return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
       }
       if (verb === "new-session") {
-        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", { dead: false, status: "" });
+        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", {
+          dead: false,
+          status: "",
+          path: rest[rest.indexOf("-c") + 1] ?? "",
+        });
       }
-      if (verb === "kill-session") sessions.delete(rest[rest.indexOf("-t") + 1] ?? "");
+      if (verb === "kill-session")
+        sessions.delete((rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, ""));
       if (verb === "capture-pane")
         return await Promise.resolve({ stdout: "history\n", stderr: "" });
       return await Promise.resolve({ stdout: "", stderr: "" });
@@ -37,7 +47,8 @@ const fakeTmux = () => {
     const existing = sessions.get(id);
     if (existing) sessions.set(id, { ...existing, dead: true, status });
   };
-  return { tmux, sessions, die };
+  const plant = (id: string, path: string) => sessions.set(id, { dead: false, status: "", path });
+  return { tmux, sessions, die, plant };
 };
 
 /** A stand-in for the live attachment, so the hub is tested without spawning anything. */
@@ -61,7 +72,7 @@ const fakePty = (sessionId: string) => {
 };
 
 const build = () => {
-  const { tmux, die } = fakeTmux();
+  const { tmux, die, sessions, plant } = fakeTmux();
   const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
   const allowlist = new CwdAllowlist(["/workspace/a", "/workspace/b"]);
   const registry = new Registry(tmux, profiles, allowlist);
@@ -78,8 +89,36 @@ const build = () => {
       return pty;
     },
   });
-  return { hub, registry, die, created, ptys };
+  return { hub, registry, tmux, die, created, ptys, sessions, plant };
 };
+
+void describe("the allowlist bounds the session set, not only what can be created", () => {
+  void test("a session on the socket that agentdeck did not start is never attached", async () => {
+    // The socket is /tmp/tmux-<uid>/agentdeck and every process running as this user can write
+    // it, so `tmux -L agentdeck new-session -d -c / -- /bin/sh` is otherwise a tab the phone can
+    // type into within one sync. agentdeck knows a session's directory only for the sessions it
+    // started, so an unknown one is outside the allowlist by definition.
+    const { hub, registry, tmux, created } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await tmux.createOrAttach("stranger", "/", "/bin/sh", [], {});
+    await hub.sync();
+    assert.deepEqual(created, [session.id], "the hub adopted a session nobody allowed");
+    assert.equal(hub.size, 1);
+    assert.equal(hub.streamFor("stranger"), undefined);
+  });
+
+  void test("and it is not on the session list either, so no tab claims it", async () => {
+    // A tab with no stream is the confidently-wrong output this design refuses, so the list and
+    // the hub have to agree - which they do by having one filter, in Registry.list.
+    const { registry, tmux } = build();
+    await registry.create("/workspace/a", "claude");
+    await tmux.createOrAttach("stranger", "/", "/bin/sh", [], {});
+    assert.deepEqual(
+      (await registry.list()).map((s) => s.id.startsWith("a-")),
+      [true],
+    );
+  });
+});
 
 void describe("reconciling against tmux", () => {
   void test("attaches to a session it has not seen", async () => {
@@ -149,9 +188,11 @@ void describe("reconciling against tmux", () => {
     assert.equal(hub.size, 1);
   });
 
-  void test("tmux is the truth: a session it did not create still gets attached", async () => {
-    // A human starting a session by hand in a terminal must appear in the strip without anyone
-    // having told the hub about it. A remembered set would miss exactly this.
+  void test("tmux is still the truth for every session inside the boundary", async () => {
+    // The hub keeps no set of its own: it attaches to what tmux reports, filtered to the
+    // allowlist, so a session it was never told about individually still appears. What changed on
+    // 2026-08-07 is only the filter - a session whose directory nobody allowed is not adopted,
+    // which is the case the test above covers.
     const { hub, registry, created } = build();
     await registry.create("/workspace/a", "claude");
     await registry.create("/workspace/b", "claude");

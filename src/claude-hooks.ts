@@ -208,11 +208,11 @@ export interface InstallResult {
 }
 
 /**
- * Merge into the file at `path`, once, at container start.
+ * Merge into the file at `path`, once, at server start.
  *
- * One container means one agent-state directory means one settings file shared by every session
- * of that agent, so merging per session would be concurrent writes for a result that is identical
- * every time (plan 004).
+ * One agent-state directory means one settings file shared by every session of that agent, so
+ * merging per session would be concurrent writes for a result that is identical every time
+ * (plan 004).
  *
  * Malformed JSON throws rather than being overwritten: the file belongs to a human too, and
  * silently replacing their broken edit with our fragment loses whatever they were mid-way

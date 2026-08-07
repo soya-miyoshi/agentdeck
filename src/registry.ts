@@ -31,7 +31,6 @@ export interface CreateResult {
 
 export class CwdNotAllowedError extends Error {}
 export class UnknownAgentError extends Error {}
-export class AgentUnavailableError extends Error {}
 
 /** Per-session secret for the hook route. Never the user's token - see plan 002. */
 const newSecret = (): string => randomBytes(24).toString("base64url");
@@ -60,6 +59,24 @@ export class Registry {
     if (profile === undefined) throw new UnknownAgentError(`no agent profile named ${agentId}`);
 
     const id = sessionId(cwd, agentId);
+
+    // A dead session under our own id, left by a previous run, otherwise makes this a lie.
+    // `createOrAttach` sets `remain-on-exit on`, so a session whose agent exited stays on the
+    // socket; `#meta` is memory only, so after a restart `list()` cannot see it and `reap()` at
+    // boot cannot clear it. tmux would then report `attached: true` and the phone would get a 201
+    // saying "a claude session was already running in <cwd>; you are attached to it rather than to
+    // a new one" - false, with a tab pinned at `exited` and no agent started. A tab that is
+    // confidently wrong is the one output this design refuses, so the corpse goes first.
+    //
+    // Scoped deliberately: `id` is `sessionId(cwd, agent)` for a cwd already checked against the
+    // allowlist above, and the pane must be dead. A live session is left to `createOrAttach`,
+    // and a session at any other path is not ours to touch.
+    const existing = (await this.#tmux.list()).find((entry) => entry.id === id);
+    if (existing?.dead === true && existing.path === cwd) {
+      await this.#tmux.kill(id);
+      this.#meta.delete(id);
+      this.#states.delete(id);
+    }
 
     // Read the neighbours BEFORE creating, so the warning can name what was already there. After
     // the call the new session is itself in the list and would have to be filtered out.
@@ -103,28 +120,61 @@ export class Registry {
         : { session };
   }
 
+  /**
+   * The sessions this server owns: what tmux holds, filtered to the cwd allowlist.
+   *
+   * The filter is here rather than only at the one caller that needed it, because the allowlist
+   * is the only boundary left and a boundary that two callers apply differently is not one. The
+   * tmux socket is `/tmp/tmux-<uid>/agentdeck`, writable by every process running as this user, so
+   * `tmux -L agentdeck new-session -d -c / -- /bin/sh` is otherwise a tab the phone can type into,
+   * created by something that asked nobody.
+   *
+   * A session whose cwd this process does not know - one started by hand, or one it created
+   * before a restart, since `#meta` is memory only - has no `#meta` entry and is not allowlisted.
+   * It is left alone: not listed, not attached, not reaped. That cost is deliberate and recorded
+   * in plan 005.
+   *
+   * What is enforced, stated exactly, because the previous wording claimed more than the code did:
+   * the allowlist is matched against `#{session_path}` - where TMUX says the session is - and the
+   * remembered cwd must agree with it. Matching against `#meta` alone was enforcement against a
+   * remembered NAME, and the name is `sessionId(cwd, agent)`, a pure function of two knowable
+   * things. Anything running as this user could kill `repo-claude-1a2b3c4d` and recreate it with
+   * `-c /`, and within one sync the shell in `/` was a tab, reported as being in the allowlisted
+   * repository. A same-uid process still owns the socket, so this is a filter on where a session
+   * is, not a claim that agentdeck started it.
+   */
   async list(): Promise<Session[]> {
     const live = await this.#tmux.list();
-    return live.map((entry) => {
+    return live.flatMap((entry) => {
+      // Dropping the entry and reading its metadata are one step, so there is no branch left in
+      // which a listed session has no cwd, agent or name to report.
       const meta = this.#meta.get(entry.id);
-      const state: SessionState = entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle");
+      if (meta === undefined) return [];
+      if (!this.#allowlist.allows(entry.path) || entry.path !== meta.cwd) return [];
       const session: Session = {
         id: entry.id,
-        // A session this process did not create is still real - it survived a restart. What is
-        // lost with the process is the cwd and agent, which tmux does not record, so they are
-        // recovered from the id's shape where possible and left honest where not.
-        name: meta === undefined ? entry.id : sessionName(meta.cwd),
-        cwd: meta?.cwd ?? "",
-        agent: meta?.agent ?? "",
-        state,
+        name: sessionName(entry.path),
+        cwd: entry.path,
+        agent: meta.agent,
+        state: entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle"),
         startedAt: entry.startedAt,
       };
       if (entry.exitCode !== undefined) session.exitCode = entry.exitCode;
-      return session;
+      return [session];
     });
   }
 
+  /**
+   * Kill one of OUR sessions, and nothing else.
+   *
+   * The id arrives as a raw path segment from `DELETE /api/sessions/:id`, so it goes through the
+   * same allowlist-filtered `list()` as everything else first. Without that, the boundary was
+   * one-way: a session this class refuses to list, attach or reap - the one a human started by
+   * hand under the same socket - was still killable, along with everything running in it.
+   */
   async close(id: string): Promise<void> {
+    const ours = (await this.list()).some((session) => session.id === id);
+    if (!ours) return;
     await this.#tmux.kill(id);
     this.#meta.delete(id);
     this.#states.delete(id);

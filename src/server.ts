@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { dirname, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { parseProfiles } from "./agent-profiles.ts";
@@ -29,14 +30,43 @@ const HISTORY_LINES = 2000;
 const SYNC_INTERVAL_MS = 2000;
 
 /**
- * The token, generated on first run and stored 0600.
+ * Where the bearer token lives unless `AGENTDECK_TOKEN_FILE` says otherwise.
  *
- * Where the path should be is open, recorded in plan 005's superseded header: the old answer was
- * reasoned from a container boundary that no longer exists. What survives is the requirement, not
- * the reasoning - this token starts sessions in any allowed repo, kills live ones, and attaches to
- * every other agent's terminal, and same uid means the mode hides nothing between the server and
- * the agents. So it is never at the root of a tree a session is pointed at, where `ls -la` or
- * `grep -rn token .` puts it in a transcript. Placement hides rather than isolates.
+ * `~/.agentdeck/token`, decided 2026-08-07 and recorded in plan 005's superseded header. The old
+ * `/var/lib/agentdeck/token` was reasoned from a boundary that no longer exists, and on a Mac no
+ * ordinary user can create it - a plain `pnpm start` failed on the token before it ever reached
+ * the port. This is a directory the user owns, that no session is pointed at, and
+ * that exists on a clean host without a single environment variable being set.
+ */
+export const defaultTokenFile = (): string => join(homedir(), ".agentdeck", "token");
+
+/**
+ * Whether `tokenPath` sits inside a tree a session can be started in.
+ *
+ * Used for two files now: the bearer token, and the agent profiles file, which is the more direct
+ * surface of the two - it decides the command every session runs, as the human.
+ *
+ * Plan 005 states this rule in prose in three places and until now nothing checked it. Same uid
+ * means the 0600 mode buys nothing between the server and its agents, so placement is the whole
+ * control: at or under the root of an allowlisted working tree, an agent's ordinary `ls -la` or
+ * `grep -rn token .` ends with the token in a transcript on its way to a model API - and that
+ * token starts sessions in every allowed repo, kills live ones, and attaches to every other
+ * agent's terminal. A prefix test is right here even though `CwdAllowlist.allows` refuses one:
+ * membership is the question there, containment is the question here.
+ */
+export const tokenInsideAllowlist = (
+  tokenPath: string,
+  allowedPaths: readonly string[],
+): string | undefined => {
+  const token = resolve(tokenPath);
+  return allowedPaths.find((allowed) => {
+    const root = resolve(allowed);
+    return token === root || token.startsWith(`${root}/`);
+  });
+};
+
+/**
+ * The token, generated on first run and stored 0600.
  */
 export const loadToken = (path: string): string => {
   try {
@@ -50,16 +80,14 @@ export const loadToken = (path: string): string => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, `${token}\n`, { mode: 0o600 });
   } catch (error) {
-    // The default path is a leftover from the container and is not writable on a Mac, so this is
-    // the first thing a plain `pnpm start` hits. An unhandled EACCES names no variable and offers
-    // no next step, which is how a token ends up wherever happened to be writable - including the
-    // one place it must not be. A sentence, like EADDRINUSE above it.
+    // An unhandled EACCES names no variable and offers no next step, which is how a token ends up
+    // wherever happened to be writable - including the one place it must not be. A sentence, like
+    // EADDRINUSE below it.
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
       `could not write the bearer token to ${path}: ${reason}. Set AGENTDECK_TOKEN_FILE to a ` +
         `path this user can write. Not inside a directory a session is pointed at: an agent's ` +
-        `own \`ls -la\` or \`grep -rn token .\` would put the token in a transcript. Where it ` +
-        `should live now that there is no container is open - see plan 005's superseded header.`,
+        `own \`ls -la\` or \`grep -rn token .\` would put the token in a transcript.`,
     );
   }
   return token;
@@ -91,35 +119,39 @@ const env = (name: string, fallback: string): string => process.env[name] ?? fal
 export const main = async (): Promise<void> => {
   const socket = env("TMUX_SOCKET", "agentdeck");
   const port = Number(env("AGENTDECK_PORT", "7777"));
-  const tokenFile = env("AGENTDECK_TOKEN_FILE", "/var/lib/agentdeck/token");
+  const tokenFile = env("AGENTDECK_TOKEN_FILE", defaultTokenFile());
 
   // Where a profile's relative `waiting.settings` lands: agentdeck's own agent-state directory,
-  // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004). For
-  // claude that is the same directory the agent reads, which CLAUDE_CONFIG_DIR points it at. The
-  // fallback is deliberately somewhere disposable: a misconfigured server should merge into a
-  // file nothing reads rather than into whichever config directory it happened to guess.
-  const agentStateDir = env("AGENTDECK_AGENT_STATE_DIR", env("CLAUDE_CONFIG_DIR", "/tmp"));
+  // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004).
+  //
+  // The fallback used to be CLAUDE_CONFIG_DIR, which is the operator's live Claude config. That
+  // made an unset variable mean "rewrite, on every boot, the settings file every Claude Code
+  // session on this machine reads, including the ones agentdeck has nothing to do with". A
+  // directory of agentdeck's own is the only fallback that is agentdeck's to write.
+  const agentStateDir = env(
+    "AGENTDECK_AGENT_STATE_DIR",
+    join(homedir(), ".agentdeck", "agent-state"),
+  );
 
-  // Disposable is the right fallback, but landing on it silently is not. A profile that declares
-  // a hook mechanism reports `detectsWaiting: true` on the session list, so the strip promises to
-  // tell you when that agent needs you - while the fragment sits in a file the agent never reads
-  // and the promise is never kept. A tab that is confidently wrong is the one output this design
-  // refuses, so say so at boot rather than letting it be discovered by waiting for a prompt that
-  // never lights up.
-  if (
-    process.env["AGENTDECK_AGENT_STATE_DIR"] === undefined &&
-    process.env["CLAUDE_CONFIG_DIR"] === undefined
-  ) {
+  // Landing on the fallback silently is the thing to avoid. A profile that declares a hook
+  // mechanism reports `detectsWaiting: true` on the session list, so the strip promises to tell
+  // you when that agent needs you - while the fragment sits in a directory the agent was never
+  // pointed at and the promise is never kept. A tab that is confidently wrong is the one output
+  // this design refuses, so say so at boot rather than letting it be discovered by waiting for a
+  // prompt that never lights up.
+  if (process.env["AGENTDECK_AGENT_STATE_DIR"] === undefined) {
     console.error(
-      "agentdeck: neither AGENTDECK_AGENT_STATE_DIR nor CLAUDE_CONFIG_DIR is set, so any hook " +
-        "settings fragment goes to /tmp where the agent will not read it. Agents configured with " +
-        'waiting.via=hook will report "detects waiting" and never report waiting.',
+      `agentdeck: AGENTDECK_AGENT_STATE_DIR is not set, so hook settings go to ${agentStateDir}. ` +
+        `An agent only reads them if it is pointed there - for claude, CLAUDE_CONFIG_DIR in its ` +
+        `profile's env. Until then, agents configured with waiting.via=hook report "detects ` +
+        `waiting" and never report waiting.`,
     );
   }
 
   // Plan 001 states the Origin check as a property of the server, but the implementation is
   // present-but-off: src/http.ts and src/ws.ts both short-circuit when no expected origin is
-  // configured, and AGENTDECK_ORIGIN is read here and set nowhere. Unset, every /api request and
+  // configured. It is named in the README's Environment section now rather than only here, so
+  // that a person can find it before meeting this line. Unset, every /api request and
   // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
   // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
   // than leaving a stated protection whose enable switch is invisible.
@@ -139,9 +171,41 @@ export const main = async (): Promise<void> => {
     .filter((entry) => entry !== "");
   const allowlist = new CwdAllowlist(mounts);
 
+  // Refuse to start rather than write the token somewhere an agent meets it. This is plan 005's
+  // one surviving rule made executable: the token is never inside a tree a session is pointed at.
+  // A refusal is the right shape because there is no degraded mode - starting anyway would serve
+  // exactly the situation the rule exists to prevent, and would do it silently.
+  const clash = tokenInsideAllowlist(tokenFile, allowlist.paths);
+  if (clash !== undefined) {
+    console.error(
+      `agentdeck: the bearer token file ${resolve(tokenFile)} is inside ${clash}, which is on ` +
+        `the session allowlist. An agent started there meets the token in an ordinary \`ls -la\` ` +
+        `or \`grep -rn token .\`, and that token starts sessions in every allowed repository, ` +
+        `kills live ones, and attaches to every other agent's terminal. Move it - the default, ` +
+        `${defaultTokenFile()}, is outside every allowlist entry - or take that entry off ` +
+        `AGENTDECK_MOUNTS.`,
+    );
+    process.exit(1);
+  }
+
   let profilesRaw: unknown = {};
   const profilesPath = process.env["AGENTDECK_PROFILES"];
+  // The same rule as the token file, for the file that is a more direct host-execution surface
+  // than the token is: `command` and `args` go unmodified into `tmux new-session -- command args`
+  // and run as the human. Inside a tree an agent is started in, an agent rewrites one profile to
+  // `/bin/sh -c 'curl ...|sh'` and the next tap of that agent in the picker runs it - and no
+  // prescribed review command looks at the file. A refusal, because there is no degraded mode.
   if (profilesPath !== undefined) {
+    const profilesClash = tokenInsideAllowlist(profilesPath, allowlist.paths);
+    if (profilesClash !== undefined) {
+      console.error(
+        `agentdeck: the agent profiles file ${resolve(profilesPath)} is inside ${profilesClash}, ` +
+          `which is on the session allowlist. That file decides what command every session runs, ` +
+          `as this user, so an agent started there can choose what the next session executes. ` +
+          `Move it outside every allowlist entry, or take that entry off AGENTDECK_MOUNTS.`,
+      );
+      process.exit(1);
+    }
     try {
       profilesRaw = JSON.parse(readFileSync(profilesPath, "utf8"));
     } catch (error) {
@@ -166,9 +230,10 @@ export const main = async (): Promise<void> => {
   // secret, and those go through the environment at spawn (plan 004).
   for (const profile of profiles.values()) {
     if (profile.waiting?.via !== "hook") continue;
-    const settingsPath = isAbsolute(profile.waiting.settings)
-      ? profile.waiting.settings
-      : join(agentStateDir, profile.waiting.settings);
+    // Always under the agent-state directory: `parseWaiting` refuses an absolute path or one that
+    // climbs out, because this file is written at every boot and would otherwise be an arbitrary
+    // JSON write aimed wherever a profiles file said.
+    const settingsPath = join(agentStateDir, profile.waiting.settings);
     try {
       const { changed } = installHookSettings(settingsPath, port);
       console.log(
@@ -252,7 +317,7 @@ export const main = async (): Promise<void> => {
 
   // Loopback only. `tailscale serve` on the host is the single place where remote exposure is
   // decided, and binding the tailnet address here would make that two places.
-  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  await new Promise<void>((listening) => server.listen(port, "127.0.0.1", listening));
   console.log(`agentdeck: listening on 127.0.0.1:${String(port)}`);
   console.log(
     `agentdeck: ${String(profiles.size)} agent profile(s), ${String(mounts.length)} mount(s)`,

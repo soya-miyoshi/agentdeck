@@ -46,11 +46,24 @@ export class Hub {
   }
 
   /**
-   * Attach to everything tmux has and let go of everything it does not.
+   * Attach to every ALLOWED session tmux has, and let go of everything else.
    *
-   * Called at start and after any change to the session list. Cheap enough to call often, and
-   * calling it often is what makes a session someone started by hand in a terminal appear in the
-   * strip without anyone having told us about it.
+   * Called at start and after any change to the session list. Cheap enough to call often.
+   *
+   * "Allowed" is not decided here. `Registry.list` applies the cwd allowlist, and it is the only
+   * place that does: a boundary two callers apply separately is one that can be applied
+   * differently. What that filter keeps out is a session whose directory - the one TMUX reports,
+   * not one remembered here - is not on the allowlist: `/tmp/tmux-<uid>/agentdeck` is writable by
+   * every process running as this user, so `tmux -L agentdeck new-session -d -c / -- /bin/sh`
+   * would otherwise become a tab within one sync interval, streamed to the phone and accepting
+   * typed input, having asked nobody. It is a filter on WHERE a session is, not a claim that
+   * agentdeck started it - a same-uid process owns the socket either way.
+   *
+   * The cost, accepted deliberately and written into plan 005 rather than left implicit: a
+   * session started by hand in tmux does not appear as a tab. Neither does one this server
+   * created before a restart, because the cwd it is matched on lives in the registry's memory and
+   * a restart takes it - the same loss `CwdAllowlist.refusal` already warns a restart costs, one
+   * step further. Recreating the session recovers it.
    */
   async sync(): Promise<void> {
     const live = await this.#registry.list();
