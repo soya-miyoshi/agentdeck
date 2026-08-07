@@ -72,9 +72,10 @@ export const BASE_ENV_NAMES: readonly string[] = [
  * checked the same way and is NOT affected - it is not printed through that path - so this is the
  * command-output path only.
  *
- * Defaulted rather than forced: an operator with a real UTF-8 locale keeps theirs. Only a run that
- * declares no UTF-8 locale at all gets one, because for that run the alternative is a parser
- * reading mangled bytes.
+ * Defaulted rather than forced: an operator whose EFFECTIVE locale is UTF-8 keeps theirs. Only a
+ * run whose effective locale is not UTF-8 gets one, because for that run the alternative is a
+ * parser reading mangled bytes. "Effective" is decided by POSIX precedence - LC_ALL, then
+ * LC_CTYPE, then LANG - and a non-UTF-8 LC_ALL is dropped rather than left to override the default.
  */
 export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -83,8 +84,18 @@ export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, st
     if (value !== undefined) out[name] = value;
   }
   out["TERM"] ??= "xterm-256color";
-  const utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].some((name) => /utf-?8/i.test(out[name] ?? ""));
-  if (!utf8) out["LC_CTYPE"] = "UTF-8";
+  // POSIX precedence, not "any of them mentions UTF-8": LC_ALL overrides LC_CTYPE, which overrides
+  // LANG. Asking whether ANY of the three says UTF-8 gets two real environments wrong - `LC_ALL=C`
+  // alone (the LC_CTYPE default is then inert, because LC_ALL outranks it) and
+  // `LANG=en_US.UTF-8 LC_CTYPE=C` (LANG matches, nothing is defaulted, and LC_CTYPE=C wins). Both
+  // produce a non-UTF-8 client and so the mangled `list-sessions` output described above.
+  const winner = ["LC_ALL", "LC_CTYPE", "LANG"].find((name) => out[name] !== undefined);
+  if (winner === undefined || !/utf-?8/i.test(out[winner] ?? "")) {
+    // baseEnv builds the environment from scratch, so it can simply not pass on an LC_ALL that
+    // would override the default rather than be silently beaten by it.
+    delete out["LC_ALL"];
+    out["LC_CTYPE"] = "UTF-8";
+  }
   return out;
 };
 
@@ -404,7 +415,8 @@ export class Tmux {
       throw new Error(
         `tmux returned list-sessions output with no field separator: ${JSON.stringify(lines[0])}. ` +
           `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
-          `set LC_ALL or LC_CTYPE to a UTF-8 locale for the process running agentdeck.`,
+          `set a UTF-8 locale for the process running agentdeck - and note LC_ALL outranks ` +
+          `LC_CTYPE and LANG, so a non-UTF-8 LC_ALL must be changed or unset, not worked around.`,
       );
     }
 

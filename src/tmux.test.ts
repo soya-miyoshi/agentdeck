@@ -396,15 +396,28 @@ void describe("the environment a tmux server is started with", () => {
     assert.equal(baseEnv({ PATH: "/usr/bin", LANG: "en_US.utf8" })["LC_CTYPE"], undefined);
   });
 
-  void test("an LC_ALL that is not UTF-8 is passed through, and defaulting cannot rescue it", () => {
-    // LC_ALL outranks LC_CTYPE in every implementation, so the LC_CTYPE default below is inert
-    // here: this run WILL talk to tmux as a non-UTF-8 client and WILL get `_` where the field
-    // separator should be. baseEnv does not silently overwrite a locale the operator set, which
-    // is exactly why `Tmux.list()` refuses a separator-less line loudly - see
-    // src/create-500.test.ts. This test records that the gap is known, not that it is fixed.
-    const built = baseEnv({ PATH: "/usr/bin", LC_ALL: "C" });
-    assert.equal(built["LC_ALL"], "C");
-    assert.equal(built["LC_CTYPE"], "UTF-8");
+  void test("a non-UTF-8 locale is fixed in the variable that actually wins", () => {
+    // POSIX precedence, not "any of the three mentions UTF-8". Both of these environments used to
+    // yield a non-UTF-8 tmux client - and therefore `_` where the field separator should be, and
+    // therefore a `Tmux.list()` that throws for every session on the socket.
+    //
+    // (a) LC_ALL=C alone: defaulting LC_CTYPE is inert, because LC_ALL outranks it. The only fix
+    //     is to stop passing that LC_ALL on, which baseEnv is free to do - it builds the
+    //     environment from scratch rather than mutating the shell's.
+    const allC = baseEnv({ PATH: "/usr/bin", LC_ALL: "C" });
+    assert.equal(allC["LC_ALL"], undefined);
+    assert.equal(allC["LC_CTYPE"], "UTF-8");
+
+    // (b) LANG says UTF-8 but LC_CTYPE says C: LC_CTYPE wins, so a match on LANG proves nothing.
+    const ctypeC = baseEnv({ PATH: "/usr/bin", LANG: "en_US.UTF-8", LC_CTYPE: "C" });
+    assert.equal(ctypeC["LC_CTYPE"], "UTF-8");
+    assert.equal(ctypeC["LC_ALL"], undefined);
+
+    // And the mirror image: an LC_ALL that IS UTF-8 outranks a non-UTF-8 LC_CTYPE, so nothing is
+    // touched.
+    const allUtf8 = baseEnv({ PATH: "/usr/bin", LC_ALL: "C.UTF-8", LC_CTYPE: "C" });
+    assert.equal(allUtf8["LC_ALL"], "C.UTF-8");
+    assert.equal(allUtf8["LC_CTYPE"], "C");
   });
 
   void test("LC_CTYPE is on the name list, so the global-environment sweep does not strip it", () => {
