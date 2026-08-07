@@ -143,6 +143,26 @@ export const MAX_HEARTBEAT_INTERVAL_MS = 60_000;
  */
 export const SILENT_ATTEMPTS_BEFORE_DIAGNOSIS = 3;
 
+/**
+ * How long the token probe may take before the ladder stops waiting for it.
+ *
+ * The probe is the one point in the ladder where there is no socket, no scheduled retry, and no
+ * timer of its own - `#onClosed` has cleared the socket and is awaiting an answer before it decides
+ * anything. `fetch` has no timeout, and the case this probe exists for is exactly the one where the
+ * network is gone, so the request can stay pending for as long as the browser feels like: on iOS a
+ * request issued as the tab is backgrounded routinely never settles at all. `poke()` cannot rescue
+ * it either, because `#probing` is what tells a wake not to open a second socket beside a ladder
+ * that is still deciding - so unlocking the phone, the moment this whole item exists to make work,
+ * hits a guard rather than a reconnect. The result is a tab with no connection, nothing scheduled,
+ * and a banner the user cannot act on, for as long as the tab stays open.
+ *
+ * Expiry is `unreachable` and not `ok`: nothing answered, so nothing has been learned, and the
+ * ladder carries on retrying with the token kept. The value is generous next to the ladder's
+ * four-second cap, because a slow answer is still an answer and pre-empting one would throw away
+ * the only thing that can tell a rejected token from a lost network.
+ */
+export const TOKEN_PROBE_TIMEOUT_MS = 10_000;
+
 /** The stated interval if it is usable, the default otherwise. */
 const usableHeartbeatInterval = (stated: unknown): number =>
   typeof stated === "number" &&
@@ -264,6 +284,8 @@ export class Connection {
   /** True while `#onClosed` is waiting on the token probe, when there is no socket but a ladder. */
   #probing = false;
   #cancelSilence: Cancel | undefined;
+  /** The bound on the probe currently out, so teardown does not leave a timer behind it. */
+  #cancelProbe: Cancel | undefined;
   /** Drop the current socket as if it had closed. Undefined when there is no socket to drop. */
   #dropSocket: (() => void) | undefined;
 
@@ -292,6 +314,11 @@ export class Connection {
     this.#stopped = true;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
+    // A probe may be out; nothing will act on its answer now, and its bound must not outlive the
+    // connection either. The request itself cannot be recalled, which is why `#onClosed` re-checks
+    // `#stopped` after it rather than trusting that it stopped.
+    this.#cancelProbe?.();
+    this.#cancelProbe = undefined;
     this.#stopWatchingSilence();
     this.#dropSocket = undefined;
     this.#socket?.close();
@@ -507,7 +534,17 @@ export class Connection {
     if (this.#stopped || this.#socket !== undefined || this.#probing) return;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
-    this.#open(this.#status === "reconnecting" ? "reconnecting" : "connecting");
+    this.#open(this.#resumeStatus());
+  }
+
+  /**
+   * The status a re-open should show: whatever the ladder is already showing, or `connecting`.
+   *
+   * Once the reconnecting banner is up, an attempt that has not failed yet must not take it down
+   * and put it back - the flicker says something changed when nothing has.
+   */
+  #resumeStatus(): ConnectionStatus {
+    return this.#status === "reconnecting" ? "reconnecting" : "connecting";
   }
 
   #setStatus(status: ConnectionStatus): void {
@@ -548,6 +585,14 @@ export class Connection {
     // each re-attaching every tab with its own cold snapshot - against the server that was already
     // the reason for the reconnect.
     this.#dropSocket?.();
+    // AFTER the drop, because dropping a socket that had carried frames runs the whole ladder
+    // synchronously - no probe is needed for a socket the server was talking to seconds ago - and
+    // it ends by scheduling a retry. That retry would then fire beside the socket opened below and
+    // drop it, and every tab would re-attach again for nothing: on this client a re-attach is a
+    // cold snapshot per session at the server that was already the reason for reconnecting. This
+    // open supersedes any retry, whether it was already outstanding or was just made.
+    this.#cancelRetry?.();
+    this.#cancelRetry = undefined;
     this.#opened = false;
     this.#carried = false;
     this.#heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -567,36 +612,51 @@ export class Connection {
     // that completes the handshake and then forwards nothing is exactly what the silence bound
     // exists to catch, and resetting the ladder on the handshake alone turns that into a 250 ms
     // reconnect loop that never backs off and never shows the user a status.
-    const socket = this.#deps.connect(this.#deps.token, {
-      opened: () => {
-        // A finished socket is inert. `close()` only starts the closing handshake, so a socket the
-        // watchdog gave up on can still deliver what the browser had already buffered - onto a
-        // Connection that has moved on to its replacement.
-        if (handled) return;
-        this.#opened = true;
-        this.#setStatus("open");
-        this.#noteTraffic();
-        // Re-attach every tab with where it got to. The server answers with chunks if the epoch
-        // matches and its buffer still covers that point, and a snapshot otherwise - and the
-        // snapshot case is the common one after the phone has been asleep.
-        for (const sessionId of this.#attachments.keys()) this.#sendAttach(sessionId);
-        // Anything typed during the CONNECTING window is still queued rather than destroyed.
-        this.#flushInput();
-      },
-      message: (raw) => {
-        if (handled) return;
-        if (!this.#carried) {
-          this.#carried = true;
-          this.#policy.opened();
-          // A frame arrived, so whatever the diagnosis below described is over. Said again if it
-          // comes back, because by then it is a new outage rather than the same one repeating.
-          this.#diagnosed = false;
-        }
-        this.#noteTraffic();
-        this.#receive(raw);
-      },
-      closed: finish,
-    });
+    // A socket that cannot even be CONSTRUCTED is a closed socket, not an exception thrown through
+    // whoever called `start()` or through a timer callback with nobody to catch it. `new WebSocket`
+    // throws for a blocked mixed-content or CSP-refused endpoint, and this is called from a
+    // scheduled retry - so the throw left no socket, no retry and a "connecting" banner that would
+    // never change, which is the one shape the ladder is not allowed to end in.
+    //
+    // The thrown error is swallowed rather than shown: a constructor's message quotes the arguments
+    // it refused, and the second argument here is the subprotocol list, which is where the token
+    // is. The error surface is the page, and a page is a screenshot away from being shared.
+    let socket: SocketLike;
+    try {
+      socket = this.#deps.connect(this.#deps.token, {
+        opened: () => {
+          // A finished socket is inert. `close()` only starts the closing handshake, so a socket the
+          // watchdog gave up on can still deliver what the browser had already buffered - onto a
+          // Connection that has moved on to its replacement.
+          if (handled) return;
+          this.#opened = true;
+          this.#setStatus("open");
+          this.#noteTraffic();
+          // Re-attach every tab with where it got to. The server answers with chunks if the epoch
+          // matches and its buffer still covers that point, and a snapshot otherwise - and the
+          // snapshot case is the common one after the phone has been asleep.
+          for (const sessionId of this.#attachments.keys()) this.#sendAttach(sessionId);
+          // Anything typed during the CONNECTING window is still queued rather than destroyed.
+          this.#flushInput();
+        },
+        message: (raw) => {
+          if (handled) return;
+          if (!this.#carried) {
+            this.#carried = true;
+            this.#policy.opened();
+            // A frame arrived, so whatever the diagnosis below described is over. Said again if it
+            // comes back, because by then it is a new outage rather than the same one repeating.
+            this.#diagnosed = false;
+          }
+          this.#noteTraffic();
+          this.#receive(raw);
+        },
+        closed: finish,
+      });
+    } catch {
+      finish();
+      return;
+    }
     this.#socket = socket;
     this.#dropSocket = () => {
       socket.close();
@@ -654,7 +714,7 @@ export class Connection {
       this.#probing = true;
       let verdict;
       try {
-        verdict = await this.#deps.verifyToken();
+        verdict = await this.#probe();
       } finally {
         this.#probing = false;
       }
@@ -697,8 +757,33 @@ export class Connection {
     this.#cancelRetry = this.#schedule(() => {
       this.#cancelRetry = undefined;
       if (this.#stopped) return;
-      this.#open(this.#status === "reconnecting" ? "reconnecting" : "connecting");
+      this.#open(this.#resumeStatus());
     }, decision.delayMs);
+  }
+
+  /**
+   * The probe's verdict, or `unreachable` if it does not produce one.
+   *
+   * Bounded by TOKEN_PROBE_TIMEOUT_MS, and a rejection is the same answer as the timeout for the
+   * same reason: what the ladder needs from this call is a decision it can act on, and the one
+   * thing it cannot survive is not getting one. Both are the state the probe is describing anyway -
+   * nothing answered.
+   */
+  async #probe(): Promise<TokenVerdict> {
+    try {
+      return await Promise.race([
+        this.#deps.verifyToken().catch((): TokenVerdict => "unreachable"),
+        new Promise<TokenVerdict>((resolve) => {
+          this.#cancelProbe = this.#schedule(() => {
+            this.#cancelProbe = undefined;
+            resolve("unreachable");
+          }, TOKEN_PROBE_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      this.#cancelProbe?.();
+      this.#cancelProbe = undefined;
+    }
   }
 
   /** Say, once, that the thing failing is the socket rather than the network or the token. */

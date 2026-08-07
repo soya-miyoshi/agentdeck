@@ -313,6 +313,18 @@ Driven from `curl` only. No client.
         the same rejection and made its own build, so eight tabs coming back from one stalled server
         cost eight concurrent capture-panes at the tmux server that was already the problem.
         Measured at 8, now 2. `src/ws.test.ts`.
+      **What the review pass added on top of QA**, all of it the one failure this item exists to
+      prevent — a set of the ladder's flags that leaves the connection with no socket, nothing
+      scheduled and no status the user can act on, which a green suite cannot show:
+      - The token probe is bounded. `fetch` has no timeout, `#onClosed` awaits it with no socket,
+        and `#probing` is what turns a wake away — so a request that never settled took the tab out
+        for good, and `visibilitychange` and `online`, both of which a phone unlocking fires, hit
+        the guard rather than reconnecting.
+      - A socket that cannot be CONSTRUCTED — blocked mixed content, a CSP that refuses the
+        endpoint — is a closed socket rather than a throw out of a timer callback.
+      - `#open` cancels any outstanding retry after dropping the old socket, so dropping one that
+        had carried frames cannot leave a retry that fires beside the socket just opened and
+        re-attaches every tab for nothing.
       Making a restart recover WITHOUT the recreate is still the metadata gap owned by
       `m0/supervisor-crash-test`'s **Known gap, unsolved** above.
 

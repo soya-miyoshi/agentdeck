@@ -936,3 +936,74 @@ boundary holds.
 - **`waitingDetectionLost` has no reader** until `m3/tab-strip`.
 - **Exited panes are retained indefinitely** once adopted.
 - **Same-uid**, unchanged, and this branch is the clearest illustration of it so far.
+
+---
+
+## m2/reconnect - final whole-codebase pass - 2026-08-08
+
+The reconnect ladder, reviewed rather than rebuilt. Both halves of the done-when were already
+asserted against real infrastructure in `src/client/end-to-end.test.ts` - a socket killed
+mid-output repaints with no hole, and a real server SIGKILLed and restarted under a live client
+repaints in a new epoch - and both still pass unchanged. This pass looked for the one failure the
+whole item exists to prevent and that a green suite cannot show: a combination of the ladder's
+flags (`#stopped`, `#probing`, `#carried`, `#opened`, per-socket `handled`, `#diagnosed`) that
+leaves the connection with no socket, no scheduled retry and no status the user can act on. Three
+were reachable, all three are fixed here, and each has a test that fails without its fix.
+
+The server half of the storm question was checked and is sound: `buildCoalescedSnapshot` coalesces
+per session, a joiner that inherits a rejection looks again before starting its own build, and the
+build is raced against a bound that evicts - so a reconnect storm after a restart is one build per
+session, not one per tab.
+
+### Findings
+
+- [high] src/client/connection.ts:717 - **A token probe that never settles wedged the connection
+  permanently.** `#onClosed` clears `#socket`, sets `#probing` and awaits `verifyToken()`, which is
+  `fetch` with no timeout - and the case the probe exists for is precisely the one where the
+  network has gone. In that window there is no socket, nothing scheduled, and `poke()` returns
+  immediately because `#probing` is the guard that stops a wake opening a second socket beside a
+  ladder that is still deciding. So a request that never settles - routine on iOS for a request
+  issued as the tab is backgrounded - took the connection out for the life of the tab, and the two
+  events App.vue wires to `poke()`, `visibilitychange` and `online`, both hit the guard. A phone
+  unlocking fires both, which is the exact moment this item is about. Status: FIXED. The probe is
+  raced against `TOKEN_PROBE_TIMEOUT_MS` (10 s, generous next to the ladder's 4 s cap because a
+  slow answer is still an answer); expiry is `unreachable`, not `ok`, so nothing is asserted to the
+  user and the token is kept. A rejection from the injected `verifyToken` is the same answer for
+  the same reason - the ladder cannot survive not getting a decision.
+
+- [medium] src/client/connection.ts:626 - **A socket that cannot be CONSTRUCTED threw out of the
+  ladder.** `new WebSocket` throws rather than closing for a blocked mixed-content or CSP-refused
+  endpoint. `#open` is called from `start()` and from a scheduled retry callback, so the throw left
+  no socket, no retry, and a `connecting` status that would never move again - and from a timer
+  there is nobody to catch it. Status: FIXED: a socket that cannot be constructed is treated as one
+  that closed, and the ladder carries on. The thrown error is swallowed rather than shown, because
+  a constructor's message quotes the arguments it refused and the second argument is the
+  subprotocol list, which is where the token is.
+
+- [medium] src/client/connection.ts:594 - **`#dropSocket?.()` at the top of `#open` could leave a
+  retry scheduled beside the socket it had just opened.** Dropping a socket that had CARRIED frames
+  runs `#onClosed` synchronously - no probe is needed for a socket the server was talking to
+  seconds ago - and that path ends by scheduling a retry. The retry then fires beside the healthy
+  socket opened immediately afterwards and drops it, and every attached tab re-attaches for
+  nothing: on this client a re-attach after a roll of the ring buffer is a cold snapshot per
+  session, at the server that was already the reason for reconnecting. Status: FIXED: `#open`
+  cancels any outstanding retry after the drop, since an open supersedes one. It cannot recurse -
+  the drop's `#onClosed` either awaits the probe or returns after scheduling, never re-entering
+  `#open`.
+
+- [low] src/client/connection.ts:320 - `stop()` left the probe's bound timer running. Harmless in
+  effect, since `#onClosed` re-checks `#stopped` after the probe, but a timer outliving the object
+  that armed it is how a "closed" connection stops being closed. Status: FIXED: `stop()` cancels
+  it, and `src/client/connection.test.ts` asserts teardown leaves no timers at all.
+
+### Open after this iteration
+
+- **A late `rejected` verdict from a probe the ladder has already abandoned is discarded**, so a
+  token revoked during a 10-second stall is noticed one cycle later rather than immediately. The
+  socket carries nothing in the meantime, so nothing is served on a revoked token; this is latency
+  in signing the user out, not access. Deliberate: acting on a verdict the ladder has moved past is
+  what wiped a freshly pasted token in the defect 99f1855 fixed.
+- **The status stays `open` through the first, silent retry** (`showReconnecting` is false until
+  one retry has failed), so for up to 250 ms a disconnected tab reads as connected. Deliberate, and
+  the alternative is a banner that flashes for every ordinary drop.
+- **Same-uid**, unchanged.

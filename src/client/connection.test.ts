@@ -11,6 +11,7 @@ import {
   INPUT_WINDOW_MS,
   MAX_INPUT_FRAME_BYTES,
   MAX_INPUT_FRAMES_PER_WINDOW,
+  TOKEN_PROBE_TIMEOUT_MS,
   type ConnectionEvents,
   type ConnectionStatus,
   type SocketHandlers,
@@ -53,6 +54,13 @@ interface Harness {
   deferProbe: boolean;
   /** Answer the pending probe. */
   answer: (verdict: TokenVerdict) => void;
+  /**
+   * Make the socket factory throw instead of returning a socket.
+   *
+   * `new WebSocket` throws rather than closing when the endpoint is refused before a connection is
+   * attempted at all - blocked mixed content, a `connect-src` the page's CSP does not allow.
+   */
+  refuseSocket: boolean;
 }
 
 interface FakeSocket {
@@ -95,6 +103,7 @@ const harness = (): Harness => {
     probes: 0,
     deferProbe: false,
     answer: () => assert.fail("no probe was pending"),
+    refuseSocket: false,
   };
 
   const events: ConnectionEvents = {
@@ -114,6 +123,7 @@ const harness = (): Harness => {
     {
       token: "t0k3n",
       connect: (_token, handlers) => {
+        if (state.refuseSocket) throw new Error("the page is not allowed to open this socket");
         const socket: FakeSocket = {
           handlers,
           sent: [],
@@ -174,10 +184,16 @@ const joined = (frames: Record<string, unknown>[]): string =>
 const frameBytes = (frame: Record<string, unknown>): number =>
   new TextEncoder().encode(JSON.stringify(frame)).length;
 
-/** Let the token probe's promise settle. */
+/**
+ * Let the token probe's promise settle.
+ *
+ * A fixed number of microtask turns rather than two, because the number of turns an already-settled
+ * promise takes to reach the ladder is an implementation detail of the ladder - the probe is now
+ * raced against a bound, which is one more `await` than it used to be. Counting them here made
+ * every one of these tests assert the shape of `#onClosed` by accident.
+ */
 const settle = async (): Promise<void> => {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
 };
 
 void describe("one socket, multiplexed", () => {
@@ -1282,6 +1298,99 @@ void describe("what happens during the window the token probe is open", () => {
     await settle();
     assert.deepEqual(h.errors, [], "a stopped connection reported a configuration mistake");
     assert.equal(h.statuses.at(-1), "closed");
+  });
+});
+
+void describe("the shapes the ladder is not allowed to end in", () => {
+  // One rule, checked from three directions: there is never a moment with no socket, no scheduled
+  // retry and nothing the user can act on. That state is invisible in a green suite: nothing
+  // fails, there is simply a tab that looks like it is connecting and never will be again.
+
+  void test("a probe that never answers does not strand the ladder", async () => {
+    // `fetch` has no timeout and `#probing` deliberately turns a wake away, so a request that never
+    // settles held the only two things that could have restarted the ladder: itself, and `poke()`.
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [TOKEN_PROBE_TIMEOUT_MS],
+      "the probe was awaited with no bound on how long it could take",
+    );
+
+    h.fire();
+    await settle();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the probe gave up without the ladder carrying on",
+    );
+    // And the token survives it: nothing answered, so nothing rejected anything.
+    assert.equal(h.unauthorized, 0);
+    h.fire();
+    assert.equal(h.sockets.length, 2);
+  });
+
+  void test("a late answer to a probe that already gave up is not acted on twice", async () => {
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    h.fire();
+    await settle();
+
+    h.answer("rejected");
+    await settle();
+    assert.equal(h.unauthorized, 0, "an abandoned probe still signed the user out");
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the abandoned probe's answer disturbed the ladder it had already been dropped from",
+    );
+  });
+
+  void test("a socket that cannot be constructed is a closed socket, not a thrown one", async () => {
+    // The throw used to leave through `start()` or through a timer callback with nobody to catch
+    // it: no socket assigned, no retry scheduled, and a "connecting" status that would never move.
+    const h = harness();
+    h.refuseSocket = true;
+    h.connection.start();
+    await settle();
+    assert.deepEqual(h.statuses, ["connecting"]);
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "a socket that could not be opened left nothing scheduled",
+    );
+
+    h.refuseSocket = false;
+    h.fire();
+    assert.equal(h.sockets.length, 1, "the ladder never tried again");
+  });
+
+  void test("re-opening over a live socket leaves one socket and no stray retry", async () => {
+    // `#open` drops whatever socket is there first, and dropping a socket that HAS carried frames
+    // runs the ladder synchronously - no probe is needed for one the server was talking to seconds
+    // ago - so it schedules a retry on its way out. That retry would fire beside the socket opened
+    // immediately afterwards and drop it, and every tab would re-attach for nothing.
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: PING_INTERVAL_MS });
+
+    h.connection.start();
+    h.last().handlers.opened();
+    await settle();
+    assert.equal(h.sockets.filter((socket) => !socket.closed).length, 1);
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+      "a retry was left behind that would have dropped the socket that had just opened",
+    );
   });
 });
 
