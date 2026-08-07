@@ -188,6 +188,53 @@ void describe("adopting a session that outlived the process which created it", (
     assert.deepEqual(await registry.list(), []);
   });
 
+  void test("a session tmux reports with no path at all is not adopted", async () => {
+    // `#{session_path}` is the whole of what adoption recovers, so an entry without one has
+    // nothing to check against the allowlist and nothing to derive an id from. It is left alone
+    // rather than defaulted to anything.
+    const { registry, sessions, plant } = build();
+    plant(sessionId("", "claude"), "");
+
+    assert.deepEqual(await registry.list(), []);
+    assert.equal(sessions.size, 1, "the server killed a session it refuses to list");
+  });
+
+  void test("an adopted session that has exited still says its waiting detection is dead", async () => {
+    // The flag is about the hook path, not about being alive: a corpse that is listed at all is
+    // listed with the same warning, so nothing reading the list has to special-case it.
+    const { registry, sessions, die } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+    die(session.id, "exited");
+
+    const [adopted] = await restarted.list();
+    assert.equal(adopted?.state, "exited");
+    assert.equal(adopted?.waitingDetectionLost, true);
+  });
+
+  void test("only restarting the AGENT brings waiting detection back", async () => {
+    // The sentence the item refuses to smooth over, as an assertion. Adoption recovers the tab and
+    // not the hook path; recreating the session reattaches to the same process and so recovers
+    // nothing either (above). What ends the loss is the agent itself going away: a session killed
+    // and started again is a NEW process, started with a secret this registry minted and can
+    // therefore check, and it drops the flag.
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+    assert.equal((await restarted.list())[0]?.waitingDetectionLost, true);
+
+    await restarted.close(session.id);
+    const fresh = await restarted.create("/workspace/agentdeck", "claude");
+    assert.equal(fresh.session.id, session.id, "the id is not stable across the agent restart");
+    assert.equal(fresh.warning, undefined, "this was a reattach, not a fresh process");
+    assert.equal(
+      fresh.session.waitingDetectionLost,
+      undefined,
+      "a freshly started agent is still reported as having lost its hook path",
+    );
+    assert.equal((await restarted.list())[0]?.waitingDetectionLost, undefined);
+  });
+
   void test("an adopted session can be closed and reaped like any other", async () => {
     const { registry, sessions, die } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");

@@ -196,12 +196,12 @@ const createSession = async (
  * Unauthenticated on purpose - the bearer token is not what this route checks. The secret in the
  * header is the whole assertion, so it is never routed through `api`.
  */
-const hookPost = async (): Promise<number> => {
+const hookPost = async (presented = secret): Promise<number> => {
   const response = await fetch(
     `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
     {
       method: "POST",
-      headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
+      headers: { "content-type": "application/json", "x-agentdeck-secret": presented },
       body: JSON.stringify({ hook_event_name: "Notification" }),
     },
   );
@@ -209,13 +209,25 @@ const hookPost = async (): Promise<number> => {
 };
 
 /** `<session id> <pane pid>` for everything on our socket, so survival is pid-level, not name-level. */
-const panes = (): string[] =>
-  execFileSync("tmux", ["-L", socket, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], {
-    encoding: "utf8",
-  })
+const panes = (): string[] => {
+  // An empty socket is a result, not an error: `list-panes -a` exits non-zero with "no current
+  // target" once the last session is gone, and the last session going is something these tests
+  // do on purpose. Every assertion below reads this as a set, so [] is the honest answer.
+  let out = "";
+  try {
+    out = execFileSync(
+      "tmux",
+      ["-L", socket, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    return [];
+  }
+  return out
     .trim()
     .split("\n")
     .filter((line) => line !== "");
+};
 
 before(async () => {
   port = await freePort();
@@ -430,6 +442,60 @@ void describe("the node process is killed and nothing brings it back", () => {
       401,
       "the surviving process's secret works again after a recreate",
     );
+  });
+
+  void test("the rejected hook leaves the session's state alone rather than half-applying it", async () => {
+    // A 401 that still moved the state would be worse than the loss it reports: the tab would
+    // report `waiting` on the word of a caller the server could not authenticate. The adopted
+    // session reports what the stream can see and nothing else.
+    const [session] = await listedSessions();
+    assert.notEqual(session?.state, "waiting", "an unauthenticated hook set the session waiting");
+    assert.equal(session?.waitingDetectionLost, true);
+  });
+
+  void test("restarting the AGENT itself, not the server, is what brings waiting detection back", async () => {
+    // The end of the sentence this item refuses to leave off. The loss is not permanent and it is
+    // not repaired by anything the server can do alone: it ends when the process holding the old
+    // secret is gone and a new one is started with a secret this server minted. Killing the
+    // session and creating it again is exactly that, and it is the instruction the refusal text
+    // and plan 002 give.
+    const stale = secret;
+    const deleted = await api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    assert.equal(deleted.status, 200);
+    assert.ok(
+      !panes().some((line) => line.startsWith(`${id} `)),
+      "DELETE left the session it had adopted",
+    );
+
+    const restarted = await createSession("shell");
+    assert.equal(restarted.session.id, id, "the id is not a function of (cwd, agent) after all");
+    assert.equal(restarted.warning, undefined, "this reattached instead of starting a new agent");
+
+    // The new pane writes its own AGENTDECK_SECRET over the old one; wait for a different value,
+    // because an equal read would mean the file still holds the dead agent's.
+    let fresh = "";
+    for (let i = 0; i < 200 && (fresh === "" || fresh === stale); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        fresh = readFileSync(secretFile, "utf8").trim();
+      } catch {
+        fresh = "";
+      }
+    }
+    assert.match(fresh, /^[A-Za-z0-9_-]{20,}$/, "the restarted pane never saw a secret");
+    assert.notEqual(fresh, stale, "the restarted agent was handed the dead session's secret");
+    secret = fresh;
+
+    assert.equal(await hookPost(stale), 401, "the dead agent's secret still authenticates");
+    assert.equal(await hookPost(fresh), 200, "restarting the agent did not restore the hook path");
+
+    const [session] = await listedSessions();
+    assert.equal(
+      session?.waitingDetectionLost,
+      undefined,
+      "a session whose agent was restarted is still reported as deaf",
+    );
+    assert.equal(session?.state, "waiting", "the hook it accepted changed no state");
   });
 });
 
