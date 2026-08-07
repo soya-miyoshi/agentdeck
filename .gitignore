@@ -3,9 +3,11 @@ dist
 *.log
 .DS_Store
 .pnpm-store
-# The bearer token is NOT here and must never be: it lives at AGENTDECK_TOKEN_FILE
-# (/var/lib/agentdeck/token), on a container-local volume outside every bind mount, because
-# this directory is mounted into the container every agent session runs in. See plan 005.
+# The bearer token is NOT here and must never be. AGENTDECK_TOKEN_FILE decides where it goes, and
+# there is no container and no mount left to place it behind: agentdeck runs on the Mac as you.
+# Where it should now live is undecided - recorded as open in plan 005's superseded header. The
+# one rule that survives de-containerising is that it is never at the root of a tree a session is
+# pointed at, where an agent's own `ls -la` or `grep -rn token .` meets it.
 
 # Isolated checkouts for parallel agents. Whole copies of this repo; never committed.
 .claude/worktrees

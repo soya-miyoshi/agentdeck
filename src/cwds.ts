@@ -39,14 +39,19 @@ export class CwdAllowlist {
    * The refusal a person meets most often, so it says what would have to change rather than 403.
    *
    * A repository cloned since the server started is not on the list and cannot be until it is
-   * restarted - so the sentence names the variable to edit and says what the restart costs, which
-   * is a reconnect rather than the running sessions.
+   * restarted - so the sentence names the variable to edit and says what the restart actually
+   * costs. tmux keeps the sessions, but the registry keeps their cwd, agent and per-session hook
+   * secret in memory only (src/registry.ts), so a surviving session comes back nameless and its
+   * hook POSTs 401 for the rest of its life: it stops reporting `waiting`. Understating that is
+   * how someone restarts casually and loses the one thing the phone is for.
    */
   refusal(cwd: string): string {
     return (
       `${resolve(cwd)} is not on the allowlist, so no session can start there. ` +
-      `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running sessions ` +
-      `across that restart, so it costs a reconnect. Currently allowed: ` +
+      `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running sessions across ` +
+      `that restart, but their directory, agent and waiting detection do not survive it: ` +
+      `sessions that were already running come back unnamed and stop reporting when they need ` +
+      `you, until they are recreated. Currently allowed: ` +
       `${this.paths.join(", ")}`
     );
   }

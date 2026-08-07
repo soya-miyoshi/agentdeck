@@ -31,13 +31,14 @@ const SYNC_INTERVAL_MS = 2000;
 /**
  * The token, generated on first run and stored 0600.
  *
- * The path is deliberately outside every bind mount. At the root of a mounted repository an agent
- * would meet it in an ordinary `ls -la` of its own working tree, and this token starts sessions in
- * any mounted repo, kills live ones, and attaches to every other agent's terminal. Same uid means
- * the mode hides nothing between the server and the agents - placement is the only control left,
- * and it hides rather than isolates (plan 005).
+ * Where the path should be is open, recorded in plan 005's superseded header: the old answer was
+ * reasoned from a container boundary that no longer exists. What survives is the requirement, not
+ * the reasoning - this token starts sessions in any allowed repo, kills live ones, and attaches to
+ * every other agent's terminal, and same uid means the mode hides nothing between the server and
+ * the agents. So it is never at the root of a tree a session is pointed at, where `ls -la` or
+ * `grep -rn token .` puts it in a transcript. Placement hides rather than isolates.
  */
-const loadToken = (path: string): string => {
+export const loadToken = (path: string): string => {
   try {
     const existing = readFileSync(path, "utf8").trim();
     if (existing !== "") return existing;
@@ -45,8 +46,22 @@ const loadToken = (path: string): string => {
     // Absent is the first-run case, not an error.
   }
   const token = generateToken();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  } catch (error) {
+    // The default path is a leftover from the container and is not writable on a Mac, so this is
+    // the first thing a plain `pnpm start` hits. An unhandled EACCES names no variable and offers
+    // no next step, which is how a token ends up wherever happened to be writable - including the
+    // one place it must not be. A sentence, like EADDRINUSE above it.
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `could not write the bearer token to ${path}: ${reason}. Set AGENTDECK_TOKEN_FILE to a ` +
+        `path this user can write. Not inside a directory a session is pointed at: an agent's ` +
+        `own \`ls -la\` or \`grep -rn token .\` would put the token in a transcript. Where it ` +
+        `should live now that there is no container is open - see plan 005's superseded header.`,
+    );
+  }
   return token;
 };
 
@@ -99,6 +114,20 @@ export const main = async (): Promise<void> => {
       "agentdeck: neither AGENTDECK_AGENT_STATE_DIR nor CLAUDE_CONFIG_DIR is set, so any hook " +
         "settings fragment goes to /tmp where the agent will not read it. Agents configured with " +
         'waiting.via=hook will report "detects waiting" and never report waiting.',
+    );
+  }
+
+  // Plan 001 states the Origin check as a property of the server, but the implementation is
+  // present-but-off: src/http.ts and src/ws.ts both short-circuit when no expected origin is
+  // configured, and AGENTDECK_ORIGIN is read here and set nowhere. Unset, every /api request and
+  // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
+  // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
+  // than leaving a stated protection whose enable switch is invisible.
+  if (process.env["AGENTDECK_ORIGIN"] === undefined) {
+    console.error(
+      "agentdeck: AGENTDECK_ORIGIN is not set, so the Origin check plan 001 describes is off. " +
+        "Any page a browser visits can call /api and open /ws with a token it has. Set it to the " +
+        "https://<host>.ts.net origin the phone loads.",
     );
   }
 
@@ -167,7 +196,13 @@ export const main = async (): Promise<void> => {
   const reaped = await registry.reap();
   if (reaped.length > 0) console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
 
-  const token = loadToken(tokenFile);
+  let token: string;
+  try {
+    token = loadToken(tokenFile);
+  } catch (error) {
+    console.error(`agentdeck: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const server = createServer(
     createHandler({

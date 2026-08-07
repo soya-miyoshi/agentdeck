@@ -9,7 +9,10 @@
 // are unchanged.
 
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 const repoRoot = new URL("..", import.meta.url);
@@ -207,6 +210,46 @@ void describe("the user's bearer token is not at the root of a working tree", ()
       /^\.agentdeck-token$/m,
       ".agentdeck-token at the repo root is where an agent's own `ls -la` meets it",
     );
+  });
+
+  void test("neither .gitignore nor loadToken claims a container protects the placement", async () => {
+    // The .gitignore comment is the only tracked file that tells a reader where the token goes,
+    // and loadToken's docstring is the only one a reader of the code meets. Both used to say the
+    // path was outside every bind mount, in a container that no longer exists - a protection a
+    // reader would credit, and so never make the choice plan 005 says is open.
+    for (const [path, text] of [
+      [".gitignore", await readDoc(".gitignore")],
+      ["src/server.ts", (await readDoc("src/server.ts")).slice(0, 3000)],
+    ] as const) {
+      assert.doesNotMatch(text, /bind mount/i, `${path} still credits a bind mount`);
+      assert.doesNotMatch(text, /container-local volume/i, `${path} still credits a volume`);
+    }
+    const ignored = await readDoc(".gitignore");
+    assert.match(ignored, /AGENTDECK_TOKEN_FILE/);
+    assert.match(ignored, /undecided|open in plan 005/i, ".gitignore must say the home is open");
+    assert.match(ignored, /root of a tree a session is\s*#?\s*pointed at/);
+  });
+
+  void test("an unwritable token path is a sentence naming AGENTDECK_TOKEN_FILE", async () => {
+    // The default path is /var/lib/agentdeck/token, which no ordinary user on a Mac can create,
+    // so this is the first thing `pnpm start` hits. An unhandled EACCES names no variable and the
+    // token then lands wherever happened to be writable - including the one place it must not be.
+    const { loadToken } = await import("./server.ts");
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-token-"));
+    try {
+      chmodSync(dir, 0o500);
+      assert.throws(
+        () => loadToken(join(dir, "nested", "token")),
+        (error: Error) => {
+          assert.match(error.message, /AGENTDECK_TOKEN_FILE/);
+          assert.match(error.message, /session is pointed at/);
+          return true;
+        },
+      );
+    } finally {
+      chmodSync(dir, 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   void test("plan 005 lists the token in the blast radius with the same-uid caveat", async () => {

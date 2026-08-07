@@ -53,6 +53,11 @@ Mark an item `[x]` when its branch is merged.
       sessions created beforehand are still alive with the same ids afterwards and reattach when
       the server is started again — with the plain statement, in the test and in plan 003, that
       nothing restarted it.
+      **Known gap, unsolved:** the sessions survive but their metadata does not. `cwd`, `agent`
+      and the per-session hook secret live only in the registry's memory, so a session that
+      outlives the server comes back named by its raw id, vanishes from `GET /api/cwds` and from
+      the two-agents-in-one-tree warning, and has every hook POST rejected as unsigned — it never
+      reports `waiting` again. True of a crash and of any deliberate restart (plan 006).
 
 - [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux 3.7b is
       the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
@@ -104,6 +109,9 @@ Driven from `curl` only. No client.
       alphabet `Sec-WebSocket-Protocol` accepts. Bearer middleware plus `Origin` check.
       **Done when:** 100 generated tokens contain no `/`, `=` or whitespace; a request with no
       token gets 401; and a wrong `Origin` is rejected.
+      **Caveat:** the `Origin` check is present but off until `AGENTDECK_ORIGIN` is set — unset,
+      every `/api` request and every `/ws` upgrade is accepted from any origin, and the server
+      warns at boot.
 
 - [x] **`m1/session-routes`** — `POST`/`DELETE /api/sessions`, taking a profile id and never a
       command line, with the `warning` field.

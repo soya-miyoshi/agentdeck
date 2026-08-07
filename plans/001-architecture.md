@@ -211,7 +211,10 @@ connect at all, which stops being true the moment `tailscale serve` is running.
   hex. Worth writing down because the obvious `randomBytes(32).toString("base64")` is wrong about
   one time in four and right the rest of the time.
 - Reject any request whose `Origin` is not the expected `ts.net` host, so a page the phone
-  visits cannot drive the socket.
+  visits cannot drive the socket. **Present but off until configured:** the expected host comes
+  from `AGENTDECK_ORIGIN`, and with it unset both `/api` and `/ws` accept any `Origin`. That is
+  the state of an ordinary `pnpm start`, so the server says so at boot rather than letting a
+  ticked box stand in for a check that is not running.
 - Never `tailscale funnel`. That publishes to the internet, and nothing in this design is built
   to survive that.
 
