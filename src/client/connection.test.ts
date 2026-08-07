@@ -7,9 +7,9 @@ import {
   Connection,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_GRACE_INTERVALS,
+  INPUT_WINDOW_MS,
   MAX_INPUT_FRAME_BYTES,
   MAX_INPUT_FRAMES_PER_WINDOW,
-  INPUT_WINDOW_MS,
   type ConnectionEvents,
   type ConnectionStatus,
   type SocketHandlers,
@@ -22,7 +22,7 @@ interface Harness {
   connection: Connection;
   sockets: FakeSocket[];
   last: () => FakeSocket;
-  /** Pending reconnects, newest last. Each is [delayMs, run]. */
+  /** Every timer the connection has outstanding: reconnects, input windows, silence watchdogs. */
   timers: { delayMs: number; run: () => void }[];
   fire: () => void;
   /**
@@ -63,18 +63,12 @@ const harness = (): Harness => {
     // order fired that 30-second watchdog ahead of the 1-second input window sitting behind it -
     // which is not an ordering any clock produces.
     fire: () => {
-      let soonest = 0;
-      for (let i = 1; i < state.timers.length; i++) {
-        if (
-          (state.timers[i] as { delayMs: number }).delayMs <
-          (state.timers[soonest] as { delayMs: number }).delayMs
-        ) {
-          soonest = i;
-        }
-      }
-      const timer = state.timers[soonest];
+      const soonest = Math.min(...state.timers.map((timer) => timer.delayMs));
+      const [timer] = state.timers.splice(
+        state.timers.findIndex((candidate) => candidate.delayMs === soonest),
+        1,
+      );
       assert.ok(timer, "expected a scheduled timer");
-      state.timers.splice(soonest, 1);
       timer.run();
     },
     pendingWindow: () => state.timers.some((timer) => timer.delayMs === INPUT_WINDOW_MS),
@@ -626,10 +620,12 @@ void describe("what is typed while disconnected", () => {
 // that distinction.
 
 /** The pending silence watchdogs, told apart from the input window by their delay. */
-const watchdogs = (h: Harness, intervalMs: number): { delayMs: number; run: () => void }[] =>
-  h.timers.filter((timer) => timer.delayMs === intervalMs * HEARTBEAT_GRACE_INTERVALS);
+const watchdogs = (h: Harness): { delayMs: number; run: () => void }[] =>
+  h.timers.filter(
+    (timer) => timer.delayMs === DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS,
+  );
 
-const opened = (): Harness => {
+const openHarness = (): Harness => {
   const h = harness();
   h.connection.start();
   h.last().handlers.opened();
@@ -648,16 +644,15 @@ void describe("the client-visible heartbeat", () => {
   void test("an open socket is watched from the moment it opens", () => {
     // Not from the first heartbeat: a socket that opens and goes silent immediately - the proxy
     // froze during the handshake - would otherwise be watched by nothing at all.
-    const h = opened();
-    assert.equal(watchdogs(h, DEFAULT_HEARTBEAT_INTERVAL_MS).length, 1);
+    const h = openHarness();
+    assert.equal(watchdogs(h).length, 1);
   });
 
   void test("two intervals of silence drop the socket and run the ladder", () => {
     // The half-open case, in miniature. Nothing closes, nothing errors; this timer is the only
     // thing that can notice, and what it must produce is a reconnect rather than a status change.
-    const h = opened();
-    const watchdog = watchdogs(h, DEFAULT_HEARTBEAT_INTERVAL_MS)[0];
-    assert.ok(watchdog);
+    const h = openHarness();
+    assert.equal(watchdogs(h).length, 1);
     h.fire();
     assert.equal(h.last().closed, true, "the dead socket was left open");
     assert.deepEqual(
@@ -668,7 +663,7 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("the bound is the interval the server stated, not the one compiled in", () => {
-    const h = opened();
+    const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: 4000 });
     assert.deepEqual(
       h.timers.map((timer) => timer.delayMs),
@@ -689,11 +684,11 @@ void describe("the client-visible heartbeat", () => {
     // This connection receives no snapshot, no chunk and no state for the whole test - the agent
     // is simply idle - and every heartbeat must retire the outstanding deadline rather than
     // letting it stand. One watchdog at a time, replaced each beat, never reached.
-    const h = opened();
-    let previous = watchdogs(h, DEFAULT_HEARTBEAT_INTERVAL_MS)[0];
+    const h = openHarness();
+    let previous = watchdogs(h)[0];
     for (let beat = 0; beat < 200; beat++) {
       h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
-      const pending = watchdogs(h, DEFAULT_HEARTBEAT_INTERVAL_MS);
+      const pending = watchdogs(h);
       assert.equal(pending.length, 1, `beat ${String(beat)} left ${String(pending.length)} bounds`);
       assert.notEqual(pending[0], previous, "the heartbeat did not push the deadline out");
       previous = pending[0];
@@ -711,7 +706,7 @@ void describe("the client-visible heartbeat", () => {
   void test("the heartbeat costs the tab nothing to answer", () => {
     // It is answered with nothing at all - the frame having arrived is the whole proof - so an
     // idle tab spends none of a user's typing allowance on staying alive.
-    const h = opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     const before = h.last().sent.length;
     for (let i = 0; i < 100; i++) h.last().deliver({ t: "ping", intervalMs: 15_000 });
@@ -721,7 +716,7 @@ void describe("the client-visible heartbeat", () => {
   void test("heartbeats do not spend the per-window input allowance", () => {
     // The client's budget counts input frames only. Were the heartbeat inside it, an idle tab
     // would arrive at the keyboard with its allowance already gone - the starvation direction.
-    const h = opened();
+    const h = openHarness();
     for (let i = 0; i < 100; i++) h.last().deliver({ t: "ping", intervalMs: 15_000 });
     for (let i = 0; i < MAX_INPUT_FRAMES_PER_WINDOW; i++) h.connection.input("a", "x");
     const released = sentMessages(h.last()).filter((message) => message["t"] === "input");
@@ -736,7 +731,7 @@ void describe("the client-visible heartbeat", () => {
     // A half-open socket does eventually get an RST, minutes after the watchdog gave up on it.
     // Two runs of the ladder for one connection is two sockets racing, and the loser's frames
     // arrive on a connection nothing is reading.
-    const h = opened();
+    const h = openHarness();
     const first = h.last();
     h.fire();
     assert.equal(h.timers.length, 1);
@@ -749,17 +744,17 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("stopping stops the watching, so a closed tab does not resurrect itself", () => {
-    const h = opened();
+    const h = openHarness();
     h.connection.stop();
     assert.deepEqual(h.timers, [], "a stopped connection was still being timed");
   });
 
   void test("a reconnected socket is watched again", () => {
     // The bound is per socket. Re-arming it on open is what keeps the second outage noticeable.
-    const h = opened();
+    const h = openHarness();
     h.fire();
     h.fire();
     h.last().handlers.opened();
-    assert.equal(watchdogs(h, DEFAULT_HEARTBEAT_INTERVAL_MS).length, 1);
+    assert.equal(watchdogs(h).length, 1);
   });
 });

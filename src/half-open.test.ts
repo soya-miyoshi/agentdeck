@@ -8,6 +8,7 @@ import { WebSocket } from "ws";
 import {
   Connection,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
+  type ConnectionStatus,
   type SocketFactory,
 } from "./client/connection.ts";
 import { SessionStream } from "./stream.ts";
@@ -143,10 +144,11 @@ const attach = async (wsPort: number, sessionId: string): Promise<Attached> => {
 interface ClientUnderTest {
   connection: Connection;
   /** Statuses the client reported after it was open. Empty means it still believes it is fine. */
-  statuses: string[];
+  statuses: ConnectionStatus[];
   /** Raw frames this client put on the wire, so an idle tab's cost can be counted. */
   sent: string[];
-  lastStateAt: number;
+  /** When this session's state last changed, which is the clock the heartbeat is measured against. */
+  lastStateAt: () => number;
 }
 
 /**
@@ -181,35 +183,31 @@ const connectClient = async (wsPort: number, sessionId: string): Promise<ClientU
     };
   };
 
-  const client: ClientUnderTest = {
-    connection: undefined as unknown as Connection,
-    statuses: [],
-    sent,
-    lastStateAt: 0,
-  };
+  const statuses: ConnectionStatus[] = [];
   let opened = false;
-  client.connection = new Connection(
-    { token: TOKEN, connect, verifyToken: async () => await Promise.resolve(true) },
+  let lastStateAt = 0;
+  const connection = new Connection(
+    { token: TOKEN, connect, verifyToken: () => Promise.resolve(true) },
     {
       render: () => undefined,
       state: () => {
         // The only status the client ever hears about, and nothing pushes it on a timer - which is
         // exactly why a status that stopped changing cannot be read as a dead socket.
-        client.lastStateAt = Date.now();
+        lastStateAt = Date.now();
       },
       sessions: () => undefined,
       error: () => undefined,
       status: (status) => {
         if (status === "open") opened = true;
-        else if (opened) client.statuses.push(status);
+        else if (opened) statuses.push(status);
       },
       unauthorized: () => undefined,
     },
   );
-  client.connection.start();
+  connection.start();
   assert.ok(await waitFor(() => opened, 2000), `client for ${sessionId} never opened`);
-  client.connection.attach(sessionId, 80, 24);
-  assert.ok(await waitFor(() => client.lastStateAt > 0, 2000), `attach to ${sessionId} failed`);
+  connection.attach(sessionId, 80, 24);
+  assert.ok(await waitFor(() => lastStateAt > 0, 2000), `attach to ${sessionId} failed`);
   // The client's silence bound is the SERVER's interval, carried on the heartbeat itself, and until
   // the first one lands it is still the production-sized default. Freezing the network before then
   // would be timing a bound this suite never scaled.
@@ -217,7 +215,7 @@ const connectClient = async (wsPort: number, sessionId: string): Promise<ClientU
     await waitFor(() => pings > 0, 2000),
     `no heartbeat reached the client for ${sessionId}`,
   );
-  return client;
+  return { connection, statuses, sent, lastStateAt: () => lastStateAt };
 };
 
 /** Errors the server sent this client, read out of the frames the harness already collects. */
@@ -329,8 +327,8 @@ void describe("a half-open connection", () => {
       // idle agent legitimately says nothing for minutes - so a status-staleness threshold low
       // enough to have called the dead socket by now would have called the LIVE one at the same
       // moment. The heartbeat clock beats the status clock without being wrong about a healthy tab.
-      const deadStatusUnchangedMs = Date.now() - dropped.lastStateAt;
-      const quietStatusUnchangedMs = Date.now() - quiet.lastStateAt;
+      const deadStatusUnchangedMs = Date.now() - dropped.lastStateAt();
+      const quietStatusUnchangedMs = Date.now() - quiet.lastStateAt();
       assert.ok(
         clientNoticedMs <= deadStatusUnchangedMs && quietStatusUnchangedMs >= clientNoticedMs,
         `the client noticed at ${String(clientNoticedMs)}ms; the dead tab's status had been unchanged for ` +
