@@ -749,6 +749,100 @@ void describe("the client-visible heartbeat", () => {
     assert.deepEqual(h.timers, [], "a stopped connection was still being timed");
   });
 
+  void test("a socket the bound gave up on can no longer speak for the connection", () => {
+    // `close()` only STARTS the closing handshake, so the browser goes on dispatching frames it had
+    // already buffered for the abandoned socket. Its handlers are wired to this same Connection, and
+    // a snapshot repaints unconditionally by design - so a 30-second-old screen would land on top of
+    // the live one and rewind the tracked position, costing a resync and a second cold snapshot.
+    const h = openHarness();
+    const dead = h.last();
+    h.connection.attach("a", 80, 24);
+    dead.deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 100, data: "OLD" });
+    h.fire();
+    h.fire();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 500, data: "CURRENT" });
+
+    const watched = watchdogs(h)[0];
+    dead.deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 120, data: "STALE" });
+    assert.deepEqual(
+      h.rendered.map((entry) => entry.data),
+      ["OLD", "CURRENT"],
+      "a socket the watchdog abandoned repainted the live pane",
+    );
+    assert.deepEqual(h.connection.positionOf("a"), { epoch: "e1", seq: 500 });
+    assert.equal(
+      watchdogs(h)[0],
+      watched,
+      "the abandoned socket re-armed the deadline belonging to the live one",
+    );
+
+    // And its late `opened` is inert too, rather than reporting the connection open.
+    dead.handlers.opened();
+    assert.deepEqual(h.statuses, ["connecting", "open", "connecting", "open"]);
+  });
+
+  void test("a socket that never opens is watched too", async () => {
+    // The network freezing between the TCP connect and the 101: no close, no error the client sees,
+    // no open. Armed only on open, nothing times this at all, and `poke()` returns while a socket
+    // exists - so the tab sits at "connecting" until the browser's own handshake timeout, which
+    // Chrome and Safari leave to the TCP stack.
+    const h = harness();
+    h.connection.start();
+    assert.equal(watchdogs(h).length, 1, "an un-opened socket was watched by nothing");
+    h.fire();
+    assert.equal(h.last().closed, true, "the stuck socket was left open");
+    // The token probe runs first, because a socket that never opened may be a rejected token.
+    await settle();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the stuck socket was dropped without running the ladder",
+    );
+  });
+
+  void test("sockets that open and then say nothing back off and become visible", async () => {
+    // A path that completes the handshake and then forwards nothing server->client. Resetting the
+    // ladder on the handshake alone makes this a permanent 250 ms loop - re-attaching every tab,
+    // a cold capture-pane each - that the user is never shown, because the reconnecting banner
+    // waits for a second failed attempt.
+    const h = harness();
+    h.connection.start();
+    const delays: number[] = [];
+    for (let cycle = 0; cycle < 5; cycle++) {
+      h.last().handlers.opened();
+      h.fire(); // the silence bound
+      await settle();
+      const [retry] = h.timers;
+      assert.ok(retry, "the ladder stopped");
+      delays.push(retry.delayMs);
+      h.fire(); // the reconnect
+    }
+    assert.deepEqual(
+      delays,
+      [250, 500, 1000, 2000, 4000],
+      "an opened-but-silent socket never backed off",
+    );
+    assert.ok(h.statuses.includes("reconnecting"), "the loop was invisible to the user");
+  });
+
+  void test("a socket that carries a frame resets the ladder", () => {
+    // The other half of the rule: evidence of traffic, not merely a handshake, starts the ladder
+    // from the bottom again - so an ordinary outage still reconnects fast.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.fire();
+    h.fire();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+    );
+  });
+
   void test("a reconnected socket is watched again", () => {
     // The bound is per socket. Re-arming it on open is what keeps the second outage noticeable.
     const h = openHarness();

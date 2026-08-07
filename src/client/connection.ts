@@ -461,10 +461,18 @@ export class Connection {
       this.#dropSocket = undefined;
       void this.#onClosed();
     };
+    // Evidence that this socket carries traffic, which is not the same as having opened: a path
+    // that completes the handshake and then forwards nothing is exactly what the silence bound
+    // exists to catch, and resetting the ladder on the handshake alone turns that into a 250 ms
+    // reconnect loop that never backs off and never shows the user a status.
+    let carried = false;
     const socket = this.#deps.connect(this.#deps.token, {
       opened: () => {
+        // A finished socket is inert. `close()` only starts the closing handshake, so a socket the
+        // watchdog gave up on can still deliver what the browser had already buffered - onto a
+        // Connection that has moved on to its replacement.
+        if (handled) return;
         this.#opened = true;
-        this.#policy.opened();
         this.#setStatus("open");
         this.#noteTraffic();
         // Re-attach every tab with where it got to. The server answers with chunks if the epoch
@@ -475,6 +483,11 @@ export class Connection {
         this.#flushInput();
       },
       message: (raw) => {
+        if (handled) return;
+        if (!carried) {
+          carried = true;
+          this.#policy.opened();
+        }
         this.#noteTraffic();
         this.#receive(raw);
       },
@@ -485,6 +498,11 @@ export class Connection {
       socket.close();
       finish();
     };
+    // Armed here rather than in `opened`, because a socket stuck in CONNECTING - the network
+    // freezing between the TCP connect and the 101 - produces no close, no error and no open, so
+    // nothing else would ever notice it. `poke()` cannot help either: it returns while a socket
+    // exists.
+    this.#noteTraffic();
   }
 
   /** A new socket starts a new budget, and nothing queued for the old one is still wanted. */
