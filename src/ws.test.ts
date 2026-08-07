@@ -6,7 +6,7 @@ import { after, before, describe, test } from "node:test";
 import { WebSocket } from "ws";
 
 import { SessionStream } from "./stream.ts";
-import { attachWebSocketServer } from "./ws.ts";
+import { attachWebSocketServer, type WsDeps } from "./ws.ts";
 
 const TOKEN = "ws-test-token";
 const ORIGIN = "https://mac.example.ts.net";
@@ -273,63 +273,68 @@ void describe("refusals", () => {
 
 // ---------------------------------------------------------------------------------------------
 
+// The three tests below are about the cold snapshot as it lands on the wire, and each one needs a
+// server of its own because what it varies is a dep the shared fixture fixes for every other test
+// in this file. One helper for all three: they differ only in which of the three snapshot sources
+// they replace, and a second copy of the listen/open/collect dance is where the two halves drift.
+type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "repaint">;
+
+const ownServer = async (overrides: Partial<SnapshotDeps>) => {
+  const own = createServer();
+  const ownStream = new SessionStream({ sessionId: "s1" });
+  const close = attachWebSocketServer(own, {
+    token: TOKEN,
+    origin: ORIGIN,
+    streamFor: (id) => (id === "s1" ? ownStream : undefined),
+    captureHistory: async () => await Promise.resolve("what vim currently looks like\n"),
+    isAlternateScreen: async () => await Promise.resolve(false),
+    repaint: async () => await Promise.resolve({ data: "", seq: ownStream.buffer.headSeq }),
+    sendInput: () => undefined,
+    applyPaneSize: () => undefined,
+    ...overrides,
+  }).close;
+  await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+  const ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
+  const socket = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
+  const frames: Frame[] = [];
+  socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return {
+    socket,
+    frames,
+    stream: ownStream,
+    attach: () => socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 })),
+    stop: () => {
+      socket.close();
+      close();
+      own.close();
+    },
+  };
+};
+
 // The frame the client actually receives, for the two shapes of a cold snapshot that a test over
 // `buildSnapshot` alone cannot see: `history` has to be ABSENT from the JSON rather than present
 // and empty, and a repaint that fails has to cost one message rather than the process.
 void describe("the snapshot frame on the wire", () => {
-  const build = async (deps: {
-    isAlternateScreen: () => Promise<boolean>;
-    repaint: () => Promise<{ data: string; seq: number }>;
-  }) => {
-    const own = createServer();
-    const ownStream = new SessionStream({ sessionId: "s1" });
-    const close = attachWebSocketServer(own, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? ownStream : undefined),
-      captureHistory: async () => await Promise.resolve("what vim currently looks like\n"),
-      isAlternateScreen: deps.isAlternateScreen,
-      repaint: deps.repaint,
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
-    const ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
-    const socket = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
-    const frames: Frame[] = [];
-    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", resolve);
-      socket.once("error", reject);
-    });
-    return {
-      socket,
-      frames,
-      stream: ownStream,
-      stop: () => {
-        socket.close();
-        close();
-        own.close();
-      },
-    };
-  };
-
   void test("in alternate-screen mode the frame carries no history key at all", async () => {
     // `"history" in frame` rather than a value comparison, because an empty string here is a
     // blank line the client writes above the live screen - and what capture-pane returns on the
     // alternate screen is worse than blank, it is the TUI's own frame.
-    const test1 = await build({
+    const tui = await ownServer({
       isAlternateScreen: async () => await Promise.resolve(true),
       repaint: async () => await Promise.resolve({ data: "vim, repainted", seq: 7 }),
     });
-    test1.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    tui.attach();
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    const snapshot = test1.frames.find((frame) => frame["t"] === "snapshot");
+    const snapshot = tui.frames.find((frame) => frame["t"] === "snapshot");
     assert.ok(snapshot, "no snapshot was sent");
     assert.equal("history" in snapshot, false, "the TUI's frame was sent as scrollback");
     assert.equal(snapshot["data"], "vim, repainted");
-    test1.stop();
+    tui.stop();
   });
 
   void test("a failing repaint costs one message, not the process", async () => {
@@ -337,19 +342,18 @@ void describe("the snapshot frame on the wire", () => {
     // makes: `Tmux.repaint` throws when no client is attached to the session, and the ws message
     // handler is a fire-and-forget promise. An unhandled rejection exits Node, on a process
     // nothing restarts.
-    const test2 = await build({
-      isAlternateScreen: async () => await Promise.resolve(false),
+    const failing = await ownServer({
       repaint: async () => {
         await Promise.resolve();
         throw new Error("no tmux client is attached to s1, so it cannot repaint");
       },
     });
-    test2.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    failing.attach();
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    assert.equal(test2.frames.at(-1)?.["t"], "error", "the client was never told");
-    assert.equal(test2.socket.readyState, test2.socket.OPEN, "the socket did not survive it");
-    test2.stop();
+    assert.equal(failing.frames.at(-1)?.["t"], "error", "the client was never told");
+    assert.equal(failing.socket.readyState, failing.socket.OPEN, "the socket did not survive it");
+    failing.stop();
   });
 });
 
@@ -360,50 +364,27 @@ void describe("the snapshot frame on the wire", () => {
 // way to trigger it: 2000 lines of `capture-pane -e` is agent-sized output, and a session that
 // wants to can produce it deliberately. One phone's message must not cost every phone its socket.
 void describe("a failing capture costs one message, not the process", () => {
-  let failServer: ReturnType<typeof createServer>;
-  let failClose: () => void;
-  let failUrl: string;
-  const failStream = new SessionStream({ sessionId: "s1" });
-
-  before(async () => {
-    failServer = createServer();
-    failClose = attachWebSocketServer(failServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? failStream : undefined),
+  void test("the client is told, the socket lives, and the process does not exit", async () => {
+    const failing = await ownServer({
       captureHistory: async () => {
         await Promise.resolve();
         throw new Error("stdout maxBuffer length exceeded");
       },
-      isAlternateScreen: async () => await Promise.resolve(false),
-      repaint: async () => await Promise.resolve({ data: "", seq: failStream.buffer.headSeq }),
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => failServer.listen(0, "127.0.0.1", done));
-    failUrl = `ws://127.0.0.1:${String((failServer.address() as AddressInfo).port)}`;
-  });
-
-  after(() => {
-    failClose();
-    failServer.close();
-  });
-
-  void test("the client is told, the socket lives, and the process does not exit", async () => {
-    const socket = new WebSocket(failUrl, TOKEN, { origin: ORIGIN });
-    const frames: Frame[] = [];
-    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", resolve);
-      socket.once("error", reject);
     });
-
-    socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    failing.attach();
     // Long enough that an unhandled rejection would have taken the runner down by now.
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    assert.equal(frames.at(-1)?.["t"], "error", "the client was never told the capture failed");
-    assert.equal(socket.readyState, socket.OPEN, "the socket did not survive the failure");
-    socket.close();
+    assert.equal(
+      failing.frames.at(-1)?.["t"],
+      "error",
+      "the client was never told the capture failed",
+    );
+    assert.equal(
+      failing.socket.readyState,
+      failing.socket.OPEN,
+      "the socket did not survive the failure",
+    );
+    failing.stop();
   });
 });

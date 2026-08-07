@@ -284,24 +284,36 @@ void describe("routing to the right session", () => {
 });
 
 void describe("the repaint is read back off the stream, not out of the buffer", () => {
+  // A repaint has to reach the stream of a session that already exists, and the fake tmux needs
+  // the callback before there is a stream to write to - so the pane is a box the callback reads
+  // through, filled once the hub has attached. Held here rather than repeated in each test: it is
+  // scaffolding, not the thing any of them is about.
+  const attached = async (
+    onRefresh: (pane: SessionStream) => void,
+  ): Promise<{ hub: Hub; id: string; stream: SessionStream }> => {
+    const pane: { stream?: SessionStream } = {};
+    const { hub, registry } = build(() => {
+      if (pane.stream !== undefined) onRefresh(pane.stream);
+    });
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    const stream = hub.streamFor(session.id);
+    assert.ok(stream, "the hub never attached to the session");
+    pane.stream = stream;
+    return { hub, id: session.id, stream };
+  };
+
   void test("returns the bytes tmux repainted and the seq they end at", async () => {
     // The defect this replaces: `data` used to be the ring buffer's contents, so a session that
     // had been sitting at a prompt since before the attach painted whatever output happened to be
     // recent - a fragment of an old build log, or nothing at all - rather than the live screen.
-    const pane: { stream: SessionStream | undefined } = { stream: undefined };
-    const { hub, registry } = build(() => {
-      pane.stream?.write(Buffer.from("[H[2Jprompt$ ", "utf8"));
+    const { hub, id, stream } = await attached((pane) => {
+      pane.write(Buffer.from("[H[2Jprompt$ ", "utf8"));
     });
-    const { session } = await registry.create("/workspace/a", "claude");
-    await hub.sync();
-
-    const stream = hub.streamFor(session.id);
-    assert.ok(stream);
-    pane.stream = stream;
     stream.write(Buffer.from("an hour-old build log", "utf8"));
     const before = stream.buffer.headSeq;
 
-    const live = await hub.repaint(session.id);
+    const live = await hub.repaint(id);
     assert.equal(live.data, "[H[2Jprompt$ ");
     assert.equal(live.seq, stream.buffer.headSeq);
     assert.equal(live.seq, before + Buffer.byteLength(live.data, "utf8"));
@@ -310,34 +322,26 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
   void test("output the agent produces during the window is carried, not dropped", async () => {
     // Those bytes are in the stream too, so the seq has to be the count after all of them. A seq
     // that stopped at the repaint would tell the client to discard chunks it has not seen.
-    const pane: { stream: SessionStream | undefined } = { stream: undefined };
-    const { hub, registry } = build(() => {
-      pane.stream?.write(Buffer.from("repaint", "utf8"));
-      setTimeout(() => pane.stream?.write(Buffer.from("+agent output", "utf8")), 2);
+    const { hub, id, stream } = await attached((pane) => {
+      pane.write(Buffer.from("repaint", "utf8"));
+      setTimeout(() => pane.write(Buffer.from("+agent output", "utf8")), 2);
     });
-    const { session } = await registry.create("/workspace/a", "claude");
-    await hub.sync();
-    pane.stream = hub.streamFor(session.id);
 
-    const live = await hub.repaint(session.id);
+    const live = await hub.repaint(id);
     assert.equal(live.data, "repaint+agent output");
-    assert.equal(live.seq, pane.stream?.buffer.headSeq);
+    assert.equal(live.seq, stream.buffer.headSeq);
   });
 
   void test("a pane that never stops drawing is capped rather than waited on forever", async () => {
     // An agent with a spinner produces output on a timer. Waiting for it to go quiet is waiting
     // for it to finish thinking, which is the one thing the phone attached to watch.
-    const pane: { stream: SessionStream | undefined } = { stream: undefined };
     let ticker: NodeJS.Timeout | undefined;
-    const { hub, registry } = build(() => {
-      ticker = setInterval(() => pane.stream?.write(Buffer.from(".", "utf8")), 2);
+    const { hub, id } = await attached((pane) => {
+      ticker = setInterval(() => pane.write(Buffer.from(".", "utf8")), 2);
     });
-    const { session } = await registry.create("/workspace/a", "claude");
-    await hub.sync();
-    pane.stream = hub.streamFor(session.id);
 
     const started = Date.now();
-    const live = await hub.repaint(session.id);
+    const live = await hub.repaint(id);
     if (ticker !== undefined) clearInterval(ticker);
     assert.ok(Date.now() - started < 1000, "the cap did not hold");
     assert.ok(live.data.length > 0);
