@@ -66,6 +66,13 @@ let port = 0;
 let token = "";
 let child: ChildProcess | undefined;
 
+// The session created before the crash, and the two facts about it that outlive the server: the
+// pane pid tmux still holds, and the secret its own pane wrote out. Every test below the first
+// one is about this session, so they are file-scoped rather than passed around.
+let id = "";
+let paneLine = "";
+let secret = "";
+
 const freePort = async (): Promise<number> =>
   await new Promise((resolve) => {
     const probe = createServer();
@@ -143,6 +150,50 @@ const api = async (path: string, init: RequestInit = {}): Promise<Response> =>
     headers: { authorization: `Bearer ${token}`, ...init.headers },
   });
 
+/** The ids `GET /api/sessions` admits to, which is the thing a survivor drops out of. */
+const listedIds = async (): Promise<string[]> => {
+  const body = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
+  return body.sessions.map((session) => session.id);
+};
+
+/** The ids `GET /api/cwds` reports for one directory, `undefined` if it names no such directory. */
+const sessionsIn = async (path: string): Promise<string[] | undefined> => {
+  const body = (await (await api("/api/cwds")).json()) as {
+    cwds: { path: string; sessions: string[] }[];
+  };
+  return body.cwds.find((cwd) => cwd.path === path)?.sessions;
+};
+
+const createSession = async (
+  agent: string,
+): Promise<{ session: { id: string }; warning?: string }> => {
+  const created = await api("/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cwd: work, agent }),
+  });
+  assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
+  return (await created.json()) as { session: { id: string }; warning?: string };
+};
+
+/**
+ * A hook POST as the surviving agent makes it: its own id, and the secret its pane was given.
+ *
+ * Unauthenticated on purpose - the bearer token is not what this route checks. The secret in the
+ * header is the whole assertion, so it is never routed through `api`.
+ */
+const hookPost = async (): Promise<number> => {
+  const response = await fetch(
+    `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
+      body: JSON.stringify({ hook_event_name: "Notification" }),
+    },
+  );
+  return response.status;
+};
+
 /** `<session id> <pane pid>` for everything on our socket, so survival is pid-level, not name-level. */
 const panes = (): string[] =>
   execFileSync("tmux", ["-L", socket, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], {
@@ -167,36 +218,17 @@ after(() => {
 });
 
 void describe("the node process is killed and nothing brings it back", () => {
-  let id = "";
-  let paneLine = "";
-  let secret = "";
-
   void test("a session created beforehand is listed, in /api/cwds, and its hooks are accepted", async () => {
     const first = await start();
     token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
 
-    const created = await api("/api/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: work, agent: "shell" }),
-    });
-    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
-    const body = (await created.json()) as { session: { id: string } };
-    id = body.session.id;
+    id = (await createSession("shell")).session.id;
 
     paneLine = panes().find((line) => line.startsWith(`${id} `)) ?? "";
     assert.notEqual(paneLine, "", "tmux has no pane for the session it just created");
 
-    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
-    assert.deepEqual(
-      listed.sessions.map((s) => s.id),
-      [id],
-    );
-
-    const cwds = (await (await api("/api/cwds")).json()) as {
-      cwds: { path: string; sessions: string[] }[];
-    };
-    assert.deepEqual(cwds.cwds.find((c) => c.path === work)?.sessions, [id]);
+    assert.deepEqual(await listedIds(), [id]);
+    assert.deepEqual(await sessionsIn(work), [id]);
 
     // The pane wrote its own AGENTDECK_SECRET out; give it the moment that takes.
     for (let i = 0; i < 100 && secret === ""; i++) {
@@ -208,15 +240,11 @@ void describe("the node process is killed and nothing brings it back", () => {
     }
     assert.match(secret, /^[A-Za-z0-9_-]{20,}$/, "the pane never saw a secret");
 
-    const hook = await fetch(
-      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
-        body: JSON.stringify({ hook_event_name: "Notification" }),
-      },
+    assert.equal(
+      await hookPost(),
+      200,
+      "the hook route rejected the secret its own session was given",
     );
-    assert.equal(hook.status, 200, "the hook route rejected the secret its own session was given");
 
     // SIGKILL, which is the crash: no shutdown handler runs, nothing is detached, nothing is
     // saved. NOTHING RESTARTS IT. What follows is the unattended Mac.
@@ -244,14 +272,9 @@ void describe("the node process is killed and nothing brings it back", () => {
     // allowlist and `#meta`, and `#meta` is memory only, so a session that outlived the process
     // that created it drops out of every route. The work is running and the server cannot see it.
     await start();
-    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
-    assert.deepEqual(listed.sessions, [], "the surviving session was listed after a restart");
-
-    const cwds = (await (await api("/api/cwds")).json()) as {
-      cwds: { path: string; sessions: string[] }[];
-    };
+    assert.deepEqual(await listedIds(), [], "the surviving session was listed after a restart");
     assert.deepEqual(
-      cwds.cwds.find((c) => c.path === work)?.sessions,
+      await sessionsIn(work),
       [],
       "GET /api/cwds still reports the session it can no longer see",
     );
@@ -261,15 +284,7 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("the surviving agent's hooks are rejected as unsigned, so it never reports waiting", async () => {
-    const hook = await fetch(
-      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
-        body: JSON.stringify({ hook_event_name: "Notification" }),
-      },
-    );
-    assert.equal(hook.status, 401, "a secret the new process never generated was accepted");
+    assert.equal(await hookPost(), 401, "a secret the new process never generated was accepted");
   });
 
   void test("a second agent in the same tree gets NO warning, because the survivor is invisible", async () => {
@@ -279,21 +294,12 @@ void describe("the node process is killed and nothing brings it back", () => {
     // understands." After it, `Registry.create` reads its neighbours from `list()`, the survivor
     // is not in `list()`, and the phone is told nothing at all - while the first agent is still
     // running in that directory and still editing those files.
-    const created = await api("/api/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: work, agent: "neighbour" }),
-    });
-    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
-    const body = (await created.json()) as { session: { id: string }; warning?: string };
+    const body = await createSession("neighbour");
     assert.equal(body.warning, undefined, "the survivor was named in a warning it cannot be in");
     assert.ok(panes().includes(paneLine), "the second agent disturbed the surviving session");
 
     // And `GET /api/cwds` reports the directory as holding one session when it holds two.
-    const cwds = (await (await api("/api/cwds")).json()) as {
-      cwds: { path: string; sessions: string[] }[];
-    };
-    assert.deepEqual(cwds.cwds.find((c) => c.path === work)?.sessions, [body.session.id]);
+    assert.deepEqual(await sessionsIn(work), [body.session.id]);
 
     // Cleared away so the assertions below are about the survivor alone. This one the server does
     // own - it has `#meta` for it - so DELETE reaches it, which is itself the contrast.
@@ -308,20 +314,13 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("recreating reattaches to the same process - and does not restore the hook path", async () => {
-    const created = await api("/api/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: work, agent: "shell" }),
-    });
-    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
-    const body = (await created.json()) as { session: { id: string }; warning?: string };
+    const body = await createSession("shell");
     assert.equal(body.session.id, id, "the id is not stable across a restart");
     assert.match(body.warning ?? "", /already running/, "this was a new session, not a reattach");
     assert.ok(panes().includes(paneLine), "the reattach replaced the running process");
 
-    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
     assert.deepEqual(
-      listed.sessions.map((s) => s.id),
+      await listedIds(),
       [id],
       "the session is still invisible after being recreated",
     );
@@ -330,15 +329,11 @@ void describe("the node process is killed and nothing brings it back", () => {
     // session and injects no environment, so the process that survived still holds the OLD secret
     // while the registry has minted a NEW one it has no way to deliver. Recreating the session
     // does not bring that tab's `waiting` back; only killing and restarting the agent does.
-    const hook = await fetch(
-      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
-        body: JSON.stringify({ hook_event_name: "Notification" }),
-      },
+    assert.equal(
+      await hookPost(),
+      401,
+      "the surviving process's secret works again after a recreate",
     );
-    assert.equal(hook.status, 401, "the surviving process's secret works again after a recreate");
   });
 });
 
