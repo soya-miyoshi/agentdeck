@@ -51,11 +51,14 @@
 > same name with `-c /`. `DELETE /api/sessions/:id` goes through the same filtered list, so a
 > session that is not listed is not killable either, and every tmux `-t` target is `=<id>` so that
 > a stale or mistyped id misses instead of matching by prefix or fnmatch. **The accepted cost, written here rather than left implicit:** a session started by
-> hand under that socket does not appear as a tab, because agentdeck only knows the directory of
-> the sessions it started; and a session that outlives a server restart stops being listed and
-> streamed for the same reason, one step worse than the metadata loss `CwdAllowlist.refusal`
-> already prices. The agent keeps running either way and is reachable with
-> `tmux -L agentdeck attach -t <id>`; recreating the session makes it a tab again.
+> hand under that socket does not appear as a tab, because agentdeck cannot tell what agent it is
+> running. The agent keeps running and is reachable with `tmux -L agentdeck attach -t <id>`.
+> **Narrowed 2026-08-08 (`m2/session-metadata-survives-restart`):** a session that outlives a
+> server restart IS listed and streamed again — the restarted server adopts it, taking its cwd
+> from `#{session_path}` and its agent from the id, both checked against this same allowlist, so
+> adoption widens what may be listed and not where. What it cannot recover is the per-session hook
+> secret, so an adopted session never reports `waiting` again until its agent is restarted, and it
+> says so on the wire (plan 002).
 >
 > **A session's environment is built, not inherited, decided 2026-08-07 (m0/host-boundary).** The
 > tmux server used to be a child of whichever shell ran `pnpm start`, and every pane inherited

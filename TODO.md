@@ -257,30 +257,24 @@ Driven from `curl` only. No client.
       origin with every Vite project on the machine, and the flow failed silently and forever
       against a server with `AGENTDECK_ORIGIN` set.
 
-- [ ] **`m2/session-metadata-survives-restart`** — **blocks `m2/reconnect`.** A session's `cwd`,
-      `agent` and per-session hook secret live only in `Registry`'s memory (`#meta`), and
-      `Registry.list()` is gated on `#meta` as well as on the cwd allowlist. So a tmux session that
-      outlives the server is **not listed at all** afterwards: `GET /api/sessions` returns `[]`, a
-      client's re-attach is answered `no session <id>`, and the tab stays blank until something
-      recreates the session. **Verified by hand on 2026-08-08:** created a session, `kill -9` on the
-      server, tmux still held it with the same id and `dead=0`, and the restarted server listed
-      nothing. `m0/supervisor-crash-test` measured this and named it a known gap; nothing owns
-      fixing it, and `m2/reconnect`'s second done-when half — "the server is restarted under an open
-      client and the tab repaints rather than going permanently blank" — cannot be met until
-      something does.
-      Deliberately not decided here, because it is the whole design question: where that metadata
-      lives. The repo has **no database and does not want one** (README, plan 001), and the hook
-      secret must not be readable by an agent — which is what `m0/host-boundary` established and
-      what rules out simply writing it into the tmux session environment, since
-      `show-environment` prints that to any same-uid process. Recovering `cwd` and `agent` from
-      tmux alone is possible (`#{session_path}`, and the id encodes the agent) and would restore
-      the tab; the secret cannot be recovered and a re-minted one does not reach the running agent,
-      so `waiting` detection stays broken until that agent restarts. Whether that partial recovery
-      is the answer is a person's call.
-      **Done when:** a real server is killed and restarted under a live session and
-      `GET /api/sessions` lists it with the right `cwd` and `agent`; a client attached beforehand
-      repaints rather than going blank; and whatever happens to the hook secret is stated plainly in
-      plan 002 and demonstrated, including the case where it cannot be restored.
+- [x] **`m2/session-metadata-survives-restart`** — **done 2026-08-08.** A restarted server now
+      **adopts** the sessions tmux still holds: `#{session_path}` is the `cwd`, and the id is
+      `sessionId(cwd, agent)`, so the agent is whichever configured profile reproduces the id from
+      that path. Nothing is written down - no database, no sidecar file - and the adoption goes
+      through the same cwd allowlist, matched on the path TMUX reports, so it widens what may be
+      listed and not where. `GET /api/sessions` lists the survivor with the right `cwd` and
+      `agent`, `GET /api/cwds` counts it, the hub attaches and streams it, and a client's
+      re-attach is answered with a snapshot rather than `no session <id>`.
+      **The hook secret is not recovered and cannot be**, and the code refuses to mint a
+      replacement it could never deliver (`new-session -A` injects no environment into a live
+      session). So an adopted session reports working, idle and exited but **never `waiting`
+      again until its own agent is restarted**, and it says so on the wire as
+      `waitingDetectionLost` (plan 002) rather than going quietly deaf. Showing that in the strip
+      is `m3/tab-strip`'s job, and this item deliberately did not build it.
+      Demonstrated against a real server process and real tmux in `src/supervisor-crash.test.ts`,
+      including that a session created on the socket outside the allowlist is still not adopted,
+      not listed and not killed. Plans 002, 003 and 005, the README and `CwdAllowlist.refusal`
+      were all claiming the old behaviour and now state this one.
 
 - [ ] **`m2/reconnect`** (BLOCKED on `m2/session-metadata-survives-restart`, and the branch
       `m2/reconnect` is left unmerged rather than ticked against the half it can do. The socket-drop

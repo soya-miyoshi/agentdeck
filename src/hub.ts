@@ -75,10 +75,13 @@ export class Hub {
    * agentdeck started it - a same-uid process owns the socket either way.
    *
    * The cost, accepted deliberately and written into plan 005 rather than left implicit: a
-   * session started by hand in tmux does not appear as a tab. Neither does one this server
-   * created before a restart, because the cwd it is matched on lives in the registry's memory and
-   * a restart takes it - the same loss `CwdAllowlist.refusal` already warns a restart costs, one
-   * step further. Recreating the session recovers it.
+   * session started by hand in tmux does not appear as a tab.
+   *
+   * A session this server created BEFORE a restart does appear again, because `Registry.list`
+   * adopts it from tmux (see `Registry.#adopt`) - allowlist-checked against `#{session_path}` like
+   * everything else here, so this is the same boundary and not a way around it. Such a session is
+   * streamed and typed into as normal; what it has lost is its hook secret, so it can never report
+   * `waiting` again until its agent is restarted, and it carries `waitingDetectionLost` to say so.
    */
   async sync(): Promise<void> {
     const live = await this.#registry.list();

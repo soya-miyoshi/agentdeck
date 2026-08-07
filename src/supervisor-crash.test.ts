@@ -9,13 +9,15 @@
 //
 // What it pins down, because "the sessions survive" is only half the story:
 //   - the tmux sessions survive with the same ids and the same pane pids, so the work is intact
-//   - the registry's metadata does not survive, and `Registry.list()` is gated on it, so a
-//     surviving session is not listed AT ALL rather than listed under its raw id
-//   - therefore GET /api/sessions is empty and GET /api/cwds reports no sessions in the directory
-//   - the per-session hook secret does not survive either, so the surviving agent's hook POSTs
-//     are 401 - and recreating the session does NOT fix that, because `new-session -A` attaches
-//     to the live session and never re-injects an environment, so the running process keeps a
-//     secret the new registry has never heard of
+//   - the registry's metadata does not survive the process, but the half of it tmux still holds
+//     does: the restarted server ADOPTS the survivor (m2/session-metadata-survives-restart), so
+//     GET /api/sessions lists it with the right cwd and agent and GET /api/cwds counts it
+//   - adoption is bounded by the cwd allowlist, matched on `#{session_path}`: a session created
+//     on the same socket outside the allowlist is NOT adopted, however it is named
+//   - the per-session hook secret does not survive and cannot be recovered, so the surviving
+//     agent's hook POSTs are 401 - and recreating the session does NOT fix that, because
+//     `new-session -A` attaches to the live session and never re-injects an environment. The
+//     adopted session says so, as `waitingDetectionLost`, instead of going quietly deaf
 //
 // The server is spawned as a process rather than driven in-process, for the same reason
 // src/host-boundary.test.ts does it: SIGKILL of a real pid is the event being tested.
@@ -30,6 +32,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { sessionId } from "./session-id.ts";
 
 const serverPath = fileURLToPath(new URL("server.ts", import.meta.url));
 const socket = `agentdeck-crash-${String(process.pid)}`;
@@ -149,11 +153,22 @@ const api = async (path: string, init: RequestInit = {}): Promise<Response> =>
     headers: { authorization: `Bearer ${token}`, ...init.headers },
   });
 
-/** The ids `GET /api/sessions` admits to, which is the thing a survivor drops out of. */
-const listedIds = async (): Promise<string[]> => {
-  const body = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
-  return body.sessions.map((session) => session.id);
+interface ListedSession {
+  id: string;
+  cwd: string;
+  agent: string;
+  state: string;
+  waitingDetectionLost?: true;
+}
+
+const listedSessions = async (): Promise<ListedSession[]> => {
+  const body = (await (await api("/api/sessions")).json()) as { sessions: ListedSession[] };
+  return body.sessions;
 };
+
+/** The ids `GET /api/sessions` admits to, which is what a survivor used to drop out of. */
+const listedIds = async (): Promise<string[]> =>
+  (await listedSessions()).map((session) => session.id);
 
 /** The ids `GET /api/cwds` reports for one directory, `undefined` if it names no such directory. */
 const sessionsIn = async (path: string): Promise<string[] | undefined> => {
@@ -266,39 +281,125 @@ void describe("the node process is killed and nothing brings it back", () => {
     );
   });
 
-  void test("started again by hand, the survivor is not listed at all - the metadata is gone", async () => {
-    // Not "listed under its raw id": m0/host-boundary gated `Registry.list()` on BOTH the cwd
-    // allowlist and `#meta`, and `#meta` is memory only, so a session that outlived the process
-    // that created it drops out of every route. The work is running and the server cannot see it.
+  void test("started again by hand, the survivor is adopted: listed, with the right cwd and agent", async () => {
+    // The fix for m2/session-metadata-survives-restart. `#meta` still dies with the process; what
+    // brings the session back is tmux itself - `#{session_path}` is the cwd and the id is
+    // `sessionId(cwd, agent)`, so the agent is the profile that reproduces the id. No file, no
+    // database, nothing written down.
     await start();
-    assert.deepEqual(await listedIds(), [], "the surviving session was listed after a restart");
-    assert.deepEqual(
-      await sessionsIn(work),
-      [],
-      "GET /api/cwds still reports the session it can no longer see",
+    assert.deepEqual(await listedIds(), [id], "the surviving session was not adopted");
+    assert.deepEqual(await sessionsIn(work), [id], "GET /api/cwds does not count the survivor");
+
+    const [session] = await listedSessions();
+    assert.equal(session?.cwd, work, "the adopted session has the wrong cwd");
+    assert.equal(session?.agent, "shell", "the adopted session has the wrong agent");
+    assert.notEqual(session?.state, "exited", "the survivor is running, not exited");
+
+    // And it is the same process, not a restarted one: adoption attaches, it does not respawn.
+    assert.ok(panes().includes(paneLine), "the restart disturbed the session it adopted");
+  });
+
+  void test("the adopted session says its waiting detection is dead, rather than going quiet", async () => {
+    const [session] = await listedSessions();
+    assert.equal(
+      session?.waitingDetectionLost,
+      true,
+      "an adopted session claims a hook path it does not have",
     );
-
-    // And it is not reaped or killed either - `reap()` goes through the same `list()`. Left alone.
-    assert.ok(panes().includes(paneLine), "the restart disturbed a session it cannot see");
   });
 
-  void test("the surviving agent's hooks are rejected as unsigned, so it never reports waiting", async () => {
-    assert.equal(await hookPost(), 401, "a secret the new process never generated was accepted");
+  void test("a session outside the allowlist is NOT adopted, however it is named", async () => {
+    // The hole m0/host-boundary closed, checked against the new door. `outside` is a real
+    // directory that is not in AGENTDECK_MOUNTS, and the session is created with the exact name
+    // the server would derive for it - `sessionId(outside, "shell")` - so the only thing standing
+    // between it and a tab on the phone is the allowlist check on `#{session_path}`.
+    const outside = temp("agentdeck-crash-outside-");
+    const forged = sessionId(outside, "shell");
+    execFileSync("tmux", [
+      "-L",
+      socket,
+      "new-session",
+      "-d",
+      "-s",
+      forged,
+      "-c",
+      outside,
+      "--",
+      "/bin/sh",
+      "-c",
+      "exec sleep 100000",
+    ]);
+    try {
+      assert.ok(
+        panes().some((line) => line.startsWith(`${forged} `)),
+        "the forged session was not created, so this test proves nothing",
+      );
+      assert.deepEqual(
+        await listedIds(),
+        [id],
+        "a session outside the allowlist was adopted onto the phone",
+      );
+      assert.equal(await sessionsIn(outside), undefined, "the outside directory became a cwd");
+      // Not adopted also means not touched: no kill, no reap.
+      assert.ok(
+        panes().some((line) => line.startsWith(`${forged} `)),
+        "the server killed a session it refuses to list",
+      );
+    } finally {
+      execFileSync("tmux", ["-L", socket, "kill-session", "-t", `=${forged}`], { stdio: "ignore" });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
-  void test("a second agent in the same tree gets NO warning, because the survivor is invisible", async () => {
-    // The named failure mode, and the one that costs a working tree rather than a notification.
-    // Before the crash, starting a second agent in `work` would have been answered with "shell is
-    // already running in <cwd>. Two processes editing one working tree produce conflicts neither
-    // understands." After it, `Registry.create` reads its neighbours from `list()`, the survivor
-    // is not in `list()`, and the phone is told nothing at all - while the first agent is still
+  void test("an attach the client had before the crash is answered with a snapshot, not `no session`", async () => {
+    // The half of m2/reconnect this item unblocks, asserted at the wire rather than the list: the
+    // client comes back with the id it held before the crash and must be given a screen.
+    // The token is a subprotocol, not a query parameter: a URL lands in logs and history (ws.ts).
+    const ws = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`, token);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => {
+          resolve();
+        });
+        ws.addEventListener("error", () => {
+          reject(new Error("the socket refused the token"));
+        });
+      });
+      const answered = new Promise<{ t: string; message?: string }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("nothing answered the attach within 10s"));
+        }, 10_000);
+        timer.unref();
+        ws.addEventListener("message", (event: MessageEvent) => {
+          const frame = JSON.parse(String(event.data)) as { t: string; message?: string };
+          if (frame.t === "ping" || frame.t === "sessions") return;
+          clearTimeout(timer);
+          resolve(frame);
+        });
+      });
+      ws.send(JSON.stringify({ t: "attach", sessionId: id, cols: 80, rows: 24 }));
+      const frame = await answered;
+      assert.equal(frame.t, "snapshot", `the re-attach was answered ${JSON.stringify(frame)}`);
+    } finally {
+      ws.close();
+    }
+  });
+
+  void test("a second agent in the same tree IS warned about the survivor", async () => {
+    // The failure mode that costs a working tree rather than a notification, and the reason the
+    // survivor being merely invisible was not survivable: `Registry.create` reads its neighbours
+    // from `list()`, so before adoption the phone was told nothing while the first agent was still
     // running in that directory and still editing those files.
     const body = await createSession("neighbour");
-    assert.equal(body.warning, undefined, "the survivor was named in a warning it cannot be in");
+    assert.match(
+      body.warning ?? "",
+      /shell is\s+already running/,
+      "the adopted survivor was not named in the two-agents-in-one-tree warning",
+    );
     assert.ok(panes().includes(paneLine), "the second agent disturbed the surviving session");
 
     // And `GET /api/cwds` reports the directory as holding one session when it holds two.
-    assert.deepEqual(await sessionsIn(work), [body.session.id]);
+    assert.deepEqual((await sessionsIn(work))?.slice().sort(), [body.session.id, id].sort());
 
     // Cleared away so the assertions below are about the survivor alone. This one the server does
     // own - it has `#meta` for it - so DELETE reaches it, which is itself the contrast.
@@ -318,11 +419,7 @@ void describe("the node process is killed and nothing brings it back", () => {
     assert.match(body.warning ?? "", /already running/, "this was a new session, not a reattach");
     assert.ok(panes().includes(paneLine), "the reattach replaced the running process");
 
-    assert.deepEqual(
-      await listedIds(),
-      [id],
-      "the session is still invisible after being recreated",
-    );
+    assert.deepEqual(await listedIds(), [id]);
 
     // The unsolved half, sharper than the TODO text has it. `new-session -A` attaches to the live
     // session and injects no environment, so the process that survived still holds the OLD secret
@@ -342,17 +439,30 @@ void describe("plan 003 says so in the plan, not only here", () => {
     const m0 = plan.slice(plan.indexOf("## M0"), plan.indexOf("## M1"));
     assert.match(m0, /Nothing supervises Node/);
     assert.match(m0, /nothing restart(s|ed) the (node |Node )?(server|process)/i);
-    // The metadata half, which is the part a reader would otherwise assume M1's "same session
-    // still running with the same id" covers.
     assert.match(m0, /m0\/supervisor-crash-test/);
-    assert.match(m0, /not listed/i);
+    // The metadata half: what a restart now recovers, and the one thing it cannot.
+    assert.match(m0, /adopts/i, "M0 does not say the survivor is adopted");
+    assert.match(m0, /waitingDetectionLost/, "M0 does not name what the survivor loses");
   });
 
-  void test("M1's done-when no longer claims a restarted server lists the survivor", async () => {
-    // It said "creating a session, restarting the server, and listing again shows the same session
-    // still running with the same id". The test above shows that listing is empty.
+  void test("M1's done-when describes a restart that lists the survivor by itself", async () => {
+    // It used to say a plain list after a restart showed nothing. Adoption changed the behaviour,
+    // so the plan changed with it - and the loss it cannot undo is named in the same sentence.
     const plan = await readFile(new URL("../plans/003-milestones.md", import.meta.url), "utf8");
     const m1 = plan.slice(plan.indexOf("## M1"), plan.indexOf("## M2"));
-    assert.match(m1, /recreat/i, "M1 still describes a restart that lists the session by itself");
+    assert.match(m1, /adopts/i);
+    assert.match(m1, /waitingDetectionLost/);
+  });
+});
+
+void describe("plan 002 states what a restart costs, because the client has to show it", () => {
+  void test("the wire contract carries waitingDetectionLost and says why it exists", async () => {
+    const plan = await readFile(new URL("../plans/002-wire-protocol.md", import.meta.url), "utf8");
+    assert.match(plan, /waitingDetectionLost\?: true/, "the Session shape does not carry the flag");
+    // The consequence, not just the field: the secret is unrecoverable and the agent must restart.
+    assert.match(plan, /The hook secret is not recovered, and cannot be/);
+    assert.match(plan, /never again report\s+`waiting`/);
+    // And that adoption did not widen the boundary m0/host-boundary drew.
+    assert.match(plan, /Adoption is bounded by the same allowlist/);
   });
 });

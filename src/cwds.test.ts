@@ -41,16 +41,15 @@ void describe("the cwd allowlist", () => {
   });
 
   void test("the refusal does not price the restart at a reconnect", () => {
-    // The registry keeps cwd, agent and the per-session hook secret in memory only, and the
-    // allowlist is now matched on that cwd - so a session that survives the restart is not listed
-    // and not streamed at all. A refusal that says the restart costs "a reconnect" is what makes
-    // the losing action sound routine.
+    // The restart no longer costs the session: it is adopted back from tmux. What it does cost is
+    // the per-session hook secret, which is unrecoverable and cannot be handed to a process
+    // already running - so that session never says it needs you again until its agent restarts.
+    // A refusal that says the restart costs "a reconnect" makes the losing action sound routine.
     const message = list.refusal("/workspace/newly-cloned");
     assert.doesNotMatch(message, /costs a reconnect/);
-    assert.match(message, /waiting detection do not survive/);
-    assert.match(message, /stop being listed and stop being streamed/);
-    // And where the agent still is, because it is still running and reachable by hand.
-    assert.match(message, /tmux -L agentdeck attach/);
+    assert.match(message, /hook\s+secret does not survive/);
+    assert.match(message, /waiting detection stays dead/);
+    assert.match(message, /until that agent itself is restarted/);
   });
 
   void test("the README does not price the restart at a reconnect either", async () => {
@@ -58,8 +57,8 @@ void describe("the cwd allowlist", () => {
     // restart sounds routine. Prose is where this regressed once already.
     const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
     assert.doesNotMatch(readme, /costs a\s+reconnect/);
-    assert.match(readme, /waiting detection do not survive/);
-    assert.match(readme, /stops being listed and stops being streamed/);
+    assert.match(readme, /hook secret lives in memory/);
+    assert.match(readme, /never `waiting` again/);
   });
 });
 

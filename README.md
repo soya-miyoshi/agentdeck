@@ -117,11 +117,14 @@ becomes a tab your phone can type into.
 Two consequences worth knowing, both deliberate. A session you start by hand under the agentdeck
 tmux socket does **not** appear as a tab — agentdeck only knows a session's directory for the
 sessions it started. And adding a newly cloned repo means adding it to the allowlist and
-restarting the server: tmux keeps the processes alive across that restart, but their directory,
-agent and waiting detection do not survive it — the registry holds cwd, agent and the per-session
-hook secret in memory only — and since the directory is what the allowlist matches on, a surviving
-session stops being listed and stops being streamed until it is recreated. The agent is still
-there (`tmux -L agentdeck attach -t <id>`). Pick a moment, or recreate the sessions afterwards.
+restarting the server. Sessions running at that moment survive it in most of the ways that matter:
+tmux keeps the processes alive, and the restarted server adopts them back — their directory comes
+from tmux and their agent from the session id, so they are listed, attachable and streamed again,
+allowlist-checked on the directory tmux reports exactly as everything else is. One thing does not
+come back: the per-session hook secret lives in memory and in the agent's own environment, and a
+new one cannot be handed to a process that is already running, so an adopted session reports
+working, idle and exited but never `waiting` again. Restarting that agent — not the server —
+restores it.
 Why git push credentials stay away from the agent is in
 [`plans/005-containment.md`](plans/005-containment.md).
 

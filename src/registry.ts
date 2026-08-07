@@ -22,6 +22,16 @@ export interface Session {
   state: SessionState;
   startedAt: number;
   exitCode?: number;
+  /**
+   * True when this session was ADOPTED from tmux after a restart, so nothing here holds the
+   * secret its agent was started with and its hook POSTs can never be authenticated again.
+   *
+   * The session is otherwise whole - listed, attachable, streamable - but `waiting` is the one
+   * state it cannot reach, because the only mechanism that produces it is the hook route. It is on
+   * the wire (plan 002) rather than kept here so the tab strip can say so; a tab that silently
+   * never reports `waiting` again is a confidently wrong tab. m3/tab-strip owns showing it.
+   */
+  waitingDetectionLost?: true;
 }
 
 export interface CreateResult {
@@ -35,14 +45,24 @@ export class UnknownAgentError extends Error {}
 /** Per-session secret for the hook route. Never the user's token - see plan 002. */
 const newSecret = (): string => randomBytes(24).toString("base64url");
 
+interface SessionMeta {
+  cwd: string;
+  agent: string;
+  /** Absent for an adopted session: see `Registry.#adopt`. Nothing else may leave it unset. */
+  secret?: string;
+}
+
 export class Registry {
   #tmux: Tmux;
   #profiles: ReadonlyMap<string, AgentProfile>;
   #allowlist: CwdAllowlist;
 
-  // The only things the registry keeps in memory, and both are per-process by nature: a session's
-  // cwd and agent cannot be read back out of tmux, and the secret must not be.
-  #meta = new Map<string, { cwd: string; agent: string; secret: string }>();
+  // What the registry keeps in memory. `cwd` and `agent` are recoverable from tmux after a
+  // restart (see `#adopt`); the secret is NOT, and must not be - which is why it is optional here
+  // rather than always present. `secret: undefined` means "this session's hook path is dead", and
+  // it is a state the code carries deliberately instead of papering over with a fresh secret the
+  // running agent could never be told about.
+  #meta = new Map<string, SessionMeta>();
   #states = new Map<string, SessionState>();
 
   constructor(tmux: Tmux, profiles: ReadonlyMap<string, AgentProfile>, allowlist: CwdAllowlist) {
@@ -62,8 +82,9 @@ export class Registry {
 
     // A dead session under our own id, left by a previous run, otherwise makes this a lie.
     // `createOrAttach` sets `remain-on-exit on`, so a session whose agent exited stays on the
-    // socket; `#meta` is memory only, so after a restart `list()` cannot see it and `reap()` at
-    // boot cannot clear it. tmux would then report `attached: true` and the phone would get a 201
+    // socket. `#adopt` now recovers such a corpse after a restart, so `reap()` at boot usually
+    // clears it; this stays because reaping is not run on a timer and a corpse can also be one
+    // this process watched exit. tmux would otherwise report `attached: true` and the phone get a 201
     // saying "a claude session was already running in <cwd>; you are attached to it rather than to
     // a new one" - false, with a tab pinned at `exited` and no agent started. A tab that is
     // confidently wrong is the one output this design refuses, so the corpse goes first.
@@ -82,7 +103,8 @@ export class Registry {
     // the call the new session is itself in the list and would have to be filtered out.
     const neighbours = (await this.list()).filter((s) => s.cwd === cwd && s.id !== id);
 
-    const secret = this.#meta.get(id)?.secret ?? newSecret();
+    const prior = this.#meta.get(id);
+    const minted = prior?.secret ?? newSecret();
     // tmux reports session_created in whole seconds, so the window opens at the last second
     // boundary before the create rather than at this millisecond - otherwise a session created in
     // the same second reads as older than the call that made it and is never cleaned up.
@@ -92,10 +114,20 @@ export class Registry {
       cwd,
       profile.command,
       profile.args,
-      spawnEnv(profile, { AGENTDECK_SESSION_ID: id, AGENTDECK_SECRET: secret }),
+      spawnEnv(profile, { AGENTDECK_SESSION_ID: id, AGENTDECK_SECRET: minted }),
     );
 
-    this.#meta.set(id, { cwd, agent: agentId, secret });
+    // Only a secret the AGENT actually received is recorded. `new-session -A` on an existing
+    // session injects no environment, so on the attach path the running process keeps whatever it
+    // was started with: the one this process minted before (`prior.secret`), or - for a session
+    // adopted after a restart - one nothing here has. Recording the freshly minted secret in that
+    // last case would make `secretMatches` compare against a string no one holds while the session
+    // claimed a working hook path; the hooks are 401 either way, and this way the list says so.
+    const carried = attached ? prior?.secret : minted;
+    this.#meta.set(
+      id,
+      carried === undefined ? { cwd, agent: agentId } : { cwd, agent: agentId, secret: carried },
+    );
     if (!attached) this.#states.set(id, "idle");
 
     // Everything after the create either produces the 201 or undoes the create. Before
@@ -187,10 +219,10 @@ export class Registry {
    * `tmux -L agentdeck new-session -d -c / -- /bin/sh` is otherwise a tab the phone can type into,
    * created by something that asked nobody.
    *
-   * A session whose cwd this process does not know - one started by hand, or one it created
-   * before a restart, since `#meta` is memory only - has no `#meta` entry and is not allowlisted.
-   * It is left alone: not listed, not attached, not reaped. That cost is deliberate and recorded
-   * in plan 005.
+   * A session with no `#meta` entry gets one chance to earn it, in `#adopt` below. A session that
+   * does not - one started by hand under a name that is not `sessionId(its path, a configured
+   * agent)`, or one at a path off the allowlist - is left alone: not listed, not attached, not
+   * reaped. That cost is deliberate and recorded in plan 005.
    *
    * What is enforced, stated exactly, because the previous wording claimed more than the code did:
    * the allowlist is matched against `#{session_path}` - where TMUX says the session is - and the
@@ -206,7 +238,7 @@ export class Registry {
     return live.flatMap((entry) => {
       // Dropping the entry and reading its metadata are one step, so there is no branch left in
       // which a listed session has no cwd, agent or name to report.
-      const meta = this.#meta.get(entry.id);
+      const meta = this.#meta.get(entry.id) ?? this.#adopt(entry.id, entry.path);
       if (meta === undefined) return [];
       if (!this.#allowlist.allows(entry.path) || entry.path !== meta.cwd) return [];
       const session: Session = {
@@ -217,9 +249,57 @@ export class Registry {
         state: entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle"),
         startedAt: entry.startedAt,
       };
+      if (meta.secret === undefined) session.waitingDetectionLost = true;
       if (entry.exitCode !== undefined) session.exitCode = entry.exitCode;
       return [session];
     });
+  }
+
+  /**
+   * Recover the metadata of a session that outlived the process which created it.
+   *
+   * The problem it solves: a `kill -9` takes `#meta` with it while tmux keeps every agent running,
+   * so before this the survivor was invisible - `GET /api/sessions` answered `[]`, a client's
+   * re-attach was answered `no session <id>`, and the tab stayed blank with the work still going
+   * on behind it (m0/supervisor-crash-test measured exactly that).
+   *
+   * Nothing is written down to fix it, and nothing may be: there is no database and no sidecar
+   * file by design (plan 001), and the tmux session environment is readable by any same-uid
+   * process via `show-environment -t` (m0/host-boundary). So the recovery is arithmetic on what
+   * tmux already reports. `#{session_path}` IS the cwd, and the id is `sessionId(cwd, agent)` - a
+   * pure function - so the agent is whichever configured profile reproduces the id from that path.
+   * That is a check, not a parse: a name whose middle segment merely looks like an agent does not
+   * pass it, because the hash would not match.
+   *
+   * TWO THINGS ARE NOT RECOVERED, and both are stated rather than smoothed over:
+   *
+   *   the secret     Not recoverable, and a re-minted one never reaches the agent already
+   *                  running - `new-session -A` injects no environment into a live session. So the
+   *                  survivor's hook POSTs stay unauthenticated and `waiting` detection is dead for
+   *                  that session until its AGENT is restarted, not merely the server. The session
+   *                  says so on the wire as `waitingDetectionLost` (plan 002) instead of quietly
+   *                  reporting working/idle forever.
+   *   provenance     This cannot know that agentdeck started the session; only that a session at an
+   *                  allowlisted path is named as one of ours would be. That is why the allowlist
+   *                  check in `list()` runs on `#{session_path}` for adopted sessions exactly as it
+   *                  does for remembered ones - adoption changes what may be listed, and must not
+   *                  change WHERE. m0/host-boundary closed the hole where `Hub.sync()` attached to
+   *                  anything on the socket; a session at `/` or anywhere else off the allowlist is
+   *                  still not adopted, not attached and not streamed. What a same-uid process can
+   *                  do is create a session INSIDE a directory the operator already pointed this
+   *                  server at, under the derived name, and have it appear as a tab - the same
+   *                  residual the allowlist has always had, since it is a filter on where a session
+   *                  is rather than a claim about who made it (plan 005).
+   */
+  #adopt(id: string, path: string): SessionMeta | undefined {
+    if (path === "" || !this.#allowlist.allows(path)) return undefined;
+    for (const agent of this.#profiles.keys()) {
+      if (sessionId(path, agent) !== id) continue;
+      const meta: SessionMeta = { cwd: path, agent };
+      this.#meta.set(id, meta);
+      return meta;
+    }
+    return undefined;
   }
 
   /**

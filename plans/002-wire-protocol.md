@@ -31,6 +31,8 @@ interface Session {
   state: SessionState;
   startedAt: number;   // unix ms. Not to be confused with the stream `epoch` below
   exitCode?: number;   // present only when state is "exited"
+  waitingDetectionLost?: true; // this session outlived the server and its hook secret did not, so
+                               // it can never report "waiting" again. See below.
 }
 
 type SessionState = "working" | "waiting" | "idle" | "exited";
@@ -155,6 +157,40 @@ matters, because the Linux one being absent reads like the hazard being absent:
 
 So the secret bounds what a *remote* caller can do with a stolen one; it bounds nothing between
 two agents on the same machine, and plan 005 is explicit about why no such boundary exists.
+
+### A session that outlives the server keeps its work and loses its hook path
+
+tmux holds the agents; the node process holds everything it knew about them. So a `kill -9` and a
+restart leave every session running with the same id — and, until 2026-08-08, invisible: the
+registry's memory of each session's `cwd` and `agent` went with the process, `GET /api/sessions`
+answered `[]`, and an `attach` was answered `no session <id>` while the work carried on behind a
+blank tab.
+
+The server now **adopts** those sessions from tmux instead. Nothing is written down to make that
+possible, and nothing may be: there is no database and no sidecar file (plan 001), and the tmux
+session environment is readable by any same-uid process (`show-environment -t`, above). Adoption is
+arithmetic on what tmux already reports — `#{session_path}` is the `cwd`, and the id is
+`sessionId(cwd, agent)`, so the `agent` is whichever configured profile reproduces the id from that
+path. It is a check rather than a parse: the hash has to match.
+
+**Adoption is bounded by the same allowlist as everything else, matched on `#{session_path}`.** A
+session anywhere else on the socket is not adopted, not listed, not attached and not streamed —
+the boundary `Hub.sync()` was given when it stopped attaching to whatever was on the socket. The
+residual is the allowlist's standing one rather than a new one: it is a filter on *where* a session
+is, so a same-uid process that creates a session inside a directory the operator already pointed
+this server at, under the derived name, gets a tab. Nothing on this machine distinguishes that from
+the real thing.
+
+**The hook secret is not recovered, and cannot be.** It was random, it lived only in memory and in
+the agent's own environment, and `new-session -A` injects no environment into a session that is
+already running — so a re-minted secret would never reach the agent, which still holds the old one.
+The consequence is stated rather than smoothed over: **an adopted session's hook POSTs stay
+unauthenticated, so it reports `working`, `idle` and `exited` but can never again report
+`waiting`** — not until that *agent* is restarted, which recreating the session does not do. The
+server therefore records no secret for an adopted session rather than a fresh one it could not
+deliver, and the session carries `waitingDetectionLost: true` so the client can say so. A tab that
+silently stops reporting `waiting` is a confidently wrong tab, which is the one output this design
+refuses; showing it is `m3/tab-strip`'s job.
 
 ## WebSocket
 
