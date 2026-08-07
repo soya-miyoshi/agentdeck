@@ -830,3 +830,50 @@ to the SPA history fallback and serves index.html rather than any file; a symlin
 - **Two routing tables**, which is a bypass shape waiting for a route outside `/api`.
 - **`ws.ts` upgrades on any path.**
 - **Same-uid**, unchanged.
+
+---
+
+## m2/client-visible-heartbeat - final whole-codebase pass - 2026-08-08
+
+Plan 002 asked for something unimplementable: a client that reconnects after two ping intervals of
+silence, where the ping is a WebSocket ping frame that JavaScript cannot observe. The plan now
+carries `{ t: "ping", intervalMs }` in its frame table, sent on the same timer as the WebSocket
+ping to every open socket whether or not that socket's agent is doing anything - which is what
+separates "the server is alive and the agent is quiet" from "nothing is arriving". The naive
+alternative, a blind silence timer, would make every idle tab reconnect in a loop.
+
+### Findings
+
+- [medium] src/client/backoff.ts:18 - Silence deadlines are re-armed by a heartbeat off ONE server
+  timer, so every client's deadline sits within a tick of every other, and the ladder had no
+  jitter. A server stall past two intervals - a `capture-pane` over deep scrollback, a burst of
+  `resync`, several concurrent snapshot builds - expires all of them at once and every client walks
+  the ladder in lockstep, re-attaching every open tab together. On a busy session a 30-second stall
+  has rolled the 256 KiB ring buffer, so each of those attaches takes the snapshot path: a
+  capture-pane, an alternate-screen probe and a refresh-client per session, aimed at the loop that
+  was already stalled. Per-session coalescing stops it compounding per client, so the outcome is
+  oscillating recovery rather than a wedge - and nothing restarts this process, so nothing breaks
+  the oscillation. Before this branch nothing on the client could produce a correlated,
+  self-initiated reconnect at all. Status: FIXED in e132cf7. The delay keeps half its step and
+  spreads the rest; `random` is injected so the ladder's shape is still asserted exactly.
+
+- [low] src/client/connection.ts:118 - `MAX_HEARTBEAT_INTERVAL_MS` was 20x the production interval
+  and the stated value was never reset, so it outlived the socket that stated it. One frame saying
+  five minutes moved the silence bound to ten - including the window BEFORE a socket's first frame,
+  which is the stuck-CONNECTING case the watchdog exists for. Status: FIXED in e132cf7: reset per
+  socket, ceiling lowered to sixty seconds.
+
+- [low] src/client/connection.ts:574 - The watchdog makes a stuck-CONNECTING socket reach
+  `#onClosed`, which calls `verifyToken()` - `GET /api/sessions`, which reaches `registry.list()`
+  and spawns `tmux list-sessions` - every cycle. `verifyToken` returns true for anything that is
+  not a 401, so the loop never terminates and never surfaces a diagnosis. It re-presents the bearer
+  token to whatever is answering, once per cycle, forever. Status: OPEN, and it is the same
+  `verifyToken` blind spot recorded under `m2/client-minimal`: it cannot see a 403 either. Both
+  want the same fix and `m2/reconnect` owns the ladder.
+
+### Open after this iteration
+
+- **`verifyToken` treats everything that is not a 401 as success**, so an origin refusal and a
+  captive portal both read as "token still good" and retry forever. Two audits have now landed on
+  it. `m2/reconnect` owns it and is blocked on `m2/session-metadata-survives-restart`.
+- **Same-uid**, unchanged.
