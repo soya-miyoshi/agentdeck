@@ -381,3 +381,75 @@ void describe("a half-open connection", () => {
     }
   });
 });
+
+// THE SERVER'S HALF of the client-visible heartbeat, separately from the client that consumes it.
+// The end-to-end test above passes if the two halves agree; these say what the server owes any
+// client, including the two properties plan 002 chose this frame FOR - that it does not depend on
+// a session, and that it does not depend on the agent doing anything.
+void describe("the client-visible heartbeat, as the server sends it", () => {
+  void test("reaches a socket that has attached nothing at all", async () => {
+    // Why `state` on a timer was rejected: `state` is per session, so this socket - open,
+    // authenticated, attached to nothing - would receive no heartbeat whatsoever and time itself
+    // out while perfectly healthy. A socket the user has not yet picked a tab in is the ordinary
+    // state of a page that just loaded.
+    const socket = new WebSocket(`ws://127.0.0.1:${String(port)}`, TOKEN);
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw: Buffer) => {
+      frames.push(JSON.parse(raw.toString("utf8")) as Record<string, unknown>);
+    });
+    await new Promise<void>((done) => socket.once("open", done));
+    try {
+      const pings = (): Record<string, unknown>[] =>
+        frames.filter((frame) => frame["t"] === "ping");
+      assert.ok(
+        await waitFor(() => pings().length >= 2, TEST_PING_MS * 8),
+        "an unattached socket was never sent a heartbeat",
+      );
+      // On a timer, whatever the agent is doing: neither session wrote a byte for the whole wait,
+      // and nothing here asked for anything.
+      assert.deepEqual(
+        frames.filter((frame) => frame["t"] !== "ping"),
+        [],
+        "something other than the heartbeat arrived, so the heartbeat is not what was measured",
+      );
+      // The interval travels on the frame, and it is the SERVER's - this suite runs a scaled one
+      // precisely so a client that had compiled in 15000 would be visibly wrong here.
+      for (const ping of pings()) assert.equal(ping["intervalMs"], TEST_PING_MS);
+      assert.notEqual(TEST_PING_MS, PING_INTERVAL_MS);
+    } finally {
+      socket.close();
+    }
+  });
+
+  void test("does not spend the receiving tab's frame budget", async () => {
+    // The starvation direction: the per-socket budget counts frames RECEIVED from a client, so
+    // heartbeats going the other way must leave a user's typing allowance untouched. Were they
+    // counted, a tab that had been open for a second would arrive at the keyboard already short.
+    const client = await attach(port, "live");
+    try {
+      const pings = (): number => client.frames.filter((frame) => frame["t"] === "ping").length;
+      assert.ok(await waitFor(() => pings() >= 2, TEST_PING_MS * 8), "no heartbeats arrived");
+
+      input.length = 0;
+      client.frames.length = 0;
+      // One short of the full allowance, because the `attach` above may still be inside this
+      // window and is a frame the client really did send. The two-plus heartbeats are the only
+      // thing that could take it over.
+      const sent = MAX_FRAMES_PER_WINDOW - 1;
+      for (let i = 0; i < sent; i++) {
+        client.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
+      }
+      assert.ok(
+        await waitFor(() => input.length === sent, 2000),
+        `only ${String(input.length)} of ${String(sent)} frames were accepted`,
+      );
+      assert.deepEqual(
+        errorsOf(client),
+        [],
+        "the heartbeat pushed a legitimate tab over its budget",
+      );
+    } finally {
+      client.socket.close();
+    }
+  });
+});
