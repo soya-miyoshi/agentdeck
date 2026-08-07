@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -113,9 +114,35 @@ void describe("the settings fragment", () => {
   void test("carries the session id and secret from the environment, not from the file", () => {
     const command = hookCommand(7777);
     assert.match(command, /\$AGENTDECK_SESSION_ID/);
-    assert.match(command, /\$AGENTDECK_SECRET/);
+    assert.match(command, /process\.env\.AGENTDECK_SECRET/);
     // No bearer token anywhere near a file a coding agent reads by design.
     assert.doesNotMatch(command, /Authorization/i);
+  });
+
+  void test("never expands the secret into an argument, where ps would show it", () => {
+    const command = hookCommand(7777);
+    // The shell expands "$AGENTDECK_SECRET" before exec, so any occurrence outside single quotes
+    // would put the literal secret in argv - readable by every process of this user via
+    // `ps -Ao args=`, dozens of times per turn. The value must be read from the environment by
+    // the process itself instead.
+    assert.doesNotMatch(command, /\$AGENTDECK_SECRET/);
+    assert.doesNotMatch(command, /\$\{AGENTDECK_SECRET/);
+
+    // Not by reading the string, though: run the command through a real shell with a marked
+    // secret in the environment and a stand-in on PATH that writes down the argv it was given.
+    const dir = mkdtempSync(join(tmpdir(), "agentdeck-argv-"));
+    const argvFile = join(dir, "argv");
+    writeFileSync(join(dir, "node"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${argvFile}\n`);
+    chmodSync(join(dir, "node"), 0o755);
+    execFileSync("/bin/sh", ["-c", command], {
+      env: {
+        PATH: dir,
+        AGENTDECK_SESSION_ID: "s1",
+        AGENTDECK_SECRET: "s3cret-value",
+      },
+    });
+    const argv = readFileSync(argvFile, "utf8");
+    assert.ok(!argv.includes("s3cret-value"), `secret leaked into argv: ${argv}`);
   });
 
   void test("merges once and idempotently, preserving keys it did not write", () => {
