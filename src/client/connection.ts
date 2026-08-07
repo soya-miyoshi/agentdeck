@@ -161,18 +161,12 @@ export class Connection {
   }
 
   /**
-   * Raw bytes the user typed.
+   * Raw bytes the user typed, as one `input` frame or as many as it takes to stay under the
+   * receiver's cap.
    *
    * Nothing is rendered here. Input comes back as ordinary output because that is what a PTY
    * does, and the agent may be in a mode that transforms or refuses it - so optimistically
    * painting the character would be the client asserting something only the agent knows.
-   */
-  input(sessionId: string, data: string): void {
-    this.#sendInput(sessionId, data);
-  }
-
-  /**
-   * One `input` frame, or as many as it takes to stay under the receiver's cap.
    *
    * Halving rather than a fixed character count: a fixed count has to assume the worst escaping
    * every character could have (six bytes, for a control character) and would then cut an ordinary
@@ -184,7 +178,7 @@ export class Connection {
    * The pieces stay in order and are sent immediately: a PTY has no notion of message boundaries,
    * so N frames written back to back are the same byte stream as one.
    */
-  #sendInput(sessionId: string, data: string): void {
+  input(sessionId: string, data: string): void {
     const message: ClientMessage = { t: "input", sessionId, data };
     if (encoder.encode(JSON.stringify(message)).length <= MAX_INPUT_FRAME_BYTES) {
       this.#send(message);
@@ -195,8 +189,8 @@ export class Connection {
     if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
     // A single code point that still does not fit cannot be split further, and there is no such
     // code point: the cap is kilobytes and the largest code point is four bytes.
-    this.#sendInput(sessionId, data.slice(0, cut));
-    this.#sendInput(sessionId, data.slice(cut));
+    this.input(sessionId, data.slice(0, cut));
+    this.input(sessionId, data.slice(cut));
   }
 
   resize(sessionId: string, cols: number, rows: number): void {

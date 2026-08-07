@@ -106,6 +106,14 @@ const harness = (): Harness => {
 const sentMessages = (socket: FakeSocket): Record<string, unknown>[] =>
   socket.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
 
+/** The bytes the pieces carry, rejoined - which is what the pty at the far end sees. */
+const joined = (frames: Record<string, unknown>[]): string =>
+  frames.map((frame) => frame["data"] as string).join("");
+
+/** The size the server's receiver measures: the serialised frame, in bytes. */
+const frameBytes = (frame: Record<string, unknown>): number =>
+  new TextEncoder().encode(JSON.stringify(frame)).length;
+
 /** Let the token probe's promise settle. */
 const settle = async (): Promise<void> => {
   await Promise.resolve();
@@ -158,17 +166,16 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     // and the paste is gone with no explanation, so the user pastes again and it repeats.
     const h = harness();
     // 400 KB of a pasted diff, which is a large paste but an ordinary one.
-    const pasted =
-      `${"diff --git a/src/x.ts b/src/x.ts +one changed line here".repeat(1)}\n`.repeat(6000);
+    const pasted = "diff --git a/src/x.ts b/src/x.ts +one changed line here\n".repeat(6000);
     const frames = paste(h, pasted);
     assert.ok(frames.length > 1, "expected the paste to be split");
     for (const frame of frames) {
       assert.ok(
-        new TextEncoder().encode(JSON.stringify(frame)).length <= MAX_INPUT_FRAME_BYTES,
+        frameBytes(frame) <= MAX_INPUT_FRAME_BYTES,
         "a frame was over the cap the receiver enforces before anything can answer it",
       );
     }
-    assert.equal(frames.map((frame) => frame["data"] as string).join(""), pasted);
+    assert.equal(joined(frames), pasted);
     assert.equal(h.last().closed, false, "the transport must survive an ordinary paste");
   });
 
@@ -185,11 +192,11 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     const frames = paste(h, "\u0001".repeat(200_000));
     for (const frame of frames) {
       assert.ok(
-        new TextEncoder().encode(JSON.stringify(frame)).length <= MAX_INPUT_FRAME_BYTES,
+        frameBytes(frame) <= MAX_INPUT_FRAME_BYTES,
         "a frame of worst-case-escaping bytes was over the cap",
       );
     }
-    assert.equal(frames.map((frame) => frame["data"] as string).join(""), "\u0001".repeat(200_000));
+    assert.equal(joined(frames), "\u0001".repeat(200_000));
   });
 
   void test("a code point is never split across two frames", () => {
@@ -201,10 +208,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
       assert.doesNotMatch(data, /^[\udc00-\udfff]/, "a frame began with a lone low surrogate");
       assert.doesNotMatch(data, /[\ud800-\udbff]$/, "a frame ended with a lone high surrogate");
     }
-    assert.equal(
-      frames.map((frame) => frame["data"] as string).join(""),
-      "\u{1f600}".repeat(60_000),
-    );
+    assert.equal(joined(frames), "\u{1f600}".repeat(60_000));
   });
 
   void test("typing is still one frame per keystroke", () => {

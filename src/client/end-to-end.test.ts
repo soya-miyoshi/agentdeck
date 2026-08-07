@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import type { Session } from "../registry.ts";
+import { browserSocket } from "./browser-socket.ts";
 import { Connection } from "./connection.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
@@ -179,7 +180,6 @@ const drive = async (cwd: string): Promise<Driven> => {
   const terminal = paintedTerminal();
   const errors: string[] = [];
   let opens = 0;
-  const { browserSocket } = await import("./browser-socket.ts");
 
   const connection = new Connection(
     {
@@ -293,10 +293,9 @@ const sessionNames = (): string[] => {
 };
 
 void describe("the sessions this test started", () => {
-  void test("were really tmux sessions, not a fixture", async () => {
+  void test("were really tmux sessions, not a fixture", () => {
     // Guards the whole file against the failure mode that would make it pass while proving
     // nothing: a server that answered without tmux ever being involved.
     assert.ok(sessionNames().length >= 1, "no tmux session was created");
-    await Promise.resolve();
   });
 });
