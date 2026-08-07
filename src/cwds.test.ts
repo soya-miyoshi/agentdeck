@@ -49,6 +49,15 @@ void describe("the cwd allowlist", () => {
     assert.match(message, /waiting detection do not survive/);
     assert.match(message, /stop reporting when they need you/);
   });
+
+  void test("the README does not price the restart at a reconnect either", async () => {
+    // The README is the document a person reads first, so it is the one that decides whether the
+    // restart sounds routine. Prose is where this regressed once already.
+    const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+    assert.doesNotMatch(readme, /costs a\s+reconnect/);
+    assert.match(readme, /waiting detection do not survive/);
+    assert.match(readme, /stops reporting when it needs you/);
+  });
 });
 
 void describe("plan 006 prices a restart at what it actually costs", () => {

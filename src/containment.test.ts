@@ -40,8 +40,15 @@ const readDoc = async (name: string): Promise<string> =>
 // privileges — `permissions:` lives inside the file being protected. `.git/config` and
 // `.git/hooks/` are executed by git itself, which makes the prescribed `git diff` its own
 // trigger, and neither is tracked, so the review cannot see them at all.
+//
+// `scripts/` is the one a lockfile-shaped review misses entirely. `package.json` declares
+// `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm always runs the ROOT
+// project's own lifecycle scripts - the pnpm 9 gating caveat above covers dependencies only. So
+// `pnpm install --frozen-lockfile` executes a file in this tree no matter what the lockfile says,
+// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides.
 const hostExecutedFiles = [
   "package.json",
+  "scripts/",
   "pnpm-lock.yaml",
   "eslint.config.*",
   ".prettierrc*",

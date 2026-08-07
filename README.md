@@ -109,8 +109,11 @@ now that there is no container is recorded as open in plan 005's superseded head
 here.
 
 One consequence worth knowing: adding a newly cloned repo means adding it to the allowlist and
-restarting the server. tmux keeps the running sessions across that restart, so it costs a
-reconnect rather than a day's work. Why git push credentials stay away from the agent is in
+restarting the server. tmux keeps the processes alive across that restart, but their directory,
+agent and waiting detection do not survive it: the registry holds cwd, agent and the per-session
+hook secret in memory only, so a surviving session comes back named by its raw id, drops out of
+`GET /api/cwds` and the two-agents warning, and stops reporting when it needs you until it is
+recreated. Pick a moment, or recreate the sessions afterwards. Why git push credentials stay away from the agent is in
 [`plans/005-containment.md`](plans/005-containment.md).
 
 ## Non-goals
@@ -165,7 +168,11 @@ repository's own agents can write — `eslint.config.*` is evaluated as JavaScri
 names plugin files prettier imports as JavaScript, the `package.json` scripts are handed to a
 shell, `pnpm-lock.yaml` is resolved by a pnpm 9 that does not gate dependency lifecycle scripts,
 `src/**/*.test.ts` is executed as code by `node --test`, and `node_modules/.bin` is prepended to
-`PATH`. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
+`PATH`. `scripts/` belongs in that list for a reason the lockfile caveat does not cover:
+`package.json` declares `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm
+always runs the root project's own lifecycle scripts, so `pnpm install --frozen-lockfile` executes
+a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs` and
+`scripts/restart-survival.mjs` are run by hand besides. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
 executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
 loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
 `.git/hooks/`. There used to be a container between all of that and the machine; there is not one
@@ -174,7 +181,8 @@ now, which makes the review below the only control rather than the second of two
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `.claude/` and `.github/workflows/`. **That
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/` and
+`.github/workflows/`. **That
 list is a floor, not the whole job**: the host tools discover their own config, so the exception
 requires reading every added or modified file in the diff, not only the named ones. The same
 review is owed before starting an agent session in this repo,
