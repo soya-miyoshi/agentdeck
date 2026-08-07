@@ -38,8 +38,10 @@ interface Harness {
   rendered: { sessionId: string; data: string; cleared: boolean }[];
   errors: string[];
   unauthorized: number;
-  /** What the HTTP probe says when a socket closes before it opened. */
+  /** What the HTTP probe says when a socket closes having carried nothing. */
   verdict: TokenVerdict;
+  /** How many times the token has been re-presented to the server over HTTP. */
+  probes: number;
 }
 
 interface FakeSocket {
@@ -79,6 +81,7 @@ const harness = (): Harness => {
     errors: [],
     unauthorized: 0,
     verdict: "ok",
+    probes: 0,
   };
 
   const events: ConnectionEvents = {
@@ -112,7 +115,10 @@ const harness = (): Harness => {
           },
         };
       },
-      verifyToken: () => Promise.resolve(state.verdict),
+      verifyToken: () => {
+        state.probes += 1;
+        return Promise.resolve(state.verdict);
+      },
       // The ladder's jitter pinned to its top, so these tests still assert the delays the ladder
       // is designed around rather than a draw. The spread itself is tested in backoff.test.ts.
       random: () => 1,
@@ -494,28 +500,178 @@ void describe("reconnection", () => {
     h.last().handlers.opened();
 
     h.last().handlers.closed();
+    // The socket carried nothing, so the token is checked over HTTP before this counts as a
+    // network failure at all - a handshake alone is not evidence the server is there.
+    await settle();
     assert.deepEqual(h.statuses, ["connecting", "open"]);
     assert.equal(h.timers[0]?.delayMs, 250);
 
     h.fire();
     h.last().handlers.closed();
-    // The retry never opened, so the token is checked over HTTP before this counts as a network
-    // failure at all.
     await settle();
     assert.equal(h.statuses.at(-1), "reconnecting");
     assert.equal(h.timers[0]?.delayMs, 500);
   });
 
-  void test("an open socket that drops is never mistaken for a bad token", async () => {
+  void test("a socket that carried traffic and drops is never mistaken for a bad token", async () => {
+    const h = harness();
+    h.verdict = "rejected";
+    h.connection.start();
+    h.last().handlers.opened();
+    // The server was talking to this client seconds ago, so the probe is not even consulted - and
+    // the token is not re-presented over HTTP for an ordinary outage.
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.probes, 0);
+    assert.equal(h.unauthorized, 0);
+    assert.equal(h.timers.length, 1);
+  });
+});
+
+void describe("a token rejected mid-session, rather than at startup", () => {
+  void test("the first reconnect after the rotation asks, and stops", async () => {
+    // Rotating the token does not close the socket that is already open - it refuses the NEXT
+    // handshake. So the discovery is one ladder step after the drop, and no sooner: the drop
+    // itself arrives on a connection that was working, which is the ordinary outage. What must not
+    // happen is the refused handshake being read as more of the same outage.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.probes, 0, "an ordinary mid-session drop re-presented the token over HTTP");
+
+    h.verdict = "rejected";
+    h.fire(); // the reconnect, whose handshake the rotated token is refused at
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.unauthorized, 1);
+    assert.deepEqual(h.timers, [], "the ladder kept running against a rejected token");
+    assert.equal(h.statuses.at(-1), "rejected");
+  });
+
+  void test("a handshake that succeeds and carries nothing is not evidence the token is good", async () => {
+    // A `101` is answered by whatever sits in front of the server as readily as by the server, so
+    // a socket that opened and then said nothing has proved nothing. Reading it as proof left this
+    // case going round the ladder once more for no information.
     const h = harness();
     h.verdict = "rejected";
     h.connection.start();
     h.last().handlers.opened();
     h.last().handlers.closed();
     await settle();
-    // The server accepted this token seconds ago, so the probe is not even consulted.
-    assert.equal(h.unauthorized, 0);
-    assert.equal(h.timers.length, 1);
+    assert.equal(h.unauthorized, 1);
+    assert.deepEqual(h.timers, []);
+  });
+
+  void test("a 403 that arrives after a period of success stops it too, and keeps the token", async () => {
+    // The server was restarted with a different AGENTDECK_ORIGIN under a client that had been
+    // connected all along. Nothing about the token changed, so asking for a new one would send the
+    // user after the wrong thing.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    await settle();
+
+    h.verdict = "forbidden";
+    h.fire();
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.unauthorized, 0, "a configuration mistake asked for a new token");
+    assert.deepEqual(h.timers, []);
+    assert.equal(h.statuses.at(-1), "forbidden");
+    assert.ok(h.errors.some((message) => /AGENTDECK_ORIGIN/.test(message)));
+  });
+});
+
+void describe("a socket that is stuck rather than absent", () => {
+  void test("the ladder says what is wrong instead of re-presenting the token forever", async () => {
+    // The audit's open finding: the watchdog drops a stuck-CONNECTING socket, `#onClosed` probes
+    // the token, the probe says the server is fine, and the loop runs again - a bearer token
+    // re-presented once a cycle, forever, with no diagnosis. The probe is what makes this case
+    // diagnosable at all: HTTP works and the socket does not, which is neither the network nor the
+    // token.
+    const h = harness();
+    h.connection.start();
+    for (let cycle = 0; cycle < 6; cycle++) {
+      h.fire(); // the silence bound gives up on a socket that never reached the 101
+      await settle();
+      h.fire(); // the reconnect
+    }
+    assert.ok(h.probes >= 6, "the stuck socket was never diagnosed against HTTP at all");
+    const said = h.errors.filter((message) => /not the network and not the token/.test(message));
+    assert.equal(said.length, 1, `expected exactly one diagnosis, got ${String(said.length)}`);
+    // Still trying, because unlike a 401 or a 403 this is an inference rather than a verdict: a
+    // proxy that starts passing upgrades makes it wrong.
+    assert.ok(h.timers.length > 0, "an inference stopped the ladder as if it were a verdict");
+  });
+
+  void test("a socket that completes the handshake and then says nothing is diagnosed too", async () => {
+    // The 101 is answered by whatever is in front of the server as readily as by the server, so
+    // "it opened" is not evidence and this case would otherwise have nothing to diagnose it from.
+    const h = harness();
+    h.connection.start();
+    for (let cycle = 0; cycle < 6; cycle++) {
+      h.last().handlers.opened();
+      h.fire();
+      await settle();
+      h.fire();
+    }
+    assert.equal(
+      h.errors.filter((message) => /not the network and not the token/.test(message)).length,
+      1,
+    );
+  });
+
+  void test("one frame ends the silence, and a later one is diagnosed afresh", async () => {
+    const h = harness();
+    h.connection.start();
+    for (let cycle = 0; cycle < 5; cycle++) {
+      h.fire();
+      await settle();
+      h.fire();
+    }
+    const first = h.errors.length;
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    await settle();
+    // That close carried traffic, so it scheduled a retry rather than probing. Consume it, which
+    // puts the loop back on the same footing as the first one: a stuck socket being watched.
+    h.fire();
+    for (let cycle = 0; cycle < 5; cycle++) {
+      h.fire();
+      await settle();
+      h.fire();
+    }
+    assert.equal(
+      h.errors.filter((message) => /not the network and not the token/.test(message)).length,
+      2,
+      "a second outage repeated the first one's diagnosis, or never said it again",
+    );
+    assert.ok(first > 0);
+  });
+
+  void test("an unreachable server is never diagnosed as a broken socket", async () => {
+    // A phone in a lift. The probe does not answer either, so the sentence above - which claims
+    // the server IS answering - would be a guess presented to the user as a finding. This is why
+    // "could not reach it" is a verdict of its own rather than folded into "ok": the two retry
+    // identically, and they are opposite evidence about everything else.
+    const h = harness();
+    h.verdict = "unreachable";
+    h.connection.start();
+    for (let cycle = 0; cycle < 6; cycle++) {
+      h.fire();
+      await settle();
+      h.fire();
+    }
+    assert.deepEqual(h.errors, [], "an outage was reported as a misconfigured proxy");
+    assert.ok(h.statuses.includes("reconnecting"));
+    assert.ok(h.timers.length > 0, "an outage stopped the ladder");
   });
 });
 
@@ -537,6 +693,7 @@ void describe("a rejected token is not a network failure", () => {
     // Treating "no network" as "bad token" would throw away a working token every time the phone
     // went through a tunnel.
     const h = harness();
+    h.verdict = "unreachable";
     h.connection.start();
     h.last().handlers.closed();
     await settle();
@@ -674,13 +831,14 @@ void describe("the client-visible heartbeat", () => {
     assert.equal(watchdogs(h).length, 1);
   });
 
-  void test("two intervals of silence drop the socket and run the ladder", () => {
+  void test("two intervals of silence drop the socket and run the ladder", async () => {
     // The half-open case, in miniature. Nothing closes, nothing errors; this timer is the only
     // thing that can notice, and what it must produce is a reconnect rather than a status change.
     const h = openHarness();
     assert.equal(watchdogs(h).length, 1);
     h.fire();
     assert.equal(h.last().closed, true, "the dead socket was left open");
+    await settle();
     assert.deepEqual(
       h.timers.map((timer) => timer.delayMs),
       [250],
@@ -793,15 +951,17 @@ void describe("the client-visible heartbeat", () => {
     );
   });
 
-  void test("a socket dropped by the bound and later closed for real reconnects once", () => {
+  void test("a socket dropped by the bound and later closed for real reconnects once", async () => {
     // A half-open socket does eventually get an RST, minutes after the watchdog gave up on it.
     // Two runs of the ladder for one connection is two sockets racing, and the loser's frames
     // arrive on a connection nothing is reading.
     const h = openHarness();
     const first = h.last();
     h.fire();
+    await settle();
     assert.equal(h.timers.length, 1);
     first.handlers.closed();
+    await settle();
     assert.deepEqual(
       h.timers.map((timer) => timer.delayMs),
       [250],
@@ -892,13 +1052,14 @@ void describe("the client-visible heartbeat", () => {
     assert.ok(h.statuses.includes("reconnecting"), "the loop was invisible to the user");
   });
 
-  void test("a socket that carries a frame resets the ladder", () => {
+  void test("a socket that carries a frame resets the ladder", async () => {
     // The other half of the rule: evidence of traffic, not merely a handshake, starts the ladder
     // from the bottom again - so an ordinary outage still reconnects fast.
     const h = harness();
     h.connection.start();
     h.last().handlers.opened();
     h.fire();
+    await settle();
     h.fire();
     h.last().handlers.opened();
     h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
@@ -909,12 +1070,102 @@ void describe("the client-visible heartbeat", () => {
     );
   });
 
-  void test("a reconnected socket is watched again", () => {
+  void test("a reconnected socket is watched again", async () => {
     // The bound is per socket. Re-arming it on open is what keeps the second outage noticeable.
     const h = openHarness();
     h.fire();
+    await settle();
     h.fire();
     h.last().handlers.opened();
     assert.equal(watchdogs(h).length, 1);
+  });
+});
+
+// A backgrounded tab is not a special case in this file's model - it is the ordinary one, slowed
+// down. A hidden tab's timers are throttled to roughly one a minute, so every delay here becomes a
+// floor rather than a duration: the silence bound notices later, the ladder's step is longer than
+// the ladder chose, and the cap being 4 s buys nothing while nobody is looking at the screen. What
+// makes that acceptable is that the delays are only ever exceeded, never undercut - a throttled
+// clock cannot make this connection reconnect sooner than it decided to - and that the moment the
+// tab comes back, the wait is abandoned rather than served out. App.vue calls `poke()` on
+// `visibilitychange` and on `online` for exactly that.
+void describe("a tab that was in the background", () => {
+  void test("does not serve out a delay that was scheduled while nobody was looking", async () => {
+    const h = harness();
+    h.connection.start();
+    // Far enough up the ladder to be at the cap, which is what a tab that failed while hidden
+    // comes back holding.
+    for (let cycle = 0; cycle < 5; cycle++) {
+      h.last().handlers.closed();
+      await settle();
+      h.fire();
+    }
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.timers[0]?.delayMs, 4000, "the ladder was not at its cap");
+
+    const before = h.sockets.length;
+    h.connection.poke();
+    assert.equal(h.sockets.length, before + 1, "the wake waited out the backoff instead");
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+    );
+  });
+
+  void test("keeps its place in the stream, so the wake repaints rather than starts over", async () => {
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    h.last().handlers.opened();
+    h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 7, data: "hello" });
+    h.last().handlers.closed();
+    await settle();
+
+    h.connection.poke();
+    h.last().handlers.opened();
+    const attach = sentMessages(h.last()).find((frame) => frame["t"] === "attach");
+    assert.deepEqual(attach, {
+      t: "attach",
+      sessionId: "a",
+      cols: 80,
+      rows: 24,
+      haveEpoch: "e1",
+      haveSeq: 7,
+    });
+  });
+
+  void test("a wake while a socket already exists does not open a second one", () => {
+    // `visibilitychange` and `online` both fire on a phone coming out of a pocket, and a stuck
+    // socket is still a socket. Two sockets for one connection is two ladders racing, and the
+    // loser's frames arrive on a connection nothing is reading.
+    const h = harness();
+    h.connection.start();
+    h.connection.poke();
+    h.connection.poke();
+    assert.equal(h.sockets.length, 1);
+  });
+
+  void test("a wake after the tab was closed does not resurrect it", () => {
+    const h = harness();
+    h.connection.start();
+    h.connection.stop();
+    h.connection.poke();
+    assert.equal(h.sockets.length, 1);
+    assert.equal(h.statuses.at(-1), "closed");
+  });
+
+  void test("a wake after a rejected token does not re-present it", async () => {
+    // The ladder is stopped, and `poke()` is called by an event the user cannot avoid firing -
+    // switching back to the tab. Re-opening there would put the paste field behind a socket that
+    // is being refused over and over.
+    const h = harness();
+    h.verdict = "rejected";
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.unauthorized, 1);
+    h.connection.poke();
+    assert.equal(h.sockets.length, 1, "a rejected token was re-presented on the next wake");
   });
 });

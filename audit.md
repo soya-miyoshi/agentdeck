@@ -867,15 +867,20 @@ alternative, a blind silence timer, would make every idle tab reconnect in a loo
   `#onClosed`, which calls `verifyToken()` - `GET /api/sessions`, which reaches `registry.list()`
   and spawns `tmux list-sessions` - every cycle. `verifyToken` returns true for anything that is
   not a 401, so the loop never terminates and never surfaces a diagnosis. It re-presents the bearer
-  token to whatever is answering, once per cycle, forever. Status: OPEN, and it is the same
-  `verifyToken` blind spot recorded under `m2/client-minimal`: it cannot see a 403 either. Both
-  want the same fix and `m2/reconnect` owns the ladder.
+  token to whatever is answering, once per cycle, forever. Status: FIXED in `m2/reconnect`.
+  `verifyToken` sees a 403, and it now also tells "the server answered" from "nothing answered" -
+  which is what makes the stuck case sayable at all. A probe that says the server is answering and
+  this token is good, while three sockets in a row have carried nothing, is neither the network nor
+  the token, and the client says so once. It does NOT stop the ladder: unlike a 401 or a 403 this
+  is two facts agreeing rather than an answer from the server.
 
 ### Open after this iteration
 
 - **`verifyToken` treats everything that is not a 401 as success**, so an origin refusal and a
   captive portal both read as "token still good" and retry forever. Two audits have now landed on
   it. `m2/reconnect` owns it and is blocked on `m2/session-metadata-survives-restart`.
+  Status: FIXED in `m2/reconnect`. The verdict is now one of four - `ok`, `rejected`, `forbidden`,
+  `unreachable` - and plan 002 was edited before the code was.
 - **Same-uid**, unchanged.
 
 ---

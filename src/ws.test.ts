@@ -640,3 +640,116 @@ void describe("one client's failed snapshot does not detach another", () => {
     for (const socket of sockets) socket.close();
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+// The other side of the same mechanism. The client's ladder jitters (src/client/backoff.ts), but
+// jitter only spreads a burst - it does not stop one. A server stall past two heartbeat intervals
+// expires every client's silence bound at once, every tab re-attaches, and each of those attaches
+// is a cold snapshot once the ring buffer has rolled: a capture-pane, an alternate-screen probe
+// and a refresh-client, per session, arriving at the loop that was already stalled. Coalescing is
+// what keeps N re-attaches from being N of those. Two tabs of the SAME session on one phone are
+// the small version of it and the common one.
+//
+// The joiner-inherits-a-rejection rule is the part worth pinning: because a failed build is not
+// shared, a storm that arrives on a build that FAILS could have become one build per client. It
+// does not, and the reason is exact - every joiner resumes from the same rejected promise, and the
+// first of them to resume installs its own entry before any other can look, so the rest join that
+// one instead.
+void describe("a reconnect storm is not a spawn storm", () => {
+  let stServer: ReturnType<typeof createServer>;
+  let stClose: () => void;
+  let stUrl: string;
+  let stStream: SessionStream;
+  let builds = 0;
+  let failFirst = true;
+
+  before(async () => {
+    stStream = new SessionStream({ sessionId: "s1" });
+    stServer = createServer();
+    stClose = attachWebSocketServer(stServer, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? stStream : undefined),
+      captureHistory: async () => await Promise.resolve("scrollback\n"),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => {
+        builds += 1;
+        // A real build is several process spawns and does not settle in the same tick, which is
+        // what gives a storm the window to pile onto it.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (failFirst && builds === 1) throw new Error("stdout maxBuffer length exceeded");
+        return { data: "repainted", seq: stStream.buffer.headSeq };
+      },
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    }).close;
+    await new Promise<void>((done) => stServer.listen(0, "127.0.0.1", done));
+    stUrl = `ws://127.0.0.1:${String((stServer.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    stClose();
+    stServer.close();
+  });
+
+  /** Open `count` sockets, attach them all to s1 at once, and answer what each one received. */
+  const storm = async (count: number): Promise<Frame[][]> => {
+    const sockets = Array.from(
+      { length: count },
+      () => new WebSocket(stUrl, TOKEN, { origin: ORIGIN }),
+    );
+    const seen: Frame[][] = sockets.map(() => []);
+    sockets.forEach((socket, index) => {
+      socket.on("message", (raw: Buffer) => {
+        seen[index]?.push(JSON.parse(raw.toString("utf8")) as Frame);
+      });
+    });
+    await Promise.all(
+      sockets.map(
+        async (socket) =>
+          await new Promise<void>((resolve, reject) => {
+            socket.once("open", resolve);
+            socket.once("error", reject);
+          }),
+      ),
+    );
+    for (const socket of sockets) {
+      socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    for (const socket of sockets) socket.close();
+    return seen;
+  };
+
+  void test("a build that fails under a storm is retried once, not once per client", async () => {
+    const seen = await storm(8);
+    assert.equal(builds, 2, `eight re-attaches cost ${String(builds)} snapshot builds`);
+    // And the retry is not a consolation prize for the one client that started it: every joiner of
+    // the failed build gets the successful one. The eighth is the client whose own build failed -
+    // it is told, and detached, which is the pre-existing behaviour for a snapshot that fails with
+    // nobody else's attempt to fall back on.
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "snapshot")).length,
+      7,
+      "a client that joined the failed build was left with no snapshot and an open socket",
+    );
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "error")).length,
+      1,
+      "the failure was reported to more than the one client that met it",
+    );
+  });
+
+  void test("two tabs of one session reconnecting together share a single build", async () => {
+    failFirst = false;
+    builds = 0;
+    const seen = await storm(2);
+    assert.equal(builds, 1, "each tab paid for its own capture-pane");
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "snapshot")).length,
+      2,
+      "one of the two tabs was left blank",
+    );
+  });
+});

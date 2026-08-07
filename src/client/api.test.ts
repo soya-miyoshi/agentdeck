@@ -78,7 +78,7 @@ void describe("the server's answer to a mismatched Origin", () => {
   });
 });
 
-void describe("verifyToken tells the three failures apart", () => {
+void describe("verifyToken tells the four answers apart", () => {
   void test("a 403 is its own verdict, not a good token", async () => {
     answerWith(403, { error: "origin not allowed" });
     assert.equal(await verifyToken(token), "forbidden");
@@ -89,16 +89,19 @@ void describe("verifyToken tells the three failures apart", () => {
     assert.equal(await verifyToken(token), "rejected");
   });
 
-  void test("an unreachable server keeps the token", async () => {
+  void test("an unreachable server keeps the token, and does not claim to have reached it", async () => {
     // A tunnel has not rejected anything. Reading it as a bad token would throw away a working
-    // one every time the phone lost signal.
+    // one every time the phone lost signal - and reading it as `ok` would let the client tell the
+    // user the server is answering when nothing has answered at all.
     globalThis.fetch = async () => await Promise.reject(new TypeError("fetch failed"));
-    assert.equal(await verifyToken(token), "ok");
+    assert.equal(await verifyToken(token), "unreachable");
   });
 
   void test("a 500 is not read as a refusal either", async () => {
+    // The server answered, but it did not accept anything - it failed. Not evidence that this
+    // client can get in, so not `ok`; not a refusal of the token, so the token is kept.
     answerWith(500, { error: "something broke" });
-    assert.equal(await verifyToken(token), "ok");
+    assert.equal(await verifyToken(token), "unreachable");
   });
 });
 

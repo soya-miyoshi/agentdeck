@@ -211,15 +211,23 @@ const drive = async (cwd: string): Promise<Driven> => {
         return live;
       },
       // api.ts's `verifyToken` restated against an absolute URL: node's fetch has no page to take
-      // a base from. The three verdicts are the ones that module produces, including the 403 that
-      // used to read as "not a 401, so the token is good, so it must be the network".
+      // a base from. The four verdicts are the ones that module produces, including the 403 that
+      // used to read as "not a 401, so the token is good, so it must be the network". The catch
+      // matters as much as the statuses: the restart test below probes while the server is down,
+      // and a probe that REJECTS rather than answering would abandon `#onClosed` half-way and
+      // leave the ladder with no retry scheduled at all - a permanently blank tab, which is the
+      // thing that test exists to catch.
       verifyToken: async () => {
-        const response = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
-          headers: { authorization: `Bearer ${token}` },
-        });
-        if (response.status === 401) return "rejected";
-        if (response.status === 403) return "forbidden";
-        return "ok";
+        try {
+          const response = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          if (response.status === 401) return "rejected";
+          if (response.status === 403) return "forbidden";
+          return response.ok ? "ok" : "unreachable";
+        } catch {
+          return "unreachable";
+        }
       },
     },
     {

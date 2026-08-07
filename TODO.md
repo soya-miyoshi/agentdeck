@@ -276,7 +276,7 @@ Driven from `curl` only. No client.
       not listed and not killed. Plans 002, 003 and 005, the README and `CwdAllowlist.refusal`
       were all claiming the old behaviour and now state this one.
 
-- [ ] **`m2/reconnect`** (UNBLOCKED on 2026-08-08: `m2/session-metadata-survives-restart` landed,
+- [x] **`m2/reconnect`** (UNBLOCKED on 2026-08-08: `m2/session-metadata-survives-restart` landed,
       so a session that outlives the server is listed and attachable again and the epoch half is
       now reachable. The branch `m2/reconnect` already carries the socket-drop half and telling a
       refused origin from a lost network; it needs `main` merged into it and the epoch half
@@ -287,15 +287,34 @@ Driven from `curl` only. No client.
       a hole; **and the server is restarted under an open client and the tab repaints rather than
       going permanently blank** — the epoch case, which looks like every other reconnect until the
       screen stays empty.
-      **Half met, and the other half is blocked.** The socket killed mid-output repaints with no
-      hole, and a `403` is now told apart from both a network failure and a bad token and named to
-      the user (`AGENTDECK_ORIGIN`) instead of being retried forever — both against the real
-      end-to-end harness. The epoch case **cannot** be met from the client: after a real restart
-      the surviving session is not in `Registry.list()` at all, so the re-attach is answered
-      `no session <id>` and no client behaviour repaints that tab. Recreating the session restores
-      the metadata and the repaint then happens correctly in a new epoch — asserted in
-      `src/client/end-to-end.test.ts`. Making a restart recover by itself is the metadata gap owned
-      by `m0/supervisor-crash-test`'s **Known gap, unsolved** above; it needs an item of its own.
+      **Both halves met, against real infrastructure.** `src/client/end-to-end.test.ts` kills the
+      socket mid-output and asserts the repaint has no hole, and SIGKILLs a real server process
+      under a live client, restarts it, and asserts the tab repaints in a new epoch — the second is
+      only reachable because `m2/session-metadata-survives-restart` made the surviving session
+      listable again.
+      A rejected token stops the ladder, drops what is stored and shows the paste field; a `403` is
+      told apart from both a network failure and a bad token and named to the user
+      (`AGENTDECK_ORIGIN`) instead of being retried forever.
+      **What the QA pass added on top of the coder's work**, all of it in the reconnect ladder,
+      which is the part of this product most likely to be wrong and least likely to be noticed:
+      - The evidence that the token is good is now a frame that ARRIVED, not the handshake. A `101`
+        is answered by whatever sits in front of the server as readily as by the server, so a socket
+        that opened and then said nothing used to be read as proof and went round the ladder again
+        for no information.
+      - **A stuck socket is diagnosed instead of looped on**, which was audit finding
+        `src/client/connection.ts:574`, still OPEN before this. The probe answering "the server is
+        answering and this token is good" while no socket carries anything is neither the network
+        nor the token, and after three such attempts the client says so once and keeps retrying —
+        an inference, so it does not stop the ladder the way a `401` or a `403` does.
+      - `verifyToken` grew a fourth verdict, `unreachable`, because the sentence above must not be
+        said when nothing answered at all. Plan 002 was edited first.
+      - **A re-attach storm could still become a spawn storm through the FAILURE path**, and that is
+        a server-side bug this item found: every joiner of a failed coalesced snapshot was woken by
+        the same rejection and made its own build, so eight tabs coming back from one stalled server
+        cost eight concurrent capture-panes at the tmux server that was already the problem.
+        Measured at 8, now 2. `src/ws.test.ts`.
+      Making a restart recover WITHOUT the recreate is still the metadata gap owned by
+      `m0/supervisor-crash-test`'s **Known gap, unsolved** above.
 
 ---
 

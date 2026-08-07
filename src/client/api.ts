@@ -19,8 +19,15 @@ export class UnauthorizedError extends Error {}
  */
 export class ForbiddenError extends Error {}
 
-/** What one authenticated request learned about why this client cannot get in. */
-export type TokenVerdict = "ok" | "rejected" | "forbidden";
+/**
+ * What one authenticated request learned about why this client cannot get in.
+ *
+ * `unreachable` is the probe failing rather than answering. It behaves exactly like `ok` for the
+ * ladder - the token is kept and retrying continues - and is a verdict of its own only because the
+ * two are opposite evidence about everything else: `ok` is a server that answered, and a client
+ * whose sockets carry nothing while the server answers knows something no other state can tell it.
+ */
+export type TokenVerdict = "ok" | "rejected" | "forbidden" | "unreachable";
 
 const request = async <T>(token: string, path: string): Promise<T> => {
   const response = await fetch(path, { headers: { authorization: `Bearer ${token}` } });
@@ -47,13 +54,16 @@ export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
 /**
  * Why this client cannot get in, as one cheap authenticated request.
  *
- * Deliberately answers `"ok"` when the request itself fails: an unreachable server has not
- * rejected anything, and treating "no network" as "bad token" would throw away a working token
- * every time the phone went through a tunnel.
+ * A request that fails rather than answering is `"unreachable"`, which the caller must treat as
+ * the token still being good: an unreachable server has not rejected anything, and reading "no
+ * network" as "bad token" would throw away a working token every time the phone went through a
+ * tunnel. It is nonetheless not `"ok"`. `"ok"` is the positive claim that the server answered and
+ * accepted this token, and it is the only state that makes a socket carrying nothing diagnosable
+ * as something other than the network - said out loud to the user, which a guess must not be.
  *
- * `"forbidden"` is separated from both because it is the one condition retrying cannot mend, and
- * it used to be folded into `"ok"` - so an `AGENTDECK_ORIGIN` that does not match the address the
- * page was opened from produced a client that reconnected forever with no diagnosis.
+ * `"forbidden"` is separated from all of them because it is the one condition retrying cannot
+ * mend, and it used to be folded into `"ok"` - so an `AGENTDECK_ORIGIN` that does not match the
+ * address the page was opened from produced a client that reconnected forever with no diagnosis.
  */
 export const verifyToken = async (token: string): Promise<TokenVerdict> => {
   try {
@@ -62,6 +72,6 @@ export const verifyToken = async (token: string): Promise<TokenVerdict> => {
   } catch (error) {
     if (error instanceof UnauthorizedError) return "rejected";
     if (error instanceof ForbiddenError) return "forbidden";
-    return "ok";
+    return "unreachable";
   }
 };

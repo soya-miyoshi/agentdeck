@@ -363,15 +363,32 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     sessionId: string,
     stream: SessionStream,
   ): Promise<Awaited<ReturnType<typeof buildSnapshot>>> => {
-    const inFlight = snapshots.get(sessionId);
-    if (inFlight !== undefined) {
+    // The generation whose failure this caller has already inherited, so it is never inherited
+    // twice and the loop can only ever move forward.
+    let inherited: number | undefined;
+    for (;;) {
+      const inFlight = snapshots.get(sessionId);
+      if (inFlight === undefined || inFlight.generation === inherited) break;
       try {
         return await inFlight.promise;
       } catch {
         // Coalescing is an optimisation, not a verdict. Sharing the SUCCESS is the point; sharing
         // the FAILURE means one client's flood - or one capture-pane past its buffer - decides the
         // outcome for every client that happened to attach beside it, and the attach path treats a
-        // failed snapshot as a reason to detach. Fall through and make our own attempt.
+        // failed snapshot as a reason to detach. So a joiner makes its own attempt.
+        //
+        // But it must LOOK AGAIN first, which is what this loop is for. Every joiner of a failed
+        // build is woken by the same rejection, so falling straight through made each of them
+        // start a build: eight tabs coming back from one stalled server turned one failure into
+        // eight concurrent capture-panes at the tmux server that was already the problem, which is
+        // the storm the coalescing exists to prevent, reachable only through the failure path.
+        // Measured at eight builds for eight re-attaches before this loop - src/ws.test.ts.
+        //
+        // Looking again is not merely an optimisation here: the first joiner to wake has already
+        // installed its retry by the time the rest look, so the rest join a real, live attempt
+        // rather than duplicating it. The loop cannot spin, because it never inherits the same
+        // generation twice and a newer entry is always a strictly larger one.
+        inherited = inFlight.generation;
       }
     }
     const generation = nextGeneration++;

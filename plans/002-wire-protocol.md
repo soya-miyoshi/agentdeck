@@ -392,9 +392,40 @@ the worst version of this: it looks exactly like being out of range.
 the socket upgrade alike, and the upgrade's status never reaches a browser — so the probe over
 HTTP is the only place the difference is visible. Read as "not a 401, so the token is good", it
 becomes "must be the network" and the ladder runs forever over a configuration mistake. So the
-probe answers three things rather than two — good, token rejected, origin refused — and the third
-stops the ladder and says what has to change, without dropping the stored token: the token is not
-what is wrong, and asking for a new one would send the user after the wrong thing.
+probe answers four things rather than two — good, token rejected, origin refused, and the probe
+itself could not reach the server — and "origin refused" stops the ladder and says what has to
+change, without dropping the stored token: the token is not what is wrong, and asking for a new one
+would send the user after the wrong thing.
+
+**"Could not reach the server" is separated from "good" for the same reason `403` was.** Both keep
+the token and both keep retrying, so the ladder cannot tell them apart and does not need to — but
+they are opposite evidence about everything else, and folding them together makes the one inference
+below unsayable.
+
+**The probe answering "good" while no socket carries anything is the third failure, and it is an
+inference rather than a verdict.** A stuck socket — one that never reaches the `101`, or reaches it
+and then forwards nothing — is dropped by the silence bound above and looks exactly like a phone
+out of range, so the ladder runs forever and the client re-presents the bearer token to whatever is
+answering, once a cycle, with nothing ever said. It is only distinguishable here: the probe reached
+the server over HTTP and the server accepted this token, while the socket carried nothing, which is
+neither the network nor the token. Something in front of the server that does not pass WebSocket
+upgrades is the usual cause. After a few such attempts in a row the client says so, **once**, and
+**keeps retrying** — unlike a `401` or a `403` this is two facts agreeing rather than an answer from
+the server, and a proxy that starts passing upgrades would make it wrong.
+
+**The evidence is a frame that arrived, never the handshake.** A `101` is answered by whatever sits
+in front of the server as readily as by the server itself, so a socket that opened proves nothing
+about the token: the client probes after any socket that carried nothing, including one that opened
+first. That is also what makes a token rotated mid-session — every socket refused at the handshake
+from then on — noticed on the first reconnect rather than a ladder step later.
+
+**A re-attach storm must not become a snapshot storm, and the failure path is where that was
+reachable.** Step 3's snapshot is several process spawns, and the server coalesces concurrent
+builds for one session so that N tabs coming back cost one. A build that FAILS is deliberately not
+shared — one client's flood must not decide the outcome for a client that happened to attach beside
+it — but every joiner is woken by the same rejection, so each of them making its own attempt turned
+one failure into N concurrent capture-panes at the tmux server that was already the problem. A
+joiner looks again before starting one, and joins the retry another joiner has already installed.
 
 ## What is deliberately absent
 

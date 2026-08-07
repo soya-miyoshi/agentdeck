@@ -124,6 +124,25 @@ export const MIN_HEARTBEAT_INTERVAL_MS = 100;
 // one.
 export const MAX_HEARTBEAT_INTERVAL_MS = 60_000;
 
+/**
+ * How many sockets in a row may carry nothing at all before the client says why, once.
+ *
+ * The ladder is right to run forever for a phone that is out of range - that is the case plan 002
+ * calls the normal one. What it must not do is run forever in the case that is NOT the network:
+ * the token probe answers `ok`, so the server is reachable and accepting this token over HTTP,
+ * while every socket either never reaches the 101 or reaches it and forwards nothing. That is the
+ * stuck-CONNECTING loop the watchdog was written for, and until now its only visible effect was a
+ * reconnecting banner and one bearer token re-presented to whatever was answering, once a cycle,
+ * forever, with no diagnosis. The difference is diagnosable from here and from nowhere else, so it
+ * is said.
+ *
+ * The ladder is NOT stopped by it. Unlike a 401 or a 403 this is not a verdict from the server -
+ * it is an inference from two things agreeing - and a proxy that starts passing upgrades, or a
+ * server that finishes starting up, would make it wrong. Said once per run of silence, because the
+ * loop it describes hits this line every few seconds.
+ */
+export const SILENT_ATTEMPTS_BEFORE_DIAGNOSIS = 3;
+
 /** The stated interval if it is usable, the default otherwise. */
 const usableHeartbeatInterval = (stated: unknown): number =>
   typeof stated === "number" &&
@@ -210,6 +229,17 @@ export class Connection {
   #policy: ReconnectPolicy;
   #socket: SocketLike | undefined;
   #opened = false;
+  /**
+   * Whether the CURRENT socket has delivered a frame.
+   *
+   * The boundary the ladder already uses - see `#policy.opened()` - lifted to a field because
+   * `#onClosed` needs it too. A socket that completed the handshake and then said nothing has
+   * proved nothing about the token: the 101 is answered by whatever is in front of the server as
+   * readily as by the server.
+   */
+  #carried = false;
+  /** Whether the silent-socket diagnosis has already been said for this run of silence. */
+  #diagnosed = false;
   #stopped = false;
   #cancelRetry: Cancel | undefined;
   #attachments = new Map<string, Attachment>();
@@ -506,6 +536,7 @@ export class Connection {
 
   #open(status: ConnectionStatus): void {
     this.#opened = false;
+    this.#carried = false;
     this.#heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.#setStatus(status);
     // One socket's close is handled once. The watchdog and the socket's own `closed` callback can
@@ -523,7 +554,6 @@ export class Connection {
     // that completes the handshake and then forwards nothing is exactly what the silence bound
     // exists to catch, and resetting the ladder on the handshake alone turns that into a 250 ms
     // reconnect loop that never backs off and never shows the user a status.
-    let carried = false;
     const socket = this.#deps.connect(this.#deps.token, {
       opened: () => {
         // A finished socket is inert. `close()` only starts the closing handshake, so a socket the
@@ -542,9 +572,12 @@ export class Connection {
       },
       message: (raw) => {
         if (handled) return;
-        if (!carried) {
-          carried = true;
+        if (!this.#carried) {
+          this.#carried = true;
           this.#policy.opened();
+          // A frame arrived, so whatever the diagnosis below described is over. Said again if it
+          // comes back, because by then it is a new outage rather than the same one repeating.
+          this.#diagnosed = false;
         }
         this.#noteTraffic();
         this.#receive(raw);
@@ -595,9 +628,16 @@ export class Connection {
     this.#resetInputWindow(true);
     if (this.#stopped) return;
 
-    // A socket that never opened may be a refusal wearing a network failure's clothes. One that
-    // opened and then dropped cannot be: the server accepted this client seconds ago.
-    if (!this.#opened) {
+    // A socket that carried nothing may be a refusal wearing a network failure's clothes. One that
+    // carried a frame cannot be: the server was talking to this client seconds ago.
+    //
+    // The test is traffic and not the handshake, which is the same boundary the ladder uses. A 101
+    // is answered by whatever sits in front of the server as readily as by the server, and a token
+    // rotated mid-session closes the socket at exactly the moment the last one opened - so reading
+    // "it opened once" as "the token is still good" put the discovery a whole ladder step later
+    // and left the opened-but-silent socket, the one case that is neither the network nor the
+    // token, with nothing to diagnose it from.
+    if (!this.#carried) {
       const verdict = await this.#deps.verifyToken();
       if (verdict === "rejected") {
         this.#policy.closed("token-rejected");
@@ -619,6 +659,10 @@ export class Connection {
         );
         return;
       }
+      // Only for `ok`. `unreachable` retries identically but says the opposite thing: the probe
+      // did not answer either, so the network is the likeliest explanation and asserting a broken
+      // proxy would be a guess presented to the user as a finding.
+      if (verdict === "ok") this.#diagnoseSilence();
     }
     if (this.#stopped) return;
 
@@ -630,6 +674,19 @@ export class Connection {
       if (this.#stopped) return;
       this.#open(this.#status === "reconnecting" ? "reconnecting" : "connecting");
     }, decision.delayMs);
+  }
+
+  /** Say, once, that the thing failing is the socket rather than the network or the token. */
+  #diagnoseSilence(): void {
+    if (this.#diagnosed) return;
+    // `attempts` is retries since the last frame arrived, because `#policy.opened()` is called on
+    // traffic rather than on the handshake. It is therefore already the count this wants.
+    if (this.#policy.attempts < SILENT_ATTEMPTS_BEFORE_DIAGNOSIS) return;
+    this.#diagnosed = true;
+    this.#events.error(
+      undefined,
+      "the server is answering over HTTP and accepting this token, but the connection to it has now failed several times without carrying anything - so what is failing is the socket itself, not the network and not the token. Something in front of the server that does not pass WebSocket upgrades is the usual cause. Reconnecting will keep trying.",
+    );
   }
 
   #sendAttach(sessionId: string): void {
