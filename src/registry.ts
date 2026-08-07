@@ -60,6 +60,24 @@ export class Registry {
 
     const id = sessionId(cwd, agentId);
 
+    // A dead session under our own id, left by a previous run, otherwise makes this a lie.
+    // `createOrAttach` sets `remain-on-exit on`, so a session whose agent exited stays on the
+    // socket; `#meta` is memory only, so after a restart `list()` cannot see it and `reap()` at
+    // boot cannot clear it. tmux would then report `attached: true` and the phone would get a 201
+    // saying "a claude session was already running in <cwd>; you are attached to it rather than to
+    // a new one" - false, with a tab pinned at `exited` and no agent started. A tab that is
+    // confidently wrong is the one output this design refuses, so the corpse goes first.
+    //
+    // Scoped deliberately: `id` is `sessionId(cwd, agent)` for a cwd already checked against the
+    // allowlist above, and the pane must be dead. A live session is left to `createOrAttach`,
+    // and a session at any other path is not ours to touch.
+    const existing = (await this.#tmux.list()).find((entry) => entry.id === id);
+    if (existing?.dead === true && existing.path === cwd) {
+      await this.#tmux.kill(id);
+      this.#meta.delete(id);
+      this.#states.delete(id);
+    }
+
     // Read the neighbours BEFORE creating, so the warning can name what was already there. After
     // the call the new session is itself in the list and would have to be filtered out.
     const neighbours = (await this.list()).filter((s) => s.cwd === cwd && s.id !== id);

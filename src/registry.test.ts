@@ -12,11 +12,11 @@ const SEP = "\u001f";
  * A tmux stand-in that actually models sessions, so create/list/kill can be exercised as a whole
  * rather than one call at a time.
  */
-const fakeTmux = () => {
-  const sessions = new Map<
-    string,
-    { dead: boolean; status: string; created: number; path: string }
-  >();
+type FakeSessions = Map<string, { dead: boolean; status: string; created: number; path: string }>;
+
+// The map is a parameter so a second Tmux can be built over the SAME socket state, which is what
+// a server restart is: the sessions outlive the process that remembered anything about them.
+const fakeTmux = (sessions: FakeSessions = new Map()) => {
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
@@ -121,6 +121,28 @@ void describe("creating sessions", () => {
     assert.equal(second.session.id, first.session.id);
     assert.match(second.warning ?? "", /already running/);
     assert.equal((await registry.list()).length, 1);
+  });
+
+  void test("a dead session left by a previous run is replaced, not reported as already running", async () => {
+    // The restart case. `remain-on-exit on` keeps an exited session on the socket, and `#meta` is
+    // memory only - so after a restart `list()` cannot see it and `reap()` at boot cannot clear
+    // it. Without this the next create attaches to the corpse and answers "already running" with
+    // a tab pinned at `exited` and no agent started.
+    const { registry, die, sessions } = build();
+    const first = await registry.create("/workspace/agentdeck", "claude");
+    die(first.session.id, "exited");
+
+    // A fresh Registry is the restart: same tmux socket, no remembered metadata.
+    const restarted = new Registry(
+      fakeTmux(sessions).tmux,
+      parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } }).profiles,
+      new CwdAllowlist(["/workspace/agentdeck"]),
+    );
+    const second = await restarted.create("/workspace/agentdeck", "claude");
+
+    assert.equal(second.warning, undefined, "the corpse was reported as a running session");
+    assert.equal(second.session.state, "idle", "the new tab is pinned at the dead pane's state");
+    assert.equal((await restarted.list()).length, 1);
   });
 
   void test("the same repo under two agents gets two distinct ids", async () => {
