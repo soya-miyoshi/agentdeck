@@ -1707,3 +1707,39 @@ void describe("a refused origin, a rejected token and a dead network are three a
     assert.deepEqual(outcome.errors, [], "being out of range was asserted to be something else");
   });
 });
+
+void describe("a fixed server does not need the user to know to reload", () => {
+  void test("a wake retries after a forbidden verdict, but never after a rejected token", async () => {
+    // `forbidden` is terminal for the ladder - retrying an origin refusal cannot help - but it was
+    // terminal for the tab too: the operator fixes AGENTDECK_ORIGIN, restarts, and the page stays
+    // dead because nothing in the app can restart a stopped Connection. A deliberate wake is the
+    // signal to try again. A rejected TOKEN is different: the answer is the paste field, not
+    // another attempt with the same credential.
+    const forbidden = harness();
+    forbidden.verdict = "forbidden";
+    forbidden.connection.start();
+    forbidden.last().handlers.closed();
+    await settle();
+    assert.equal(forbidden.connection.status, "forbidden");
+    const socketsBefore = forbidden.sockets.length;
+
+    forbidden.connection.poke();
+    assert.ok(
+      forbidden.sockets.length > socketsBefore,
+      "a wake after an origin refusal did not try again, so a fixed server needs a page reload",
+    );
+
+    const rejected = harness();
+    rejected.verdict = "rejected";
+    rejected.connection.start();
+    rejected.last().handlers.closed();
+    await settle();
+    const afterRejected = rejected.sockets.length;
+    rejected.connection.poke();
+    assert.equal(
+      rejected.sockets.length,
+      afterRejected,
+      "a wake retried a token the server has already rejected",
+    );
+  });
+});

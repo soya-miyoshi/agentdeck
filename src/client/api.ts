@@ -34,10 +34,25 @@ const request = async <T>(token: string, path: string, method = "GET"): Promise<
     method,
     headers: { authorization: `Bearer ${token}` },
   });
-  if (response.status === 401) throw new UnauthorizedError("the server rejected this token");
+  // A status code alone does not say WHO answered. `POST /api/probe` traverses `tailscale serve`,
+  // whatever is on the phone's path, and in development the Vite proxy - and any of them can
+  // answer 401 or 403 for reasons that have nothing to do with this server. The consequences are
+  // not symmetric with being wrong in the other direction: a 403 stops the ladder permanently and
+  // blames AGENTDECK_ORIGIN, and a 401 signs the user out and clears the stored token, which on a
+  // phone cannot be regenerated - recovery means reading ~/.agentdeck/token on the Mac. So both
+  // terminal verdicts require the sentence THIS server writes (src/http.ts). Anything else is a
+  // failure to reach it, which keeps retrying and destroys nothing.
+  const refusal = async (): Promise<string | undefined> =>
+    ((await response.json().catch(() => ({}))) as { error?: string }).error;
+  if (response.status === 401) {
+    const error = await refusal();
+    if (error === "missing or invalid bearer token") throw new UnauthorizedError(error);
+    throw new Error(error ?? "something on the way answered 401");
+  }
   if (response.status === 403) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new ForbiddenError(body.error ?? "the server refused this origin");
+    const error = await refusal();
+    if (error === "origin not allowed") throw new ForbiddenError(error);
+    throw new Error(error ?? "something on the way answered 403");
   }
   if (!response.ok) {
     // Errors are sentences the server wrote for a person. Rendered verbatim, because rewording a

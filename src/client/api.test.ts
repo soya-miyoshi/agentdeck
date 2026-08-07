@@ -118,9 +118,26 @@ void describe("verifyToken tells the four answers apart", () => {
     assert.equal(await verifyToken(token), "forbidden");
   });
 
-  void test("a 401 is a rejected token", async () => {
-    answerWith(401, { error: "unauthorized" });
+  void test("a 401 is a rejected token, when the SERVER is the one saying so", async () => {
+    answerWith(401, { error: "missing or invalid bearer token" });
     assert.equal(await verifyToken(token), "rejected");
+  });
+
+  void test("a 401 from something on the way is not a reason to destroy the token", async () => {
+    // `rejected` reaches App.vue's signOut(), which clears the stored token - and a phone cannot
+    // regenerate it: recovery means reading ~/.agentdeck/token on the Mac. A proxy auth challenge
+    // or a captive portal must not be able to do that, so the terminal verdict requires the
+    // sentence this server writes.
+    answerWith(401, { error: "Proxy Authentication Required" });
+    assert.equal(await verifyToken(token), "unreachable");
+  });
+
+  void test("a 403 from something on the way keeps the ladder running", async () => {
+    // `forbidden` stops the ladder permanently and blames AGENTDECK_ORIGIN. `POST /api/probe`
+    // traverses tailscale serve and whatever is on the phone's path, so a Tailscale ACL change or
+    // a proxy refusing an unknown POST target would otherwise kill the tab and misname the cause.
+    answerWith(403, { error: "Forbidden" });
+    assert.equal(await verifyToken(token), "unreachable");
   });
 
   void test("an unreachable server keeps the token, and does not claim to have reached it", async () => {
@@ -143,7 +160,7 @@ void describe("the error types the page branches on", () => {
   void test("403 raises ForbiddenError and 401 raises UnauthorizedError", async () => {
     answerWith(403, { error: "origin not allowed" });
     await assert.rejects(async () => await fetchSessions(token), ForbiddenError);
-    answerWith(401, { error: "unauthorized" });
+    answerWith(401, { error: "missing or invalid bearer token" });
     await assert.rejects(async () => await fetchSessions(token), UnauthorizedError);
   });
 });

@@ -534,6 +534,13 @@ export class Connection {
     // beside a ladder that was still deciding what to do. `online` fires at exactly the moment a
     // probe started on a dead network is waiting for, so this was the common case rather than a
     // race worth shrugging at.
+    // `forbidden` is terminal for the LADDER - retrying an origin refusal cannot help - but it
+    // must not be terminal for the tab. The operator fixes AGENTDECK_ORIGIN and restarts, and
+    // nothing in the app could restart a stopped Connection: the user had to know to reload the
+    // page. A deliberate wake is exactly the signal to try again, so it clears that one stop.
+    // `rejected` is different and stays stopped: the token is wrong, and the answer is the paste
+    // field rather than another attempt with the same credential.
+    if (this.#stopped && this.#status === "forbidden") this.#stopped = false;
     if (this.#stopped || this.#socket !== undefined || this.#probing) return;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
