@@ -1,0 +1,326 @@
+// m0/supervisor-crash-test: what actually happens when the node process dies on this Mac.
+//
+// NOTHING RESTARTS THE SERVER. There is no supervisor, no restart loop, no launchd agent and no
+// watchdog on this machine, and this file does not add one - answering that is m4/launchd-watchdog
+// (plan 006). Every restart below is this test process starting the server again by hand, in the
+// same way a person would have to, and the assertions in between are what an unattended Mac looks
+// like in the window before that person arrives: tmux still holding every agent, and nothing
+// answering the port.
+//
+// What it pins down, because "the sessions survive" is only half the story:
+//   - the tmux sessions survive with the same ids and the same pane pids, so the work is intact
+//   - the registry's metadata does not survive, and `Registry.list()` is gated on it, so a
+//     surviving session is not listed AT ALL rather than listed under its raw id
+//   - therefore GET /api/sessions is empty and GET /api/cwds reports no sessions in the directory
+//   - the per-session hook secret does not survive either, so the surviving agent's hook POSTs
+//     are 401 - and recreating the session does NOT fix that, because `new-session -A` attaches
+//     to the live session and never re-injects an environment, so the running process keeps a
+//     secret the new registry has never heard of
+//
+// The server is spawned as a process rather than driven in-process, for the same reason
+// src/host-boundary.test.ts does it: SIGKILL of a real pid is the event being tested.
+
+import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const serverPath = fileURLToPath(new URL("server.ts", import.meta.url));
+const socket = `agentdeck-crash-${String(process.pid)}`;
+
+// `realpathSync`, because on macOS `os.tmpdir()` is `/var/folders/...`, a symlink into
+// `/private`. tmux reports `#{session_path}` resolved, and `Registry.list()` requires the
+// allowlist entry and the remembered cwd to agree with it exactly.
+const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+
+const home = temp("agentdeck-crash-home-");
+const work = temp("agentdeck-crash-work-");
+const conf = temp("agentdeck-crash-conf-");
+const secretFile = join(conf, "secret-seen-by-the-agent");
+
+// The pane writes its own AGENTDECK_SECRET where the test can read it, then stays alive. This is
+// the only way to get at it: `createOrAttach` deliberately unsets the variable from the tmux
+// session environment in the same invocation that creates the session, so `show-environment -t`
+// has nothing. Reading it from inside the pane is exactly what a real hook does.
+const profiles = join(conf, "agents.json");
+writeFileSync(
+  profiles,
+  JSON.stringify({
+    shell: {
+      command: "/bin/sh",
+      args: ["-c", `printenv AGENTDECK_SECRET > ${secretFile}; exec sleep 100000`],
+    },
+  }),
+);
+
+let port = 0;
+let token = "";
+let child: ChildProcess | undefined;
+
+const freePort = async (): Promise<number> =>
+  await new Promise((resolve) => {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const found = typeof address === "object" && address !== null ? address.port : 0;
+      probe.close(() => {
+        resolve(found);
+      });
+    });
+  });
+
+/** Start the server the way a person does, and resolve once it is listening. */
+const start = async (): Promise<ChildProcess> => {
+  const started = spawn(process.execPath, [serverPath], {
+    env: {
+      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+      TMUX_SOCKET: socket,
+      HOME: home,
+      AGENTDECK_PORT: String(port),
+      AGENTDECK_MOUNTS: work,
+      AGENTDECK_PROFILES: profiles,
+      // LANG is not decoration. `Tmux.list()` formats its fields with \u001f as the separator,
+      // and tmux renders that byte as `_` unless it believes the locale is UTF-8 - so with LANG
+      // unset every field of every session parses into one string, `list()` reports a session
+      // with an empty path, and nothing is ever listed. Passed here for the same reason PATH is:
+      // this test is about the crash, not about that. It is worth knowing at m4, where launchd
+      // hands a job an environment with no LANG at all.
+      LANG: process.env["LANG"] ?? "en_US.UTF-8",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  started.stdout.setEncoding("utf8");
+  started.stderr.setEncoding("utf8");
+  started.stderr.on("data", (chunk: string) => (stderr += chunk));
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`the server did not listen within 20s\n${stdout}\n${stderr}`));
+    }, 20_000);
+    timer.unref();
+    started.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("listening on")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    started.on("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`the server exited ${String(code)} instead of listening\n${stderr}`));
+    });
+  });
+  child = started;
+  return started;
+};
+
+/** SIGKILL it and wait for the pid to be gone. Returns the signal the kernel reports. */
+const crash = async (target: ChildProcess): Promise<NodeJS.Signals | null> => {
+  const exited = new Promise<NodeJS.Signals | null>((resolve) => {
+    target.on("exit", (_code, sig) => {
+      resolve(sig);
+    });
+  });
+  target.kill("SIGKILL");
+  const signal = await exited;
+  if (child === target) child = undefined;
+  return signal;
+};
+
+const api = async (path: string, init: RequestInit = {}): Promise<Response> =>
+  await fetch(`http://127.0.0.1:${String(port)}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${token}`, ...init.headers },
+  });
+
+/** `<session id> <pane pid>` for everything on our socket, so survival is pid-level, not name-level. */
+const panes = (): string[] =>
+  execFileSync("tmux", ["-L", socket, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], {
+    encoding: "utf8",
+  })
+    .trim()
+    .split("\n")
+    .filter((line) => line !== "");
+
+before(async () => {
+  port = await freePort();
+});
+
+after(() => {
+  if (child !== undefined) child.kill("SIGKILL");
+  try {
+    execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+  } catch {
+    // Already gone: the desired end state.
+  }
+  for (const dir of [home, work, conf]) rmSync(dir, { recursive: true, force: true });
+});
+
+void describe("the node process is killed and nothing brings it back", () => {
+  let id = "";
+  let paneLine = "";
+  let secret = "";
+
+  void test("a session created beforehand is listed, in /api/cwds, and its hooks are accepted", async () => {
+    const first = await start();
+    token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
+
+    const created = await api("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cwd: work, agent: "shell" }),
+    });
+    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
+    const body = (await created.json()) as { session: { id: string } };
+    id = body.session.id;
+
+    paneLine = panes().find((line) => line.startsWith(`${id} `)) ?? "";
+    assert.notEqual(paneLine, "", "tmux has no pane for the session it just created");
+
+    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
+    assert.deepEqual(
+      listed.sessions.map((s) => s.id),
+      [id],
+    );
+
+    const cwds = (await (await api("/api/cwds")).json()) as {
+      cwds: { path: string; sessions: string[] }[];
+    };
+    assert.deepEqual(cwds.cwds.find((c) => c.path === work)?.sessions, [id]);
+
+    // The pane wrote its own AGENTDECK_SECRET out; give it the moment that takes.
+    for (let i = 0; i < 100 && secret === ""; i++) {
+      try {
+        secret = readFileSync(secretFile, "utf8").trim();
+      } catch {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    assert.match(secret, /^[A-Za-z0-9_-]{20,}$/, "the pane never saw a secret");
+
+    const hook = await fetch(
+      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
+        body: JSON.stringify({ hook_event_name: "Notification" }),
+      },
+    );
+    assert.equal(hook.status, 200, "the hook route rejected the secret its own session was given");
+
+    // SIGKILL, which is the crash: no shutdown handler runs, nothing is detached, nothing is
+    // saved. NOTHING RESTARTS IT. What follows is the unattended Mac.
+    assert.equal(await crash(first), "SIGKILL");
+  });
+
+  void test("nothing is listening afterwards, because nothing supervises the node process", async () => {
+    await assert.rejects(
+      async () => await fetch(`http://127.0.0.1:${String(port)}/api/health`),
+      "something answered the port after the server was killed - this repo has no supervisor",
+    );
+  });
+
+  void test("the tmux session and its process survive the crash unchanged", () => {
+    // tmux is a daemon of its own, owned by the user: the server dying is not an event it sees.
+    // Same id AND same pane pid, so this is the original process still running, not a new one.
+    assert.ok(
+      panes().includes(paneLine),
+      `the session did not survive; tmux holds ${panes().join(", ")}`,
+    );
+  });
+
+  void test("started again by hand, the survivor is not listed at all - the metadata is gone", async () => {
+    // Not "listed under its raw id": m0/host-boundary gated `Registry.list()` on BOTH the cwd
+    // allowlist and `#meta`, and `#meta` is memory only, so a session that outlived the process
+    // that created it drops out of every route. The work is running and the server cannot see it.
+    await start();
+    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
+    assert.deepEqual(listed.sessions, [], "the surviving session was listed after a restart");
+
+    const cwds = (await (await api("/api/cwds")).json()) as {
+      cwds: { path: string; sessions: string[] }[];
+    };
+    assert.deepEqual(
+      cwds.cwds.find((c) => c.path === work)?.sessions,
+      [],
+      "GET /api/cwds still reports the session it can no longer see",
+    );
+
+    // And it is not reaped or killed either - `reap()` goes through the same `list()`. Left alone.
+    assert.ok(panes().includes(paneLine), "the restart disturbed a session it cannot see");
+  });
+
+  void test("the surviving agent's hooks are rejected as unsigned, so it never reports waiting", async () => {
+    const hook = await fetch(
+      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
+        body: JSON.stringify({ hook_event_name: "Notification" }),
+      },
+    );
+    assert.equal(hook.status, 401, "a secret the new process never generated was accepted");
+  });
+
+  void test("recreating reattaches to the same process - and does not restore the hook path", async () => {
+    const created = await api("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cwd: work, agent: "shell" }),
+    });
+    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
+    const body = (await created.json()) as { session: { id: string }; warning?: string };
+    assert.equal(body.session.id, id, "the id is not stable across a restart");
+    assert.match(body.warning ?? "", /already running/, "this was a new session, not a reattach");
+    assert.ok(panes().includes(paneLine), "the reattach replaced the running process");
+
+    const listed = (await (await api("/api/sessions")).json()) as { sessions: { id: string }[] };
+    assert.deepEqual(
+      listed.sessions.map((s) => s.id),
+      [id],
+      "the session is still invisible after being recreated",
+    );
+
+    // The unsolved half, sharper than the TODO text has it. `new-session -A` attaches to the live
+    // session and injects no environment, so the process that survived still holds the OLD secret
+    // while the registry has minted a NEW one it has no way to deliver. Recreating the session
+    // does not bring that tab's `waiting` back; only killing and restarting the agent does.
+    const hook = await fetch(
+      `http://127.0.0.1:${String(port)}/api/hooks/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-agentdeck-secret": secret },
+        body: JSON.stringify({ hook_event_name: "Notification" }),
+      },
+    );
+    assert.equal(hook.status, 401, "the surviving process's secret works again after a recreate");
+  });
+});
+
+void describe("plan 003 says so in the plan, not only here", () => {
+  void test("M0 states plainly that nothing restarts the server", async () => {
+    const plan = await readFile(new URL("../plans/003-milestones.md", import.meta.url), "utf8");
+    const m0 = plan.slice(plan.indexOf("## M0"), plan.indexOf("## M1"));
+    assert.match(m0, /Nothing supervises Node/);
+    assert.match(m0, /nothing restart(s|ed) the (node |Node )?(server|process)/i);
+    // The metadata half, which is the part a reader would otherwise assume M1's "same session
+    // still running with the same id" covers.
+    assert.match(m0, /m0\/supervisor-crash-test/);
+    assert.match(m0, /not listed/i);
+  });
+
+  void test("M1's done-when no longer claims a restarted server lists the survivor", async () => {
+    // It said "creating a session, restarting the server, and listing again shows the same session
+    // still running with the same id". The test above shows that listing is empty.
+    const plan = await readFile(new URL("../plans/003-milestones.md", import.meta.url), "utf8");
+    const m1 = plan.slice(plan.indexOf("## M1"), plan.indexOf("## M2"));
+    assert.match(m1, /recreat/i, "M1 still describes a restart that lists the session by itself");
+  });
+});

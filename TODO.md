@@ -54,10 +54,16 @@ Mark an item `[x]` when its branch is merged.
       the server is started again — with the plain statement, in the test and in plan 003, that
       nothing restarted it.
       **Known gap, unsolved:** the sessions survive but their metadata does not. `cwd`, `agent`
-      and the per-session hook secret live only in the registry's memory, so a session that
-      outlives the server comes back named by its raw id, vanishes from `GET /api/cwds` and from
-      the two-agents-in-one-tree warning, and has every hook POST rejected as unsigned — it never
-      reports `waiting` again. True of a crash and of any deliberate restart (plan 006).
+      and the per-session hook secret live only in the registry's memory. Measured by
+      `src/supervisor-crash.test.ts` rather than assumed: since `m0/host-boundary` gated
+      `Registry.list()` on `#meta` as well as on the cwd allowlist, a session that outlives the
+      server is **not listed at all** — not listed under its raw id — so it is absent from
+      `GET /api/sessions`, from `GET /api/cwds` and from the two-agents-in-one-tree warning, while
+      still running untouched in tmux. Every hook POST from it is rejected as unsigned, and
+      recreating the session does not fix that: `new-session -A` attaches to the live session and
+      injects no environment, so the process keeps a secret the new registry never minted. It
+      never reports `waiting` again until the agent itself is restarted. True of a crash and of
+      any deliberate restart (plan 006).
 
 - [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux 3.7b is
       the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
