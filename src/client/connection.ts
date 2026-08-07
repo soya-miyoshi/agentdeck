@@ -115,7 +115,13 @@ export const HEARTBEAT_GRACE_INTERVALS = 2;
  * make its bounds observable in a test's lifetime, and that has to keep working.
  */
 export const MIN_HEARTBEAT_INTERVAL_MS = 100;
-export const MAX_HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+// A small multiple of the default, not a generous ceiling. The stated interval sets the silence
+// bound, so a large in-range value pushes the moment the client notices a dead socket out with it -
+// at five minutes, the grace multiplier put that at ten, including for the stuck-CONNECTING window
+// this watchdog exists for. Ten minutes of a tab reporting a state nobody is updating is the
+// confidently-wrong tab plan 002 refuses; sixty seconds covers any deployment that would choose
+// one.
+export const MAX_HEARTBEAT_INTERVAL_MS = 60_000;
 
 /** The stated interval if it is usable, the default otherwise. */
 const usableHeartbeatInterval = (stated: unknown): number =>
@@ -153,6 +159,13 @@ export interface ConnectionDeps {
    */
   verifyToken: () => Promise<boolean>;
   schedule?: (run: () => void, delayMs: number) => Cancel;
+  /**
+   * The source of the reconnect ladder's jitter.
+   *
+   * Injected only so a test can pin it; production passes nothing. The jitter is what keeps N
+   * clients woken by one stalled server from walking the ladder in lockstep - see backoff.ts.
+   */
+  random?: () => number;
 }
 
 export interface ConnectionEvents {
@@ -186,7 +199,7 @@ export class Connection {
   #deps: ConnectionDeps;
   #events: ConnectionEvents;
   #schedule: (run: () => void, delayMs: number) => Cancel;
-  #policy = new ReconnectPolicy();
+  #policy: ReconnectPolicy;
   #socket: SocketLike | undefined;
   #opened = false;
   #stopped = false;
@@ -206,6 +219,9 @@ export class Connection {
   #overflowed = false;
   #framesThisWindow = 0;
   #cancelWindow: Cancel | undefined;
+  // Reset per socket, not carried. A value stated by one socket describing one server's timer says
+  // nothing about the next socket, and it governs the window BEFORE that socket's first frame - so
+  // carrying it meant one frame could stretch every later socket's blind window too.
   #heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
   #cancelSilence: Cancel | undefined;
   /** Drop the current socket as if it had closed. Undefined when there is no socket to drop. */
@@ -215,6 +231,7 @@ export class Connection {
     this.#deps = deps;
     this.#events = events;
     this.#schedule = deps.schedule ?? defaultSchedule;
+    this.#policy = new ReconnectPolicy(deps.random);
   }
 
   get status(): ConnectionStatus {
@@ -481,6 +498,7 @@ export class Connection {
 
   #open(status: ConnectionStatus): void {
     this.#opened = false;
+    this.#heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.#setStatus(status);
     // One socket's close is handled once. The watchdog and the socket's own `closed` callback can
     // both fire - a half-open socket that finally gets an RST minutes later is the ordinary case -

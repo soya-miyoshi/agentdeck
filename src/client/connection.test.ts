@@ -111,6 +111,9 @@ const harness = (): Harness => {
         };
       },
       verifyToken: () => Promise.resolve(state.tokenAccepted),
+      // The ladder's jitter pinned to its top, so these tests still assert the delays the ladder
+      // is designed around rather than a draw. The spread itself is tested in backoff.test.ts.
+      random: () => 1,
       schedule: (run, delayMs) => {
         const timer = { delayMs, run };
         state.timers.push(timer);
