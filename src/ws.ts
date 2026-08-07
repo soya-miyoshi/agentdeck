@@ -97,7 +97,15 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     });
 
     socket.on("message", (raw: Buffer) => {
-      void handleMessage(client, raw.toString("utf8"));
+      // The third fire-and-forget site, and the one left behind when the two `hub.sync()` calls
+      // were hardened. handleMessage reaches capture-pane through the snapshot an attach builds,
+      // and Tmux rethrows anything that is not a missing session or an empty server - so one
+      // failing capture became an unhandled rejection, which exits Node, on a process nothing
+      // restarts. A tmux failure costs this message, not every attached phone's socket.
+      handleMessage(client, raw.toString("utf8")).catch((error: unknown) => {
+        console.error("agentdeck: ws message failed:", error);
+        send(client.socket, { t: "error", message: "that request failed; see the server log" });
+      });
     });
 
     socket.on("close", () => {

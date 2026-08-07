@@ -553,6 +553,41 @@ void describe("what a real tmux server hands a real pane", () => {
     }
   });
 
+  void test("the client carrying the secrets never starts the tmux server", async () => {
+    // Whichever client starts a tmux server donates its whole environment to that server's GLOBAL
+    // environment, and the create chain runs with AGENTDECK_SECRET and every profile key in its
+    // environment by design. The per-session unsets at the end of that chain clear the SESSION
+    // environment and do nothing about the global one. ensureServer was called once at boot,
+    // which was enough only while the tmux server could not outlive the node process - a server
+    // that dies with its last session and is restarted by a create gets no such setting.
+    //
+    // Verified by hand on tmux 3.7b before it was fixed: with no server on the socket, that exact
+    // chain left `show-environment -g` printing the secret and the API key, and a pane forked
+    // afterwards saw both.
+    const fresh = `${socket}-nosrv`;
+    const freshTmux = new Tmux({ socket: fresh });
+    try {
+      await freshTmux.createOrAttach("secretprobe", tmpdir(), "/bin/sh", ["-c", "sleep 5"], {
+        AGENTDECK_SECRET: "leak-canary-value",
+        AGENTDECK_SESSION_ID: "secretprobe",
+      });
+      const globals = execFileSync("tmux", ["-L", fresh, "show-environment", "-g"], {
+        encoding: "utf8",
+      });
+      assert.doesNotMatch(
+        globals,
+        /leak-canary-value/,
+        "the secret reached the tmux server's global environment, where every pane inherits it",
+      );
+    } finally {
+      try {
+        execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
   void test("a server we did not start does not hand its environment to our panes", async () => {
     // The case the first version of this branch documented as unreachable and left open: with a
     // live server already on the socket, `start-server` is a no-op, so building the CLIENT's

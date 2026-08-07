@@ -167,6 +167,13 @@ export class Tmux {
         await run("tmux", ["-L", this.socket, ...args], {
           encoding: "utf8",
           env: { ...baseEnv(), ...extra },
+          // execFile's default is 1MB, and `capture-pane -e` over HISTORY_LINES is agent-sized
+          // output: 2000 lines with escape sequences goes past that without trying, and a session
+          // that wants to can do it deliberately. Exceeding it rejects with
+          // ERR_CHILD_PROCESS_STDIO_MAXBUFFER, which is neither a missing session nor an empty
+          // server, so it propagates - and a snapshot is built on the attach path. Sized for the
+          // capture rather than left implicit.
+          maxBuffer: 16 * 1024 * 1024,
         }));
   }
 
@@ -188,6 +195,19 @@ export class Tmux {
   ): Promise<{ attached: boolean }> {
     const existed = await this.has(id);
     if (!existed) {
+      // Make sure a server EXISTS before the client carrying the secrets runs, because whichever
+      // client starts the tmux server donates its whole environment to the server's GLOBAL
+      // environment - and the chain below runs with `AGENTDECK_SECRET` and every profile key in
+      // its environment by design. The per-session unsets at the end of that chain clear the
+      // SESSION environment; they do nothing about the global one. Verified by hand on tmux 3.7b:
+      // run that exact chain against a socket with no server and `show-environment -g` prints the
+      // secret and the API key, and every pane forked afterwards inherits both.
+      //
+      // ensureServer is idempotent and passes no `extra`, so the server is always started by a
+      // client holding nothing but `baseEnv()`. It was called once at boot, which was enough only
+      // while the tmux server could not outlive it - `exit-empty off` is set on OUR server, but a
+      // server that dies with its last session and is restarted by a create gets no such setting.
+      await this.ensureServer();
       // -d so creating a session does not attach this process to it. The VALUES never appear in
       // an argument, and that is the point of the shape below.
       //
