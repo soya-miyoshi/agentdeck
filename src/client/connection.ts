@@ -70,7 +70,32 @@ export const MAX_INPUT_FRAME_BYTES = 60 * 1024;
 export const INPUT_WINDOW_MS = 1000;
 export const MAX_INPUT_FRAMES_PER_WINDOW = 40;
 
+/**
+ * The most input bytes that may sit in the queue waiting for room in a window.
+ *
+ * `input()` is not only the keyboard. TerminalPane wires xterm's `onData` straight in, and xterm
+ * fires `onData` for the replies the terminal owes to escape sequences the AGENT wrote - DSR, DA1,
+ * DA2, DECRQM, the window-op reports. An agent that writes `\e[6n` in a loop is a producer nothing
+ * rate-limits, and the drain here is fixed, so without a bound the queue grows until the tab dies.
+ * Past the bound the loss is stated rather than silent, because input that is dropped without a
+ * word is indistinguishable from input the pty ignored.
+ */
+export const MAX_PENDING_INPUT_BYTES = 8 * 1024 * 1024;
+
 const encoder = new TextEncoder();
+
+/**
+ * One queued piece of input, with the serialised size it will cost, and the `input()` call it came
+ * from so a discarded tail can be told apart from a discarded whole.
+ */
+interface PendingInput {
+  sessionId: string;
+  data: string;
+  /** Bytes this piece adds to a frame's `data` field, excluding the surrounding quotes. */
+  cost: number;
+  /** The `input()` calls whose pieces this entry carries, oldest first. */
+  groups: number[];
+}
 
 export interface ConnectionDeps {
   token: string;
@@ -126,8 +151,13 @@ export class Connection {
   #cancelRetry: Cancel | undefined;
   #attachments = new Map<string, Attachment>();
   #status: ConnectionStatus = "closed";
-  /** Serialised `input` frames waiting for room in the window, oldest first. */
-  #pendingInput: string[] = [];
+  /** Pieces of input waiting for room in the window, oldest first. */
+  #pendingInput: PendingInput[] = [];
+  #pendingBytes = 0;
+  /** `input()` calls that have had at least one piece released while another still waits. */
+  #releasedGroups = new Set<number>();
+  #nextGroup = 0;
+  #overflowed = false;
   #framesThisWindow = 0;
   #cancelWindow: Cancel | undefined;
 
@@ -157,7 +187,7 @@ export class Connection {
     this.#cancelRetry = undefined;
     this.#socket?.close();
     this.#socket = undefined;
-    this.#resetInputWindow();
+    this.#resetInputWindow(false);
     this.#setStatus("closed");
   }
 
@@ -204,12 +234,14 @@ export class Connection {
    * as one; what it does not survive is a frame going missing from the middle.
    */
   input(sessionId: string, data: string): void {
+    const group = this.#nextGroup++;
     let rest = data;
     while (rest.length > 0) {
       const cut = this.#cut(sessionId, rest);
-      this.#queueInput({ t: "input", sessionId, data: rest.slice(0, cut) });
+      this.#queueInput(sessionId, rest.slice(0, cut), group);
       rest = rest.slice(cut);
     }
+    this.#flushInput();
   }
 
   /** How many characters of `data` fit in one frame: the largest prefix under the cap. */
@@ -233,18 +265,41 @@ export class Connection {
     return lo;
   }
 
-  #queueInput(message: ClientMessage): void {
-    this.#pendingInput.push(JSON.stringify(message));
-    this.#flushInput();
+  /** The bytes an `input` frame costs before any `data`: the envelope and the empty string. */
+  #envelopeBytes(sessionId: string): number {
+    return encoder.encode(JSON.stringify({ t: "input", sessionId, data: "" })).length;
+  }
+
+  #queueInput(sessionId: string, data: string, group: number): void {
+    // JSON escaping is per character, so the cost of a joined string is the sum of the parts'
+    // costs - and `#cut` never ends a piece on a lone high surrogate, so no pair is escaped twice.
+    const cost = encoder.encode(JSON.stringify(data)).length - 2;
+    if (this.#pendingBytes + cost > MAX_PENDING_INPUT_BYTES) {
+      // Only ever the agent's own terminal replies or a paste far past what a person makes. Said
+      // once per overflow, because the loop that caused it will hit this line thousands of times.
+      if (!this.#overflowed) {
+        this.#overflowed = true;
+        this.#events.error(
+          sessionId,
+          "input is arriving faster than it can be sent and some of it has been dropped - if the agent is printing escape sequences in a loop, interrupt it",
+        );
+      }
+      return;
+    }
+    this.#pendingBytes += cost;
+    this.#pendingInput.push({ sessionId, data, cost, groups: [group] });
+  }
+
+  /** Whether a frame handed to the socket now would actually reach the server. */
+  #canSend(): boolean {
+    // `#socket` is assigned synchronously by `#open`, before the socket is OPEN, and
+    // `browserSocket.send` silently discards anything written while it is still CONNECTING. Draining
+    // into that window destroys the head of a paste and delivers the tail.
+    return this.#socket !== undefined && this.#opened;
   }
 
   #flushInput(): void {
-    if (this.#socket === undefined) {
-      // The same rule as #send: nothing is held across a disconnect, because a keystroke arriving
-      // seconds later lands in whatever the agent is doing by then.
-      this.#pendingInput.length = 0;
-      return;
-    }
+    if (!this.#canSend()) return;
     while (this.#pendingInput.length > 0 && this.#framesThisWindow < MAX_INPUT_FRAMES_PER_WINDOW) {
       if (this.#framesThisWindow === 0) {
         this.#cancelWindow = this.#schedule(() => {
@@ -254,8 +309,40 @@ export class Connection {
         }, INPUT_WINDOW_MS);
       }
       this.#framesThisWindow += 1;
-      this.#socket.send(this.#pendingInput.shift() as string);
+      const frame = this.#takeFrame();
+      for (const group of frame.groups) this.#releasedGroups.add(group);
+      this.#socket?.send(
+        JSON.stringify({ t: "input", sessionId: frame.sessionId, data: frame.data }),
+      );
     }
+    if (this.#pendingInput.length === 0) this.#releasedGroups.clear();
+  }
+
+  /**
+   * The next frame to send: as many consecutive pieces for the same session as fit in one.
+   *
+   * The budget above is one frame per slot regardless of how few bytes it carries, and xterm turns
+   * one `\e[6n` the agent wrote into one eight-byte `onData` event. Without coalescing, 200,000 of
+   * those hold the queue for eighty minutes and the user's Ctrl-C waits behind every one of them.
+   * A PTY has no notion of message boundaries, so joining them is the same byte stream.
+   */
+  #takeFrame(): PendingInput {
+    const head = this.#pendingInput.shift() as PendingInput;
+    this.#pendingBytes -= head.cost;
+    const room = MAX_INPUT_FRAME_BYTES - this.#envelopeBytes(head.sessionId);
+    let used = head.cost;
+    const parts = [head.data];
+    while (this.#pendingInput.length > 0) {
+      const next = this.#pendingInput[0] as PendingInput;
+      if (next.sessionId !== head.sessionId || used + next.cost > room) break;
+      this.#pendingInput.shift();
+      this.#pendingBytes -= next.cost;
+      used += next.cost;
+      parts.push(next.data);
+      if (next.groups[0] !== head.groups.at(-1)) head.groups.push(next.groups[0] as number);
+    }
+    head.data = parts.join("");
+    return head;
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
@@ -298,6 +385,8 @@ export class Connection {
         // matches and its buffer still covers that point, and a snapshot otherwise - and the
         // snapshot case is the common one after the phone has been asleep.
         for (const sessionId of this.#attachments.keys()) this.#sendAttach(sessionId);
+        // Anything typed during the CONNECTING window is still queued rather than destroyed.
+        this.#flushInput();
       },
       message: (raw) => {
         this.#receive(raw);
@@ -309,8 +398,27 @@ export class Connection {
   }
 
   /** A new socket starts a new budget, and nothing queued for the old one is still wanted. */
-  #resetInputWindow(): void {
+  #resetInputWindow(report: boolean): void {
+    if (report) {
+      // A paste that was cut into frames can be half applied: the frames already sent have reached
+      // the pty and run, and the rest are about to be thrown away. Silence there is the worst
+      // outcome - it looks exactly like a paste that never started, so the user pastes again and
+      // the lines that already ran run twice.
+      const cut = new Set<string>();
+      for (const entry of this.#pendingInput) {
+        if (entry.groups.some((group) => this.#releasedGroups.has(group))) cut.add(entry.sessionId);
+      }
+      for (const sessionId of cut) {
+        this.#events.error(
+          sessionId,
+          "the connection dropped part-way through sending what you pasted, so only the beginning of it reached the terminal - check what ran before pasting again",
+        );
+      }
+    }
     this.#pendingInput.length = 0;
+    this.#pendingBytes = 0;
+    this.#releasedGroups.clear();
+    this.#overflowed = false;
     this.#framesThisWindow = 0;
     this.#cancelWindow?.();
     this.#cancelWindow = undefined;
@@ -318,7 +426,7 @@ export class Connection {
 
   async #onClosed(): Promise<void> {
     this.#socket = undefined;
-    this.#resetInputWindow();
+    this.#resetInputWindow(true);
     if (this.#stopped) return;
 
     // A socket that never opened may be a rejected token wearing a network failure's clothes.

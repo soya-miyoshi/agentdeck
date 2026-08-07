@@ -317,6 +317,85 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     }
     assert.equal(joined(released()), pasted);
   });
+
+  void test("an agent's own terminal replies cannot starve a keystroke", () => {
+    // `input()` is not only the keyboard. TerminalPane wires xterm's onData straight in, and xterm
+    // fires onData for the replies it owes to escape sequences the AGENT wrote - one event per
+    // `\e[6n`. Paced one frame per slot regardless of size, 200,000 eight-byte replies hold the
+    // window for over an hour, and Ctrl-C is exactly what a person reaches for by then.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    for (let i = 0; i < 200_000; i += 1) h.connection.input("a", "\u001b[24;80R");
+    h.connection.input("a", "\u0003");
+
+    const released = (): Record<string, unknown>[] =>
+      sentMessages(h.last()).filter((message) => message["t"] === "input");
+    let windows = 0;
+    while (h.timers.length > 0 && !joined(released()).endsWith("\u0003")) {
+      h.fire();
+      windows += 1;
+      assert.ok(windows < 40, "the interrupt was still queued a second later");
+    }
+    assert.ok(joined(released()).endsWith("\u0003"), "the interrupt never reached the pty");
+    for (const frame of released()) {
+      assert.ok(frameBytes(frame) <= MAX_INPUT_FRAME_BYTES, "coalescing exceeded the frame cap");
+    }
+  });
+
+  void test("the queue is bounded, and what it drops it says out loud", () => {
+    // The producer is an agent in a loop; the drain is fixed. Unbounded, the tab dies instead.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    const megabyte = "x".repeat(1024 * 1024);
+    for (let i = 0; i < 64; i += 1) h.connection.input("a", megabyte);
+    assert.equal(
+      h.errors.length,
+      1,
+      "the dropped input was not reported, or was reported per piece",
+    );
+    assert.match(h.errors[0] as string, /dropped/);
+  });
+
+  void test("input typed before the socket opens is held, not destroyed", () => {
+    // `#socket` is assigned before the socket is OPEN, and browserSocket.send silently discards
+    // anything written while it is still CONNECTING. Draining into that window loses the head of a
+    // paste and delivers the tail, so the pty runs the middle of what was pasted.
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    h.connection.input("a", "echo hello\r");
+    assert.deepEqual(
+      sentMessages(h.last()).filter((message) => message["t"] === "input"),
+      [],
+      "input went out while the socket was still connecting",
+    );
+    h.last().handlers.opened();
+    assert.deepEqual(
+      joined(sentMessages(h.last()).filter((message) => message["t"] === "input")),
+      "echo hello\r",
+    );
+  });
+
+  void test("a paste cut short by a disconnect is reported rather than silently truncated", () => {
+    // Frames 1-40 have already been applied to the shell; the rest are discarded by the reset. A
+    // silent discard is indistinguishable from a paste that never started, so the user pastes
+    // again and the lines that already ran run twice.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    h.connection.input(
+      "a",
+      "a line of a pasted build log, about sixty bytes long\n".repeat(80_000),
+    );
+    h.last().handlers.closed();
+    assert.equal(h.errors.length, 1);
+    assert.match(h.errors[0] as string, /only the beginning of it reached the terminal/);
+  });
 });
 
 void describe("position tracking across a reconnect", () => {
