@@ -476,6 +476,19 @@ void describe("capture and repaint", () => {
     assert.deepEqual(calls[1]?.slice(-3), ["-t", "/dev/ttys010", "-R"]);
   });
 
+  void test("every attached client is refreshed, not the concatenated list as one target", async () => {
+    // Anyone can attach a second client after this server did - the operator, or the agent. Then
+    // list-clients prints two lines, and refresh-client -t "tty1\ntty2" exits 1 with "can't find
+    // client", so no snapshot is ever sent for that session while the second client stays.
+    const { tmux, calls } = fake({
+      "list-clients": "/dev/ttys010\n/dev/ttys012\n",
+      "refresh-client": "",
+    });
+    await tmux.repaint("s");
+    assert.deepEqual(calls[1]?.slice(-3), ["-t", "/dev/ttys010", "-R"]);
+    assert.deepEqual(calls[2]?.slice(-3), ["-t", "/dev/ttys012", "-R"]);
+  });
+
   void test("a session with no attached client cannot repaint, and says so", async () => {
     const { tmux } = fake({ "list-clients": "" });
     await assert.rejects(

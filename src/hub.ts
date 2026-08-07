@@ -173,6 +173,11 @@ export class Hub {
       if (quiet !== undefined) clearTimeout(quiet);
       clearTimeout(cap);
     }
+    // No bytes at all is a failed repaint, not an empty screen. A snapshot is authoritative - the
+    // client clears the terminal and writes what it is given - so shipping "" paints a live
+    // session blank. Fail instead, and let the caller answer with an error the client retries.
+    if (parts.length === 0)
+      throw new Error(`no repaint arrived for ${sessionId} within ${this.#repaintMaxMs}ms`);
     return { data: Buffer.concat(parts).toString("utf8"), seq };
   }
 

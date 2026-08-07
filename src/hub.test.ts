@@ -348,6 +348,14 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
     assert.equal(live.seq, Buffer.byteLength(live.data, "utf8"));
   });
 
+  void test("a repaint that collected nothing fails rather than returning a blank screen", async () => {
+    // A snapshot is authoritative: the client clears the terminal and writes what it is given. So
+    // `{data:""}` paints a live session blank, with the socket and the session list still correct
+    // - the failure the protocol is least able to notice. Failing lets the client keep what it has.
+    const { hub, id } = await attached(() => undefined);
+    await assert.rejects(async () => await hub.repaint(id), /no repaint arrived/);
+  });
+
   void test("a session with no attachment cannot repaint, and says so", async () => {
     const { hub } = build();
     await assert.rejects(async () => await hub.repaint("no-such-session"), /no session/);
