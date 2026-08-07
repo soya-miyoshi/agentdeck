@@ -295,11 +295,33 @@ the normal case, not an error path.
 4. Tabs show a "reconnecting" affordance only after the first retry fails, so a normal
    half-second reconnect does not flash UI at the user.
 
+**A restarted server does not reach step 3 today, and the client cannot make it.** The epoch rule
+above is what makes a restart uneventful once the server still has the session — and since
+`m0/host-boundary` gated `Registry.list()` on the registry's in-memory `#meta`, a session that
+outlived the server process is not listed at all, so the re-attach is answered
+`no session <id>` and the tab is stranded with a live agent behind it. Measured, against a real
+server process killed and restarted under a real client, in `src/client/end-to-end.test.ts`.
+Recreating the session — `new-session -A`, so the same live process — hands the registry its
+metadata back, and from there the epoch half does exactly what this section says: the client's
+stored `seq` is in a space that no longer exists, the server sends an unconditional snapshot in a
+new epoch, and the tab repaints. Nothing on the client can substitute for that recreate; making a
+restart recover by itself is the metadata gap recorded under `m0/supervisor-crash-test`, not a
+reconnection change.
+
 **A rejected token is not a network failure and must not be retried as one.** A `401`, or a
 socket the server closes at the handshake, means the token has been rotated — the client stops
 backing off, drops what it has stored, and shows the paste field with a sentence saying so
 (plan 001, authentication). Backing off forever against a server that is answering correctly is
 the worst version of this: it looks exactly like being out of range.
+
+**A `403` is neither of those, and gets its own sentence.** A server started with
+`AGENTDECK_ORIGIN` set to an address the page was not opened from refuses every `/api` call and
+the socket upgrade alike, and the upgrade's status never reaches a browser — so the probe over
+HTTP is the only place the difference is visible. Read as "not a 401, so the token is good", it
+becomes "must be the network" and the ladder runs forever over a configuration mistake. So the
+probe answers three things rather than two — good, token rejected, origin refused — and the third
+stops the ladder and says what has to change, without dropping the stored token: the token is not
+what is wrong, and asking for a new one would send the user after the wrong thing.
 
 ## What is deliberately absent
 

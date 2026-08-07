@@ -1,6 +1,7 @@
 import type { ClientMessage, ServerMessage } from "../protocol.ts";
 import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
+import type { TokenVerdict } from "./api.ts";
 import { ReconnectPolicy } from "./backoff.ts";
 import {
   receiveChunk,
@@ -99,15 +100,15 @@ export interface ConnectionDeps {
   token: string;
   connect: SocketFactory;
   /**
-   * Whether the server still accepts this token, as one cheap authenticated request.
+   * Why this client cannot get in, as one cheap authenticated request.
    *
-   * A browser never sees the 401 from a rejected WebSocket upgrade - it reports the same "closed
-   * before open" it reports for a phone in a lift - so the two are told apart by asking over
+   * A browser never sees the status of a rejected WebSocket upgrade - it reports the same "closed
+   * before open" it reports for a phone in a lift - so the cases are told apart by asking over
    * HTTP, where the status code survives. Getting this wrong in the safe-looking direction means
    * backing off forever against a server that is answering correctly, which looks exactly like
-   * being out of range.
+   * being out of range. That is why a 403 is a verdict of its own and not "not a 401, so fine".
    */
-  verifyToken: () => Promise<boolean>;
+  verifyToken: () => Promise<TokenVerdict>;
   schedule?: (run: () => void, delayMs: number) => Cancel;
 }
 
@@ -123,7 +124,14 @@ export interface ConnectionEvents {
   unauthorized: () => void;
 }
 
-export type ConnectionStatus = "connecting" | "open" | "reconnecting" | "rejected" | "closed";
+export type ConnectionStatus =
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "rejected"
+  /** The server refused this page's origin. Not retried, and not the token's fault. */
+  | "forbidden"
+  | "closed";
 
 interface Attachment {
   cols: number;
@@ -460,14 +468,30 @@ export class Connection {
     this.#resetInputWindow(true);
     if (this.#stopped) return;
 
-    // A socket that never opened may be a rejected token wearing a network failure's clothes.
-    // One that opened and then dropped cannot be: the server accepted this token seconds ago.
-    if (!this.#opened && !(await this.#deps.verifyToken())) {
-      this.#policy.closed("token-rejected");
-      this.#stopped = true;
-      this.#setStatus("rejected");
-      this.#events.unauthorized();
-      return;
+    // A socket that never opened may be a refusal wearing a network failure's clothes. One that
+    // opened and then dropped cannot be: the server accepted this client seconds ago.
+    if (!this.#opened) {
+      const verdict = await this.#deps.verifyToken();
+      if (verdict === "rejected") {
+        this.#policy.closed("token-rejected");
+        this.#stopped = true;
+        this.#setStatus("rejected");
+        this.#events.unauthorized();
+        return;
+      }
+      if (verdict === "forbidden") {
+        // The token is good and the server is answering. Retrying is the one thing that cannot
+        // help, and it is also what this used to do - the ladder ran forever and the user watched
+        // a reconnecting banner for a configuration mistake nothing was going to mention.
+        this.#policy.closed("origin-rejected");
+        this.#stopped = true;
+        this.#setStatus("forbidden");
+        this.#events.error(
+          undefined,
+          "the server accepted your token and refused this page's address: it was started with AGENTDECK_ORIGIN set to a different address than the one you opened. Reconnecting cannot fix that - open the address the server expects, or restart it with AGENTDECK_ORIGIN matching this one.",
+        );
+        return;
+      }
     }
     if (this.#stopped) return;
 

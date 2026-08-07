@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 
 import type { ServerMessage } from "../protocol.ts";
 import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW } from "../ws.ts";
+import type { TokenVerdict } from "./api.ts";
 import {
   Connection,
   MAX_INPUT_FRAME_BYTES,
@@ -26,7 +27,8 @@ interface Harness {
   rendered: { sessionId: string; data: string; cleared: boolean }[];
   errors: string[];
   unauthorized: number;
-  tokenAccepted: boolean;
+  /** What the HTTP probe says when a socket closes before it opened. */
+  verdict: TokenVerdict;
 }
 
 interface FakeSocket {
@@ -56,7 +58,7 @@ const harness = (): Harness => {
     rendered: [],
     errors: [],
     unauthorized: 0,
-    tokenAccepted: true,
+    verdict: "ok",
   };
 
   const events: ConnectionEvents = {
@@ -90,7 +92,7 @@ const harness = (): Harness => {
           },
         };
       },
-      verifyToken: () => Promise.resolve(state.tokenAccepted),
+      verifyToken: () => Promise.resolve(state.verdict),
       schedule: (run, delayMs) => {
         const timer = { delayMs, run };
         state.timers.push(timer);
@@ -483,7 +485,7 @@ void describe("reconnection", () => {
 
   void test("an open socket that drops is never mistaken for a bad token", async () => {
     const h = harness();
-    h.tokenAccepted = false;
+    h.verdict = "rejected";
     h.connection.start();
     h.last().handlers.opened();
     h.last().handlers.closed();
@@ -497,7 +499,7 @@ void describe("reconnection", () => {
 void describe("a rejected token is not a network failure", () => {
   void test("it stops the ladder and asks for a new token", async () => {
     const h = harness();
-    h.tokenAccepted = false;
+    h.verdict = "rejected";
     h.connection.start();
     // A browser reports a refused handshake as a close before open, exactly like a phone in a
     // lift. The two are told apart over HTTP, where the 401 survives.
@@ -527,6 +529,27 @@ void describe("a rejected token is not a network failure", () => {
     h.connection.stop();
     assert.deepEqual(h.timers, []);
     assert.equal(h.statuses.at(-1), "closed");
+  });
+});
+
+void describe("a refused origin is neither the network nor the token", () => {
+  void test("it stops the ladder and says what has to change", async () => {
+    // The audit's open half of the AGENTDECK_ORIGIN finding: a 403 used to read as "not a 401, so
+    // the token is still good, so it must be the network", and the client reconnected forever
+    // while the server answered every request correctly.
+    const h = harness();
+    h.verdict = "forbidden";
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    assert.deepEqual(h.timers, [], "a configuration mistake was retried as a network failure");
+    assert.equal(h.statuses.at(-1), "forbidden");
+    // Not the token: the paste field would be the wrong thing to ask for.
+    assert.equal(h.unauthorized, 0);
+    assert.ok(
+      h.errors.some((message) => /AGENTDECK_ORIGIN/.test(message)),
+      `nothing named the cause: ${h.errors.join(" | ")}`,
+    );
   });
 });
 

@@ -263,6 +263,15 @@ Driven from `curl` only. No client.
       a hole; **and the server is restarted under an open client and the tab repaints rather than
       going permanently blank** — the epoch case, which looks like every other reconnect until the
       screen stays empty.
+      **Half met, and the other half is blocked.** The socket killed mid-output repaints with no
+      hole, and a `403` is now told apart from both a network failure and a bad token and named to
+      the user (`AGENTDECK_ORIGIN`) instead of being retried forever — both against the real
+      end-to-end harness. The epoch case **cannot** be met from the client: after a real restart
+      the surviving session is not in `Registry.list()` at all, so the re-attach is answered
+      `no session <id>` and no client behaviour repaints that tab. Recreating the session restores
+      the metadata and the repaint then happens correctly in a new epoch — asserted in
+      `src/client/end-to-end.test.ts`. Making a restart recover by itself is the metadata gap owned
+      by `m0/supervisor-crash-test`'s **Known gap, unsolved** above; it needs an item of its own.
 
 ---
 
