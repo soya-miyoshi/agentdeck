@@ -93,8 +93,6 @@ interface PendingInput {
   data: string;
   /** Bytes this piece adds to a frame's `data` field, excluding the surrounding quotes. */
   cost: number;
-  /** The `input()` calls whose pieces this entry carries, oldest first. */
-  groups: number[];
 }
 
 export interface ConnectionDeps {
@@ -155,8 +153,12 @@ export class Connection {
   #pendingInput: PendingInput[] = [];
   #pendingBytes = 0;
   /** `input()` calls that have had at least one piece released while another still waits. */
-  #releasedGroups = new Set<number>();
-  #nextGroup = 0;
+  // Which SESSIONS have had part of their queued input released while more is still queued.
+  // This was a Set of per-call group ids that only emptied when the queue fully drained, so a
+  // producer that keeps the queue backed up - xterm answering an agent's `\\e[6n` loop, which is
+  // the case the byte bound exists for - added ~300k ids a second that were never removed. The
+  // byte bound held while the Set ate the tab, which is the outcome it was added to prevent.
+  #partiallyReleased = new Set<string>();
   #overflowed = false;
   #framesThisWindow = 0;
   #cancelWindow: Cancel | undefined;
@@ -234,11 +236,10 @@ export class Connection {
    * as one; what it does not survive is a frame going missing from the middle.
    */
   input(sessionId: string, data: string): void {
-    const group = this.#nextGroup++;
     let rest = data;
     while (rest.length > 0) {
       const cut = this.#cut(sessionId, rest);
-      this.#queueInput(sessionId, rest.slice(0, cut), group);
+      this.#queueInput(sessionId, rest.slice(0, cut));
       rest = rest.slice(cut);
     }
     this.#flushInput();
@@ -270,7 +271,26 @@ export class Connection {
     return encoder.encode(JSON.stringify({ t: "input", sessionId, data: "" })).length;
   }
 
-  #queueInput(sessionId: string, data: string, group: number): void {
+  #queueInput(sessionId: string, data: string): void {
+    // The original rule, restored: input typed while there is no socket at all is DROPPED, not
+    // held. `#canSend` exists for the CONNECTING window - `#socket` is assigned before the socket
+    // opens - and holding across that is deliberate. Holding across a RECONNECT is not: the queue
+    // survives from the close until the next open, which is a token check with no timeout plus a
+    // backoff delay, and is unbounded on a backgrounded tab where timers are throttled. Everything
+    // typed at a frozen pane then lands at once in whatever the agent is showing by the time the
+    // network returns - a "y" answering a question that is no longer on screen, or two fragments
+    // of a command line concatenated into one nobody typed. README.md tells the user to exercise
+    // exactly this path.
+    if (this.#socket === undefined) {
+      if (!this.#overflowed) {
+        this.#overflowed = true;
+        this.#events.error(
+          sessionId,
+          "you are not connected, so what you just typed was not sent - it is dropped rather than delivered later into whatever the agent is doing by then",
+        );
+      }
+      return;
+    }
     // JSON escaping is per character, so the cost of a joined string is the sum of the parts'
     // costs - and `#cut` never ends a piece on a lone high surrogate, so no pair is escaped twice.
     const cost = encoder.encode(JSON.stringify(data)).length - 2;
@@ -287,7 +307,7 @@ export class Connection {
       return;
     }
     this.#pendingBytes += cost;
-    this.#pendingInput.push({ sessionId, data, cost, groups: [group] });
+    this.#pendingInput.push({ sessionId, data, cost });
   }
 
   /** Whether a frame handed to the socket now would actually reach the server. */
@@ -310,12 +330,24 @@ export class Connection {
       }
       this.#framesThisWindow += 1;
       const frame = this.#takeFrame();
-      for (const group of frame.groups) this.#releasedGroups.add(group);
       this.#socket?.send(
         JSON.stringify({ t: "input", sessionId: frame.sessionId, data: frame.data }),
       );
+      // Only interesting while more of that session's input is still waiting: that is exactly the
+      // half-applied case the reset below warns about.
+      if (this.#pendingInput.some((entry) => entry.sessionId === frame.sessionId)) {
+        this.#partiallyReleased.add(frame.sessionId);
+      }
     }
-    if (this.#pendingInput.length === 0) this.#releasedGroups.clear();
+    if (this.#pendingInput.length === 0) {
+      this.#partiallyReleased.clear();
+      // Once per overflow, which is what the message says - not once per socket. A queue that
+      // drained and then overflows again an hour later drops input silently otherwise, and what
+      // is dropped is the tail of what is in flight while everything queued after it still goes,
+      // so the pty gets a hole and then resumes: the shell runs the concatenation of two fragments
+      // nobody typed.
+      this.#overflowed = false;
+    }
   }
 
   /**
@@ -339,7 +371,6 @@ export class Connection {
       this.#pendingBytes -= next.cost;
       used += next.cost;
       parts.push(next.data);
-      if (next.groups[0] !== head.groups.at(-1)) head.groups.push(next.groups[0] as number);
     }
     head.data = parts.join("");
     return head;
@@ -406,7 +437,7 @@ export class Connection {
       // the lines that already ran run twice.
       const cut = new Set<string>();
       for (const entry of this.#pendingInput) {
-        if (entry.groups.some((group) => this.#releasedGroups.has(group))) cut.add(entry.sessionId);
+        if (this.#partiallyReleased.has(entry.sessionId)) cut.add(entry.sessionId);
       }
       for (const sessionId of cut) {
         this.#events.error(
@@ -417,7 +448,7 @@ export class Connection {
     }
     this.#pendingInput.length = 0;
     this.#pendingBytes = 0;
-    this.#releasedGroups.clear();
+    this.#partiallyReleased.clear();
     this.#overflowed = false;
     this.#framesThisWindow = 0;
     this.#cancelWindow?.();

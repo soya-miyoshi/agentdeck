@@ -529,3 +529,62 @@ void describe("a rejected token is not a network failure", () => {
     assert.equal(h.statuses.at(-1), "closed");
   });
 });
+
+void describe("what is typed while disconnected", () => {
+  void test("is dropped and said so, not delivered into whatever comes next", async () => {
+    // The rule this file has always stated: a keystroke held through an outage arrives seconds or
+    // minutes later, into whatever the agent is showing by then. A "y" answers a question that is
+    // no longer on screen; two halves of a command line concatenate into one nobody typed. Pacing
+    // a paste means holding input across the CONNECTING window - `#socket` is assigned before the
+    // socket opens - and that is all it means.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.last().handlers.closed();
+    await settle();
+
+    const before = h.last().sent.length;
+    h.connection.input("s1", "y\r");
+    h.connection.input("s1", "rm -rf something\r");
+
+    h.fire();
+    h.last().handlers.opened();
+    await settle();
+
+    const sentAfter = h.last().sent.filter((raw) => raw.includes('"input"'));
+    assert.deepEqual(sentAfter, [], "input typed while disconnected was replayed into a live pty");
+    assert.equal(h.last().sent.length >= before, true);
+    assert.equal(
+      h.errors.some((message) => /not connected/.test(message)),
+      true,
+      "the user was not told that what they typed went nowhere",
+    );
+  });
+
+  void test("the overflow warning is once per overflow, not once per socket", () => {
+    // `#overflowed` was cleared only on close, so a queue that overflowed, drained, and overflowed
+    // again an hour later dropped input in silence. What is dropped is the tail of what is in
+    // flight while everything queued after it is still sent, so the pty receives a hole and then
+    // resumes - the concatenation of two fragments nobody typed, which this file names as worse
+    // than dropping the lot.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+
+    const flood = (): void => {
+      // Well past MAX_PENDING_INPUT_BYTES, with the window budget spent so nothing drains.
+      for (let i = 0; i < 400; i++) h.connection.input("s1", "x".repeat(64 * 1024));
+    };
+    flood();
+    const first = h.errors.filter((m) => /dropped/.test(m)).length;
+    assert.equal(first, 1, "the first overflow was not announced exactly once");
+
+    // Drain the queue the way the window timer does, then overflow again. Each fired window
+    // schedules the next while anything is still queued, so this runs until nothing is pending
+    // rather than a fixed number of times.
+    for (let i = 0; i < 2000 && h.timers.length > 0; i++) h.fire();
+    flood();
+    const second = h.errors.filter((m) => /dropped/.test(m)).length;
+    assert.ok(second > first, "a later overflow dropped input silently");
+  });
+});
