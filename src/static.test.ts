@@ -39,6 +39,8 @@ void before(async () => {
   writeFileSync(secretFile, SECRET);
   writeFileSync(join(root, "index.html"), "<!doctype html><div id=app></div>");
   writeFileSync(join(root, "assets", "index-abc123.js"), "export const a = 1;\n");
+  // Composed (NFC) on disk; requested decomposed (NFD) below.
+  writeFileSync(join(root, "café.txt"), "inside the build directory\n");
   // A symlink planted inside the build output. Nothing in the request path looks suspicious.
   symlinkSync(secretFile, join(root, "leak"));
   symlinkSync(outside, join(root, "assets", "elsewhere"));
@@ -79,14 +81,14 @@ interface Answer {
  * A phone's browser does the same - but `curl --path-as-is`, any script, and anything that is not
  * a browser do not, and this server is reachable from a tailnet.
  */
-const get = async (path: string): Promise<Answer> => {
+const method = async (verb: string, path: string): Promise<Answer> => {
   const socket = connect(port, "127.0.0.1");
   const chunks: Buffer[] = [];
   await new Promise<void>((done, fail) => {
     socket.on("connect", () => {
       // `write`, never `end`: a half-close makes Node's HTTP server abandon the response it was
       // in the middle of, and every assertion below would be reading an empty string.
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+      socket.write(`${verb} ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
     });
     socket.on("data", (chunk: Buffer) => chunks.push(chunk));
     socket.on("error", fail);
@@ -111,6 +113,9 @@ const get = async (path: string): Promise<Answer> => {
     header: (name) => headers.get(name),
   };
 };
+
+const get = async (path: string): Promise<Answer> => await method("GET", path);
+const head = async (path: string): Promise<Answer> => await method("HEAD", path);
 
 void describe("the built client", () => {
   void test("the root serves index.html, uncached, with nothing injected", async () => {
@@ -151,6 +156,10 @@ void describe("escaping the build directory", () => {
     "/leak",
     "/assets/elsewhere/token",
     "/index.html%00.png",
+    // A backslash is a separator on one of the two systems a path can be interpreted by, and a
+    // rule written against `/` alone does not see it.
+    "/..\\..\\private\\token",
+    "/%2e%2e%5c%2e%2e%5cprivate%5ctoken",
   ];
 
   for (const path of escapes) {
@@ -164,6 +173,21 @@ void describe("escaping the build directory", () => {
     });
   }
 
+  // The other half of plan 001's requirement: not everything odd is an escape. These spellings
+  // are names, not climbs, so they must land INSIDE the build directory - where they find
+  // nothing and get the page - rather than being stripped into a climb by a handler that
+  // rewrites `../` once instead of resolving.
+  const insiders = ["/....//....//private/token", "//private/token", "/./private/token"];
+  for (const path of insiders) {
+    void test(`${path} lands inside the build directory`, async () => {
+      const res = await get(path);
+      assert.equal(readFileSync(secretFile, "utf8"), SECRET);
+      assert.ok(!res.body.includes(SECRET), `${path} served the file it tried to steal`);
+      assert.equal(res.status, 200);
+      assert.equal(res.header("content-type"), "text/html; charset=utf-8");
+    });
+  }
+
   void test("a double-encoded climb is a filename, and lands inside the build directory", async () => {
     // `%252f` decodes once to the literal text `%2f`, which is a character a filename may
     // contain and not a separator. Plan 001 asks that such a path land inside the build
@@ -172,6 +196,36 @@ void describe("escaping the build directory", () => {
     assert.equal(res.status, 200);
     assert.ok(!res.body.includes(SECRET));
     assert.equal(res.header("content-type"), "text/html; charset=utf-8");
+  });
+});
+
+void describe("what the handler will and will not do", () => {
+  void test("a decomposed unicode spelling lands inside the build directory or is refused", async () => {
+    // macOS filesystems compare these two spellings of the same name as equal, so a check that
+    // compares bytes and a filesystem that does not can disagree about which file was named.
+    // Either answer is fine; leaving the build directory is not.
+    const res = await get(`/${encodeURIComponent("café.txt")}`);
+    assert.ok(res.status === 200 || res.status === 404, `answered ${String(res.status)}`);
+    assert.ok(!res.body.includes(SECRET));
+  });
+
+  void test("HEAD gets the headers and no body", async () => {
+    const res = await head("/assets/index-abc123.js");
+    assert.equal(res.status, 200);
+    assert.match(res.header("content-type") ?? "", /javascript/);
+    assert.equal(res.body, "");
+  });
+
+  void test("a write method is refused rather than routed into the build directory", async () => {
+    const res = await method("DELETE", "/index.html");
+    assert.equal(res.status, 405);
+    assert.doesNotMatch(res.body, /doctype/i);
+  });
+
+  void test("every answer says nosniff, so a served type is the type the browser uses", async () => {
+    for (const path of ["/", "/assets/index-abc123.js"]) {
+      assert.equal((await get(path)).header("x-content-type-options"), "nosniff");
+    }
   });
 });
 
