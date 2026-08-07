@@ -215,6 +215,24 @@ connect at all, which stops being true the moment `tailscale serve` is running.
 - Never `tailscale funnel`. That publishes to the internet, and nothing in this design is built
   to survive that.
 
+**The page itself is unauthenticated, by necessity.** The token lives in the browser, so the
+browser has to load the page before there is a token to send — a bearer check in front of the SPA
+would make the paste field unreachable and the token unenterable. So the Node server serves the
+built client from `dist/client` on every path that is not an API or socket route: one process,
+one port, and the phone's path through `tailscale serve` is the same path dev uses over loopback.
+The alternative — `tailscale serve` mounting the static files itself — was rejected because dev
+without a tailnet would then need a second mechanism, and the phone would be exercising a route
+no one had run.
+
+That surface is an inert asset bundle and is held to it:
+
+- The static handler resolves strictly within the build output directory and rejects anything
+  that escapes it. The unauthenticated route serves `dist/client` and never a path on disk.
+- Nothing is injected into the HTML — no token, no session list, no cwd allowlist. Every fact
+  the client shows arrives from an authenticated `/api` call made after the token is pasted.
+- `/api` and `/ws` do not loosen. The `Origin` check above still applies to both; the page being
+  reachable without a token does not make the API reachable without one.
+
 **Getting the token onto the phone** is part of the design, not an exercise for the reader. On
 first run the server prints the token to the terminal as a QR code alongside the `ts.net` URL;
 the PWA has a paste field for the same string. It is held in `localStorage` — a token that has to

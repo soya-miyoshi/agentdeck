@@ -176,10 +176,11 @@ Agent-agnostic signals first, so the generic path is the proven one.
 ## Found while building, not in the original plan
 
 - [ ] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
-      everything else, and no plan says whether this server serves the page, `tailscale serve`
-      does, or something else. It cannot simply sit behind the bearer token either: the page has
-      to load before a token exists, so whatever serves it is unauthenticated by necessity and
-      that deserves a sentence in plan 001 rather than a default.
+      everything else. Plan 001's Authentication section now settles who serves it: this server
+      does, from `dist/client`, on every path that is not an API or socket route — unauthenticated
+      by necessity, since the page has to load before a token exists. Resolve strictly within the
+      build directory, inject nothing into the HTML, and leave the `Origin` check on `/api` and
+      `/ws` alone.
       **Done when:** opening the `ts.net` URL on a phone loads the client with no token, and the
       first thing it shows is the paste field.
 
