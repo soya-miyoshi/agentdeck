@@ -23,6 +23,51 @@ const run = promisify(execFile);
 
 export type SessionState = "working" | "waiting" | "idle" | "exited";
 
+/**
+ * The variable NAMES a tmux server we start is allowed to carry, and therefore the ones a pane
+ * can inherit without a profile asking for them.
+ *
+ * This list is the whole of the environment, not an addition to the shell's. `tmux start-server`
+ * is a child of the node process, so without this the server's global environment is whatever
+ * shell ran `pnpm start` - and every pane forked from that server gets it. Verified by hand: a
+ * pane saw both `SSH_AUTH_SOCK` and an arbitrary marker variable that no profile allowlisted,
+ * which made plan 004's `env` name allowlist decorative and handed every agent the forwarded
+ * ssh-agent.
+ *
+ * Each name earns its place: PATH so the agent binary resolves at all, HOME because every tool
+ * reads config from it, SHELL/TERM/LANG/LC_ALL/TMPDIR/USER/LOGNAME because a terminal that lacks
+ * them is a broken terminal rather than a contained one. Nothing here is a credential. Anything
+ * an agent genuinely needs - an API key - is named in its profile's `env` and passes through
+ * there, where it is written down.
+ */
+export const BASE_ENV_NAMES: readonly string[] = [
+  "PATH",
+  "HOME",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "USER",
+  "LOGNAME",
+];
+
+/**
+ * The environment every tmux invocation - and so the tmux server we start - is given.
+ *
+ * `TERM` has a fallback because the node process is often started from something that has none
+ * (launchd, a supervisor), and a pane with no TERM renders as a dumb terminal.
+ */
+export const baseEnv = (env: NodeJS.ProcessEnv = process.env): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const name of BASE_ENV_NAMES) {
+    const value = env[name];
+    if (value !== undefined) out[name] = value;
+  }
+  out["TERM"] ??= "xterm-256color";
+  return out;
+};
+
 export interface TmuxSession {
   id: string;
   dead: boolean;
@@ -49,7 +94,11 @@ export class Tmux {
     this.socket = options.socket;
     this.#exec =
       options.exec ??
-      (async (args) => await run("tmux", ["-L", this.socket, ...args], { encoding: "utf8" }));
+      (async (args) =>
+        // `env` rather than the inherited one, and this is the load-bearing half of it: the tmux
+        // SERVER is a child of whichever of these calls starts it, so its global environment -
+        // which every pane inherits - is this object.
+        await run("tmux", ["-L", this.socket, ...args], { encoding: "utf8", env: baseEnv() }));
   }
 
   async #tmux(args: string[]): Promise<string> {
@@ -74,6 +123,25 @@ export class Tmux {
       // repeated -e rather than through our own environment, so one session's secret never
       // becomes another's.
       const envArgs = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+      // ...and then taken straight back out of the session environment, which is the only reason
+      // these three run as one invocation.
+      //
+      // `-e` puts a variable in the SESSION environment, and tmux keeps it there: any same-uid
+      // process could then read the per-session hook secret and every profile-passed API key with
+      // `tmux -L <socket> show-environment -t <session>`. No ptrace, no debugger, and on macOS no
+      // `/proc/<pid>/environ` either - `ps` does not show another process's environment. tmux
+      // builds the pane's environment when the pane is forked, which new-session has already done
+      // by the time set-environment runs, so unsetting afterwards takes the value away from the
+      // reader and not from the agent. Verified by hand on tmux 3.7b: the pane saw the secret,
+      // `show-environment -t` did not.
+      const unsetArgs = Object.keys(env).flatMap((k) => [
+        ";",
+        "set-environment",
+        "-t",
+        id,
+        "-u",
+        k,
+      ]);
       await this.#tmux([
         "new-session",
         "-d",
@@ -86,11 +154,17 @@ export class Tmux {
         "--",
         command,
         ...args,
+        // Set per session rather than relying on a global: a session created by a human by hand
+        // must behave the same as one the server made, and the server cannot assume its own
+        // tmux.conf reached a server someone else started.
+        ";",
+        "set-option",
+        "-t",
+        id,
+        "remain-on-exit",
+        "on",
+        ...unsetArgs,
       ]);
-      // Set per session rather than relying on a global: a session created by a human by hand
-      // must behave the same as one the server made, and the server cannot assume its own
-      // tmux.conf reached a server someone else started.
-      await this.#tmux(["set-option", "-t", id, "remain-on-exit", "on"]);
     }
     return { attached: existed };
   }
@@ -116,7 +190,30 @@ export class Tmux {
     // time: `start-server` succeeds, the brand-new server has no sessions, exit-empty is still on
     // by default, so it exits - and `set-option` then fails with "no server running on ...".
     // Chaining means the option is set before tmux gets to the point of deciding it is idle.
-    await this.#tmux(["start-server", ";", "set-option", "-g", "exit-empty", "off"]);
+    //
+    // `update-environment` is emptied in the same breath, and it is the second half of building a
+    // session's environment explicitly. Its default copies SSH_AUTH_SOCK, DISPLAY and friends out
+    // of whichever CLIENT creates or attaches to a session and into that session's environment -
+    // so a clean server global environment alone would still hand a pane the forwarded ssh-agent
+    // the moment we attached to it. Observed on tmux 3.7b: with the default,
+    // `show-environment -t` listed SSH_AUTH_SOCK; emptied, it lists only what `-e` put there.
+    //
+    // What this does NOT reach: a tmux server someone else already started on this socket. Its
+    // global environment is whatever shell started it, and tmux has no way to clear that. The
+    // option above is re-applied on every boot, so the client half is covered either way.
+    await this.#tmux([
+      "start-server",
+      ";",
+      "set-option",
+      "-g",
+      "exit-empty",
+      "off",
+      ";",
+      "set-option",
+      "-g",
+      "update-environment",
+      "",
+    ]);
   }
 
   /**

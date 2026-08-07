@@ -3,11 +3,12 @@ dist
 *.log
 .DS_Store
 .pnpm-store
-# The bearer token is NOT here and must never be. AGENTDECK_TOKEN_FILE decides where it goes, and
-# there is no container and no mount left to place it behind: agentdeck runs on the Mac as you.
-# Where it should now live is undecided - recorded as open in plan 005's superseded header. The
-# one rule that survives de-containerising is that it is never at the root of a tree a session is
-# pointed at, where an agent's own `ls -la` or `grep -rn token .` meets it.
+# The bearer token is NOT here and must never be. It lives at ~/.agentdeck/token, mode 0600,
+# created on first run; AGENTDECK_TOKEN_FILE moves it. There is no container and no mount left to
+# place it behind - agentdeck runs on the Mac as you - so placement is the whole control, and the
+# rule that survives de-containerising is that it is never inside a tree a session is pointed at,
+# where an agent's own `ls -la` or `grep -rn token .` meets it. The server refuses to start if the
+# path resolves inside an allowlist entry.
 
 # Isolated checkouts for parallel agents. Whole copies of this repo; never committed.
 .claude/worktrees

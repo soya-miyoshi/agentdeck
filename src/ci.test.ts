@@ -1,9 +1,9 @@
 // CI is a file that this repository never executes, so the only assertions worth making about it
 // are the ones a green check cannot make for you. Three properties are load-bearing (plan 003, M0;
-// plan 005): the workflow runs on pull requests and runs the same three scripts the container
+// plan 005): the workflow runs on pull requests and runs the same three scripts a developer
 // does; the pnpm version comes from `packageManager` via corepack rather than from a pin in the
-// workflow that can drift; and the runner's `pnpm install` is the ONLY one outside the container,
-// with nothing having quietly put the host-side install back into mise.toml or the README.
+// workflow that can drift; and the runner's `pnpm install` is the one that is SAFE, the host's
+// being a review gate, so nothing may quietly present the host-side install as routine.
 //
 // The done-when sentence - "a deliberately broken type fails it" - is executed rather than
 // asserted about: the repository's own sources are compiled under the repository's own tsconfig
@@ -153,7 +153,7 @@ void describe("the M0 CI acceptance criterion", () => {
   });
 });
 
-void describe("CI cannot drift from the container's pnpm", () => {
+void describe("CI cannot drift from the pnpm mise.toml pins", () => {
   void test("pnpm comes from corepack, not from a version pinned in the workflow", async () => {
     const workflow = await readWorkflow();
     const steps = stepsOf(workflow);

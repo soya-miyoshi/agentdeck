@@ -103,25 +103,39 @@ export class Registry {
         : { session };
   }
 
+  /**
+   * The sessions this server owns: what tmux holds, filtered to the cwd allowlist.
+   *
+   * The filter is here rather than only at the one caller that needed it, because the allowlist is the only boundary
+   * left and a boundary that two callers apply differently is not one. The tmux socket is `/tmp/tmux-<uid>/agentdeck`, writable by every
+   * process running as this user, so `tmux -L agentdeck new-session -d -c / -- /bin/sh` is
+   * otherwise a tab the phone can type into, created by something that asked nobody.
+   *
+   * A session whose cwd this process does not know - one started by hand, or one it created
+   * before a restart, since `#meta` is memory only - has cwd `""` and is not allowlisted. It is
+   * left alone: not listed, not attached, not reaped. That cost is deliberate and recorded in
+   * plan 005.
+   */
   async list(): Promise<Session[]> {
     const live = await this.#tmux.list();
-    return live.map((entry) => {
-      const meta = this.#meta.get(entry.id);
-      const state: SessionState = entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle");
-      const session: Session = {
-        id: entry.id,
-        // A session this process did not create is still real - it survived a restart. What is
-        // lost with the process is the cwd and agent, which tmux does not record, so they are
-        // recovered from the id's shape where possible and left honest where not.
-        name: meta === undefined ? entry.id : sessionName(meta.cwd),
-        cwd: meta?.cwd ?? "",
-        agent: meta?.agent ?? "",
-        state,
-        startedAt: entry.startedAt,
-      };
-      if (entry.exitCode !== undefined) session.exitCode = entry.exitCode;
-      return session;
-    });
+    return live
+      .filter((entry) => this.#allowlist.allows(this.#meta.get(entry.id)?.cwd ?? ""))
+      .map((entry) => {
+        // Non-null by construction: the filter above dropped every entry without one, since an
+        // absent meta means cwd "" and the allowlist never allows that.
+        const meta = this.#meta.get(entry.id);
+        const state: SessionState = entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle");
+        const session: Session = {
+          id: entry.id,
+          name: meta === undefined ? entry.id : sessionName(meta.cwd),
+          cwd: meta?.cwd ?? "",
+          agent: meta?.agent ?? "",
+          state,
+          startedAt: entry.startedAt,
+        };
+        if (entry.exitCode !== undefined) session.exitCode = entry.exitCode;
+        return session;
+      });
   }
 
   async close(id: string): Promise<void> {

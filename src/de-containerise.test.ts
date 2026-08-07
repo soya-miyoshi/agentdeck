@@ -13,9 +13,11 @@
 // documents that described the container and about the three TODO entries that decided what to
 // do with it, and they are written so that they fail against the pre-change tree.
 //
-// What is deliberately NOT asserted: where the token file lives, and whether the cwd allowlist
-// is the only boundary left. Plan 005's superseded header names both as open, and a test that
-// pinned either would be this file deciding a person's question.
+// Two things this file deliberately did not assert - where the token file lives, and whether the
+// cwd allowlist is a boundary - were open questions when it was written, and a test that pinned
+// either would have been this file deciding a person's question. Both were decided on 2026-08-07
+// by m0/host-boundary, so they are asserted now: by `src/containment.test.ts` for the token, and
+// by `src/hub.test.ts` and `src/cwds.test.ts` for the allowlist.
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
@@ -48,11 +50,16 @@ const healthcheck = `${repoRoot}scripts/healthcheck.mjs`;
 const readDoc = async (name: string): Promise<string> =>
   await readFile(`${repoRoot}${name}`, "utf8");
 
-// The documents that described a container. Plan 002 and plan 005 are absent on purpose: 002
-// never described one, and 005 is the record of the one that is gone.
+// The documents that described a container. Plan 005 is absent on purpose: it is the record of
+// the one that is gone. Plan 002 was absent too, with the comment "002 never described one" - it
+// described one six times, in load-bearing places: `Session.cwd`, `Cwd.path`, the allowlist
+// definition, the refusal rationale, the hook route, and the paragraph about one agent reading
+// another's secrets. Plan 002 is the wire contract, so being wrong about the machine there is
+// being wrong everywhere it is built against.
 const decontainerised = [
   "README.md",
   "plans/001-architecture.md",
+  "plans/002-wire-protocol.md",
   "plans/003-milestones.md",
   "plans/004-agent-profiles.md",
   "plans/006-availability.md",
@@ -157,6 +164,16 @@ void describe("the container is gone from everything that says how this runs", (
       if (path === "src/de-containerise.test.ts") continue;
       const text = await readFile(`${repoRoot}${path}`, "utf8");
       assert.doesNotMatch(text, /docker/i, `${path} still describes Docker`);
+      // `docker` was the only word this scanned, while the thing that is gone is the container:
+      // src/ said "container" in four places the docker grep walked straight past, including a
+      // docstring reasoning from "one container means one agent-state directory" - a premise the
+      // next reader would carry forward into a machine that has none.
+      //
+      // Test files are exempt from THIS half and not from the docker half, because their subject
+      // is partly the container's absence: `containment.test.ts` has to be able to say what the
+      // container used to cover in order to assert that nothing still credits it.
+      if (path.endsWith(".test.ts")) continue;
+      assert.doesNotMatch(text, /\bcontainers?\b/i, `${path} still describes a container`);
     }
   });
 });
@@ -204,10 +221,14 @@ void describe("each plan states the post-container claim, not merely the absence
     assert.match(plan, /no supervisor at all/);
   });
 
-  void test("the README says the token's home is open rather than quietly re-answering it", async () => {
-    // Out of scope for this item by name. The test is that the README says so, not what it says.
+  void test("the README names the token's home, which m0/host-boundary decided", async () => {
+    // Open when this file was written and decided since: ~/.agentdeck/token. The README is where
+    // a person meets it, and "recorded as open" left there after the decision is the same wrong
+    // answer as the container path was.
     const readme = await readDoc("README.md");
-    assert.match(readme, /recorded as open in plan 005's superseded header, not decided/);
+    assert.doesNotMatch(readme, /recorded as open in plan 005's superseded header, not decided/);
+    assert.match(readme, /~\/\.agentdeck\/token/);
+    assert.match(readme, /refuses to start if that path resolves inside an\s+allowlist entry/);
   });
 
   void test("plan 005 is the only plan that describes a container, and says it is superseded", async () => {

@@ -171,72 +171,107 @@ two are verified by hand, and three of the five ask for decisions the item put o
   README still points at that plan for it.
   **Verified by hand on this Mac**, and worse than reported: a pane spawned by that server saw
   both `SSH_AUTH_SOCK` and an arbitrary `SEKRIT` variable from the launching shell that no profile
-  allowlisted. Status: OPEN. Fixing it is a behaviour change to session spawning, outside a
-  documentation item.
+  allowlisted. Status: FIXED in m0/host-boundary. Every tmux invocation, and so the server it
+  starts, is given an environment built from `BASE_ENV_NAMES` in `src/tmux.ts`; `update-environment`
+  is emptied so no attaching client can inject either. Re-verified by hand: with `SEKRIT_MARKER` in
+  the launching shell, a pane started through `POST /api/sessions` has neither it nor
+  `SSH_AUTH_SOCK`, and a real-tmux test in `src/tmux.test.ts` now runs that check.
 
 - [high] src/hub.ts:55 - The cwd allowlist is now called the only boundary left, and does not bound
   the session set at all. `Hub.sync()` attaches to everything on the tmux socket by design, and the
   socket is `/tmp/tmux-<uid>/agentdeck`, reachable by every process running as the user. Failure:
   `tmux -L agentdeck new-session -d -c / -- /bin/sh` becomes a tab within one 2s sync, streamed to
-  the phone and accepting input, with `CwdAllowlist.allows` never consulted. Status: OPEN, and
-  entangled with the allowlist question the user deferred.
+  the phone and accepting input, with `CwdAllowlist.allows` never consulted. Status: FIXED in
+  m0/host-boundary, the user having decided the allowlist IS a boundary. `Registry.list` filters to
+  allowlisted cwds - one filter, so the session list and the hub cannot disagree - and `Hub.sync`
+  attaches only to what it returns. The accepted cost (a hand-started session, and a session that
+  outlives a restart, are not tabs) is written into plan 005's header, the README and
+  `CwdAllowlist.refusal`.
 
 - [high] src/tmux.ts:76 - Per-session hook secrets are one tmux command away from any same-uid
   process. `createOrAttach` passes `spawnEnv` as `-e NAME=VALUE`, and tmux stores it in the session
   environment. Failure: `tmux -L <socket> show-environment -t <session>` prints `AGENTDECK_SECRET`
   in full - no ptrace, no `/proc`. plans/002-wire-protocol.md:131 documents the leak as
   `/proc/<pid>/environ`, a Linux path macOS does not have, so the plan describes a mechanism this
-  host lacks while the easier one goes unmentioned. **Verified by hand.** Status: OPEN.
+  host lacks while the easier one goes unmentioned. **Verified by hand.** Status: FIXED in
+  m0/host-boundary. `createOrAttach` unsets every `-e` variable from the session environment in the
+  same chained invocation that forks the pane, so the agent keeps its secret and
+  `show-environment -t` prints nothing; verified by hand and by a real-tmux test. Plan 002's
+  paragraph now names what this host has - the tmux read, now closed, and same-uid debugger and
+  file access, which are not.
 
 - [high] README.md:195 - The documented replacement for the container-local `node_modules` volume
   cannot see what it claims to, and a test certifies it. `git status --ignored -- node_modules
   .pnpm-store` emits one line naming the directory, never its contents, so a rewritten
   `node_modules/.bin/eslint` produces byte-identical output. src/containment.test.ts:121 asserts
   the string is present in the README, turning an ineffective control into a green check. Status:
-  OPEN.
+  FIXED in m0/host-boundary. Nothing that reads the tree can do this job, so the control is
+  replacing it: `rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile` from the
+  lockfile reviewed in the same diff. The test is inverted - it now demonstrates the old command's
+  blindness against a scratch repository and fails if the README prescribes it again.
 
 - [high] plans/005-containment.md:130 - Host paths outside the repo became execution surfaces and
   the review checklist is still repo-scoped. `~/.gitconfig` (`--local` explicitly does not show it,
   and an `!alias` fires on the very `git diff` the checklist prescribes), `~/.claude/settings.json`
   and `~/.claude/skills/`, `~/Library/LaunchAgents/`. Plan 005 still recommends keeping the iterate
   skill in `~/.claude/skills` "so the agent it constrains cannot write it" - true only because of
-  the container, and the superseded header does not retract it. Status: OPEN.
+  the container, and the superseded header does not retract it. Status: FIXED in m0/host-boundary.
+  The header names all four host paths with the commands that can see them (`git config --global
+  --list`, `ls -la ~/.claude/skills ~/Library/LaunchAgents`, a diff of `~/.claude/settings.json`)
+  and explicitly retracts the `~/.claude/skills` recommendation: on the Mac that directory is as
+  writable to the agent as the repository, and moving the skill there moves it out of review.
 
 - [medium] src/de-containerise.test.ts:52 - plan 002 is excluded from the swept document list with
   the comment "002 never described one". It describes one six times, in the load-bearing places:
   `Session.cwd` ("absolute path inside the container"), the allowlist definition, the refusal
-  rationale, the hook route. Plan 002 is the wire contract. Status: OPEN, and in this item's scope.
+  rationale, the hook route. Plan 002 is the wire contract. Status: FIXED in m0/host-boundary.
+  Plan 002 is on the `decontainerised` list and no longer describes one.
 
 - [medium] src/server.ts:94 - The token file's default is `/var/lib/agentdeck/token`, which no
   ordinary Mac user can create, so `pnpm start` fails on a clean host. **Confirmed by hand: the
   server refuses to start.** The one rule plan 005 says survives - never inside a tree a session is
-  pointed at - is prose in three places and checked by no code. Status: OPEN by instruction; the
-  token's home was explicitly deferred.
+  pointed at - is prose in three places and checked by no code. Status: FIXED in m0/host-boundary,
+  the user having decided the home. The default is `~/.agentdeck/token`, created 0600 on first run,
+  and `tokenInsideAllowlist` refuses to start when the path resolves at or inside an allowlist
+  entry. Both verified by hand on a clean `~/.agentdeck`.
 
 - [medium] src/server.ts:101 - `agentStateDir` falls back to `CLAUDE_CONFIG_DIR`, which in the
   container was a dedicated bind mount and on the Mac is the operator's live config. Failure:
   agentdeck merges its hook fragment into the settings file every Claude Code session on the
   machine reads, including sessions outside the allowlist, and rewrites it on every boot. The boot
   warning only fires when neither variable is set, so the silent-landing case is the unwarned one.
-  Status: OPEN.
+  Status: FIXED in m0/host-boundary. The fallback is `~/.agentdeck/agent-state`, a directory that is
+  agentdeck's to write, and the warning now fires whenever `AGENTDECK_AGENT_STATE_DIR` itself is
+  unset - which is the silent-landing case.
 
 - [medium] plans/005-containment.md:8 - The superseded header enumerates filesystem reach but not
   `cpus`/`mem_limit`, `no-new-privileges`/`cap_drop`/non-root, or the container lifecycle as a
   persistence bound. A runaway agent now takes the laptop, which is an availability failure plan
   006's watchdog assumes cannot happen; and `~/Library/LaunchAgents` persistence is a category the
-  container previously bounded. Status: OPEN. My header wrote the filesystem half and missed these.
+  container previously bounded. Status: ACCEPTED WITH A REASON in m0/host-boundary, which is what
+  the user decided: all three are named in plan 005's header as unbounded. CPU and memory are
+  carried by `m4/launchd-watchdog`, because the honest fix is a supervisor that can notice and act
+  rather than a limit invented on this branch; the privilege drops have nothing left to drop, since
+  the session already runs as the human; persistence via `~/Library/LaunchAgents` is unbounded and
+  on the review list. **No CPU or memory limit was built, deliberately.**
 
 - [low] .github/workflows/ci.yml:6 - Header still says CI is "the one place `pnpm install` runs
   outside the container", now false. Survived the sweep because it says `container` and the sweep
-  greps `docker`. Status: OPEN.
+  greps `docker`. Status: FIXED in m0/host-boundary. The header now says the runner's install is
+  the SAFE one and the Mac's is a review gate.
 
 - [low] src/claude-hooks.ts:211 - src/ still describes a container in four places, and
   de-containerise.test.ts:151, named "nothing that runs describes a container", asserts only
-  `/docker/i`. Status: OPEN.
+  `/docker/i`. Status: FIXED in m0/host-boundary. The scan asserts `/\bcontainers?\b/i` over src/
+  and scripts/ as well, and the four docstrings are rewritten. Test files are exempt from that half
+  only - `containment.test.ts` has to name what the container used to cover in order to assert that
+  nothing still credits it.
 
 - [low] src/server.ts:126 - `AGENTDECK_ORIGIN` appears in no README section and no example env
   file, only a `console.error` on a process nothing supervises. Unset, `/api` and `/ws` accept any
-  Origin, which is the state of every ordinary run. Status: OPEN.
+  Origin, which is the state of every ordinary run. Status: FIXED in m0/host-boundary. The README
+  has an Environment section listing every variable the server reads, what each default is, and
+  what an unset one means - `AGENTDECK_ORIGIN`'s row says the Origin check is off.
 
 ### Found while verifying, not by the gate
 
@@ -246,3 +281,16 @@ search regexes contain those literals. The QA and refactor stages both returned 
 commits that added the tripping prose (448623a, 7611b75) landed after the stage that ran green.
 Fixed here by excluding the scanner from its own scan. The lesson is the skill's existing one: a
 stage's `ok: true` is a claim about when it ran, not about the branch.
+
+### Closed by m0/host-boundary
+
+Every finding above is marked FIXED or ACCEPTED WITH A REASON. Three of them were the user's
+decisions rather than the auditor's, taken on 2026-08-07 and recorded in plan 005's superseded
+header: the token's home is `~/.agentdeck/token` with a start-time refusal; the cwd allowlist is a
+boundary and bounds the session set; and the container's resource and persistence reach is named as
+unbounded rather than rebuilt, with the resource half carried by `m4/launchd-watchdog`.
+
+What is still open, unchanged and carried forward: **same-uid**. The server and every session run
+as the human, so one agent can attach a debugger to another and read every file that user owns.
+Placement, the environment allowlist and the tmux fix take away the easy reads; none of them is a
+boundary. A distinct uid for agent sessions remains the only real fix and remains untaken.

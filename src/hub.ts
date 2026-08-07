@@ -1,3 +1,4 @@
+import type { CwdAllowlist } from "./cwds.ts";
 import { SessionPty } from "./pty.ts";
 import type { Registry } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
@@ -18,6 +19,7 @@ const DEFAULT_ROWS = 40;
 export interface HubOptions {
   tmux: Tmux;
   registry: Registry;
+  allowlist: CwdAllowlist;
   socket: string;
   /** Injected for tests: builds the live attachment for a session. */
   createPty?: (sessionId: string) => SessionPty;
@@ -26,6 +28,7 @@ export interface HubOptions {
 export class Hub {
   #tmux: Tmux;
   #registry: Registry;
+  #allowlist: CwdAllowlist;
   #socket: string;
   #createPty: (sessionId: string) => SessionPty;
   #ptys = new Map<string, SessionPty>();
@@ -33,6 +36,7 @@ export class Hub {
   constructor(options: HubOptions) {
     this.#tmux = options.tmux;
     this.#registry = options.registry;
+    this.#allowlist = options.allowlist;
     this.#socket = options.socket;
     this.#createPty =
       options.createPty ??
@@ -46,14 +50,26 @@ export class Hub {
   }
 
   /**
-   * Attach to everything tmux has and let go of everything it does not.
+   * Attach to every ALLOWED session tmux has, and let go of everything else.
    *
-   * Called at start and after any change to the session list. Cheap enough to call often, and
-   * calling it often is what makes a session someone started by hand in a terminal appear in the
-   * strip without anyone having told us about it.
+   * Called at start and after any change to the session list. Cheap enough to call often.
+   *
+   * The filter is the cwd allowlist, and it is here because the allowlist is the only boundary left - so it has to bound the session SET, not only what
+   * `POST /api/sessions` will start. The socket is `/tmp/tmux-<uid>/agentdeck`, writable by every
+   * process running as this user, so without the filter
+   * `tmux -L agentdeck new-session -d -c / -- /bin/sh` becomes a tab within one sync interval,
+   * streamed to the phone and accepting typed input, having asked nobody.
+   *
+   * The cost, accepted deliberately and written into plan 005 rather than left implicit: a
+   * session started by hand in tmux does not appear as a tab. Neither does one this server
+   * created before a restart, because the cwd it is matched on lives in the registry's memory and
+   * a restart takes it - the same loss `CwdAllowlist.refusal` already warns a restart costs, one
+   * step further. Recreating the session recovers it.
    */
   async sync(): Promise<void> {
-    const live = await this.#registry.list();
+    const live = (await this.#registry.list()).filter((session) =>
+      this.#allowlist.allows(session.cwd),
+    );
     const liveIds = new Set(live.map((session) => session.id));
 
     for (const session of live) {

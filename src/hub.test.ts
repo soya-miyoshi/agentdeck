@@ -70,6 +70,7 @@ const build = () => {
   const hub = new Hub({
     tmux,
     registry,
+    allowlist,
     socket: "test",
     createPty: (sessionId) => {
       created.push(sessionId);
@@ -78,8 +79,36 @@ const build = () => {
       return pty;
     },
   });
-  return { hub, registry, die, created, ptys };
+  return { hub, registry, tmux, die, created, ptys };
 };
+
+void describe("the allowlist bounds the session set, not only what can be created", () => {
+  void test("a session on the socket that agentdeck did not start is never attached", async () => {
+    // The socket is /tmp/tmux-<uid>/agentdeck and every process running as this user can write
+    // it, so `tmux -L agentdeck new-session -d -c / -- /bin/sh` is otherwise a tab the phone can
+    // type into within one sync. agentdeck knows a session's directory only for the sessions it
+    // started, so an unknown one is outside the allowlist by definition.
+    const { hub, registry, tmux, created } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await tmux.createOrAttach("stranger", "/", "/bin/sh", [], {});
+    await hub.sync();
+    assert.deepEqual(created, [session.id], "the hub adopted a session nobody allowed");
+    assert.equal(hub.size, 1);
+    assert.equal(hub.streamFor("stranger"), undefined);
+  });
+
+  void test("and it is not on the session list either, so no tab claims it", async () => {
+    // A tab with no stream is the confidently-wrong output this design refuses, so the list and
+    // the hub have to agree - which they do by having one filter, in Registry.list.
+    const { registry, tmux } = build();
+    await registry.create("/workspace/a", "claude");
+    await tmux.createOrAttach("stranger", "/", "/bin/sh", [], {});
+    assert.deepEqual(
+      (await registry.list()).map((s) => s.id.startsWith("a-")),
+      [true],
+    );
+  });
+});
 
 void describe("reconciling against tmux", () => {
   void test("attaches to a session it has not seen", async () => {
@@ -132,6 +161,7 @@ void describe("reconciling against tmux", () => {
     const hub = new Hub({
       tmux,
       registry,
+      allowlist,
       socket: "test",
       createPty: (sessionId) => {
         if (sessionId.startsWith("a-")) throw new Error("posix_spawnp failed.");
@@ -149,9 +179,11 @@ void describe("reconciling against tmux", () => {
     assert.equal(hub.size, 1);
   });
 
-  void test("tmux is the truth: a session it did not create still gets attached", async () => {
-    // A human starting a session by hand in a terminal must appear in the strip without anyone
-    // having told the hub about it. A remembered set would miss exactly this.
+  void test("tmux is still the truth for every session inside the boundary", async () => {
+    // The hub keeps no set of its own: it attaches to what tmux reports, filtered to the
+    // allowlist, so a session it was never told about individually still appears. What changed on
+    // 2026-08-07 is only the filter - a session whose directory nobody allowed is not adopted,
+    // which is the case the test above covers.
     const { hub, registry, created } = build();
     await registry.create("/workspace/a", "claude");
     await registry.create("/workspace/b", "claude");
