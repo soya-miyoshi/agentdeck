@@ -286,3 +286,102 @@ void describe("the allowlist is matched against where tmux says a session is", (
     assert.equal((await registry.list())[0]?.cwd, "/workspace/web");
   });
 });
+
+/**
+ * m0/create-500's second property, over the modelled tmux: a create that cannot finish takes back
+ * the session it made. The real-binary version of this lives in src/create-500.test.ts; these are
+ * the branches that are hard to provoke against a real tmux - a list that succeeds but omits the
+ * session, and the attach path, where killing would destroy somebody else's running agent.
+ */
+const buildFragile = () => {
+  const sessions: FakeSessions = new Map();
+  let mode: "ok" | "list-throws" | "list-omits" = "ok";
+  const tmux = new Tmux({
+    socket: "test",
+    exec: async (args) => {
+      const verbAt = (name: string) => args.indexOf(name);
+      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => verbAt(n) !== -1);
+      const rest = verb === undefined ? args : args.slice(verbAt(verb) + 1);
+      if (verb === "list-sessions") {
+        if (mode === "list-throws") throw new Error("tmux is not answering this call");
+        const empty: FakeSessions = new Map();
+        const shown = mode === "list-omits" ? empty : sessions;
+        if (shown.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
+        const out = [...shown.entries()]
+          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, String(s.created), s.path].join(SEP))
+          .join("\n");
+        return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
+      }
+      if (verb === "new-session") {
+        const id = rest[rest.indexOf("-s") + 1] ?? "";
+        sessions.set(id, {
+          dead: false,
+          status: "",
+          created: 1_700_000_000,
+          path: rest[rest.indexOf("-c") + 1] ?? "",
+        });
+      }
+      if (verb === "kill-session") {
+        sessions.delete((rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, ""));
+      }
+      return await Promise.resolve({ stdout: "", stderr: "" });
+    },
+  });
+  const { profiles } = parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } });
+  const registry = new Registry(tmux, profiles, new CwdAllowlist(["/workspace/agentdeck"]));
+  return {
+    registry,
+    sessions,
+    fail: (next: "list-throws" | "list-omits") => (mode = next),
+    heal: () => (mode = "ok"),
+  };
+};
+
+void describe("a create that cannot finish leaves no orphan", () => {
+  void test("the session is killed when the list after the create throws", async () => {
+    // The shape of the reported bug, minus its cause: tmux made the session, the call could not
+    // report it, and before m0/create-500 the agent stayed running with nobody holding its id.
+    const { registry, sessions, fail } = buildFragile();
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.deepEqual([...sessions.keys()], []);
+  });
+
+  void test("the session is killed when the list comes back without it", async () => {
+    // The other branch, and the one the 500 actually came out of: list() succeeded and simply did
+    // not contain what had just been created.
+    const { registry, sessions, fail } = buildFragile();
+    fail("list-omits");
+    await assert.rejects(
+      async () => await registry.create("/workspace/agentdeck", "claude"),
+      /was created but tmux does not list it/,
+    );
+    assert.deepEqual([...sessions.keys()], []);
+  });
+
+  void test("a retry after a failed create succeeds rather than colliding with its own leftovers", async () => {
+    // Undoing the create has to clear the remembered metadata too. If it did not, the id would
+    // still be in `#meta` and the next create would report an attach to a session that no longer
+    // exists - a failure that outlives the failure.
+    const { registry, sessions, fail, heal } = buildFragile();
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    heal();
+    const result = await registry.create("/workspace/agentdeck", "claude");
+    assert.equal(result.warning, undefined);
+    assert.equal(result.session.state, "idle");
+    assert.deepEqual([...sessions.keys()], [result.session.id]);
+  });
+
+  void test("an ATTACH that cannot finish leaves the running agent alone", async () => {
+    // The line between taking back your own mess and destroying somebody's work. The second call
+    // created nothing - tmux handed back a session that was already running - so a failure after
+    // that point must not kill it. Getting this wrong turns a transient tmux error into hours of
+    // an agent's work ended by a request that only wanted to look at it.
+    const { registry, sessions, fail } = buildFragile();
+    const first = await registry.create("/workspace/agentdeck", "claude");
+    fail("list-throws");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.deepEqual([...sessions.keys()], [first.session.id]);
+  });
+});

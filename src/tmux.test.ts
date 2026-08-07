@@ -93,6 +93,29 @@ void describe("listing sessions", () => {
     assert.deepEqual(await tmux.list(), []);
   });
 
+  void test("one mangled line fails the whole list rather than being read as a session", async () => {
+    // m0/create-500. A client tmux does not believe is UTF-8 gets `_` in place of every byte tmux
+    // considers non-printable, including the U+001F this format is built on. Reading such a line
+    // leniently gave every session the whole line as its id, which `Registry.list()` then dropped
+    // for having no metadata - a create that had worked, reported as a 500, agent still running.
+    // Refusing is the point: half a list is worse than an error, because nothing downstream can
+    // tell it from a machine with fewer sessions on it.
+    const { tmux } = fake({
+      "list-sessions": `${line("a-claude-1", "0", "")}\nb-claude-2_0__1700000000_/x\n`,
+    });
+    await assert.rejects(async () => await tmux.list(), /field separator[\s\S]*UTF-8/);
+  });
+
+  void test("a session name containing the separator is still parsed, not called mangled", async () => {
+    // The refusal above must fire on the mangling and nothing else. Session names are attacker-
+    // adjacent - anything running as this user can create one - but a name can only ADD
+    // separators to the line, never remove them, so it cannot reach the refusal. It also cannot
+    // impersonate one of ours: the id it parses to is not the id `Registry` has metadata for.
+    const { tmux } = fake({ "list-sessions": `${line(`odd${SEP}name`, "0", "")}\n` });
+    const [session] = await tmux.list();
+    assert.equal(session?.id, "odd");
+  });
+
   void test("any other failure propagates", async () => {
     const error = Object.assign(new Error("exited"), { stderr: "permission denied" });
     const { tmux } = fake({ "list-sessions": error });
@@ -342,6 +365,34 @@ void describe("the environment a tmux server is started with", () => {
     for (const name of BASE_ENV_NAMES) {
       assert.doesNotMatch(name, /KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL/i, name);
     }
+  });
+
+  void test("an operator's own UTF-8 locale is kept, in whichever variable declares it", () => {
+    // Defaulted, not forced. Overwriting LC_CTYPE on a machine whose operator has chosen a locale
+    // would change how their agents render text, to fix a problem they do not have.
+    for (const name of ["LC_ALL", "LC_CTYPE", "LANG"]) {
+      const built = baseEnv({ PATH: "/usr/bin", [name]: "ja_JP.UTF-8" });
+      assert.equal(built[name], "ja_JP.UTF-8", name);
+      assert.equal(built["LC_CTYPE"], name === "LC_CTYPE" ? "ja_JP.UTF-8" : undefined, name);
+    }
+    assert.equal(baseEnv({ PATH: "/usr/bin", LANG: "en_US.utf8" })["LC_CTYPE"], undefined);
+  });
+
+  void test("an LC_ALL that is not UTF-8 is passed through, and defaulting cannot rescue it", () => {
+    // LC_ALL outranks LC_CTYPE in every implementation, so the LC_CTYPE default below is inert
+    // here: this run WILL talk to tmux as a non-UTF-8 client and WILL get `_` where the field
+    // separator should be. baseEnv does not silently overwrite a locale the operator set, which
+    // is exactly why `Tmux.list()` refuses a separator-less line loudly - see
+    // src/create-500.test.ts. This test records that the gap is known, not that it is fixed.
+    const built = baseEnv({ PATH: "/usr/bin", LC_ALL: "C" });
+    assert.equal(built["LC_ALL"], "C");
+    assert.equal(built["LC_CTYPE"], "UTF-8");
+  });
+
+  void test("LC_CTYPE is on the name list, so the global-environment sweep does not strip it", () => {
+    // ensureServer unsets every global variable that is NOT on this list. Off the list, the
+    // locale a tmux client needs would be swept away by the next boot that found it.
+    assert.ok(BASE_ENV_NAMES.includes("LC_CTYPE"));
   });
 
   void test("a process started with no TERM still gets a usable terminal", () => {
