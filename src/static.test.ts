@@ -398,7 +398,13 @@ void describe("an unbuilt client", () => {
   void test("serves a sentence naming the command to run, not a silent 404", async () => {
     const res = await fetch(`${unbuiltBase}/`);
     assert.equal(res.status, 503);
-    assert.match(await res.text(), /pnpm build/);
+    const body = await res.text();
+    assert.match(body, /pnpm build/);
+    // ...but not WHERE. This route is unauthenticated, and the absolute build path names the
+    // account, the checkout layout and the forge owner to anyone who can reach the port, in the
+    // state the server is most likely to be probed in. `/api/health` is held to the same line.
+    // The full sentence, path included, goes to the log, where the person who can act on it is.
+    assert.doesNotMatch(body, /\//, "the wire answer disclosed a filesystem path");
   });
 
   void test("the API still answers", async () => {

@@ -181,6 +181,27 @@ export const main = async (): Promise<void> => {
   // one surviving rule made executable: the token is never inside a tree a session is pointed at.
   // A refusal is the right shape because there is no degraded mode - starting anyway would serve
   // exactly the situation the rule exists to prevent, and would do it silently.
+  // `dist/client` is the second dangerous location, and it is dangerous in a way the allowlist
+  // does not describe: everything under it is served to anyone who can reach the port, with NO
+  // bearer token, because the page has to load before a token exists. A token file placed there
+  // is not merely readable by an agent - it is downloadable by any tailnet device with HTTP reach
+  // and no shell at all, at a URL equal to its filename. And the allowlist check cannot catch it:
+  // if this repo is not itself on AGENTDECK_MOUNTS, `tokenInsideAllowlist` says nothing and the
+  // boot check passes.
+  const published = [tokenFile, process.env["AGENTDECK_PROFILES"]]
+    .filter((path): path is string => path !== undefined)
+    .find((path) => tokenInsideAllowlist(path, [CLIENT_DIR]) !== undefined);
+  if (published !== undefined) {
+    console.error(
+      `agentdeck: ${resolve(published)} is inside ${CLIENT_DIR}, which this server publishes ` +
+        `UNAUTHENTICATED on every path that is not an API route - the page has to load before a ` +
+        `token exists. Anything under that directory is downloadable by any device that can reach ` +
+        `the port, at a URL equal to its filename. Move it - the default, ${defaultTokenFile()}, ` +
+        `is outside it.`,
+    );
+    process.exit(1);
+  }
+
   const clash = tokenInsideAllowlist(tokenFile, allowlist.paths);
   if (clash !== undefined) {
     console.error(

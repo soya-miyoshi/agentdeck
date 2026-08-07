@@ -292,6 +292,43 @@ void describe("the agent profiles file is a host-execution surface, not config",
   });
 });
 
+// `dist/client` is published UNAUTHENTICATED - the page has to load before a token exists - so it
+// is the second location a credential must never be placed in, and the allowlist rule cannot see
+// it: if this repo is not itself on AGENTDECK_MOUNTS, `tokenInsideAllowlist` says nothing and the
+// boot check passes while the token is downloadable at a URL equal to its filename.
+void describe("the published build directory is a place a secret cannot go", () => {
+  const clientDir = fileURLToPath(new URL("../dist/client", import.meta.url));
+
+  void test("a token file inside it is a refusal, not a warning", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agentdeck-published-"));
+    const result = await boot({
+      HOME: home,
+      AGENTDECK_PORT: "0",
+      AGENTDECK_TOKEN_FILE: join(clientDir, "token"),
+    });
+    assert.notEqual(result.code, 0, "the server started with its token in a published directory");
+    assert.match(result.stderr, /UNAUTHENTICATED/);
+    assert.match(result.stderr, /dist\/client/);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  void test("so is a profiles file, which is the more direct execution surface", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agentdeck-published-"));
+    const result = await boot({
+      HOME: home,
+      AGENTDECK_PORT: "0",
+      AGENTDECK_PROFILES: join(clientDir, "agents.json"),
+    });
+    assert.notEqual(
+      result.code,
+      0,
+      "the server started with its profiles in a published directory",
+    );
+    assert.match(result.stderr, /UNAUTHENTICATED/);
+    rmSync(home, { recursive: true, force: true });
+  });
+});
+
 void describe("the documents name the mechanism this host has", () => {
   void test("plan 002 replaces /proc/<pid>/environ with the tmux read that was real here", async () => {
     // The leak was documented as one agent reading another's /proc/<pid>/environ, a path macOS

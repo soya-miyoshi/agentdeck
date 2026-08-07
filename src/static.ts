@@ -60,6 +60,14 @@ const NOT_BUILT = (root: string): string =>
   `agentdeck: the client is not built, so there is no page to serve. ` +
   `Run \`pnpm build\`, which writes ${root}.`;
 
+// What an UNAUTHENTICATED caller is told, which is deliberately less. The sentence above names an
+// absolute path, so on the wire it hands out the account name, the checkout layout and the forge
+// owner before any token is presented - and this is the state the server is in when it is most
+// likely to be probed. `/api/health`, the only other unauthenticated route, was held to liveness
+// and a version for the same reason. The instruction still goes to the log, where the person who
+// can act on it is.
+const NOT_BUILT_PUBLIC = "the client is not built - run `pnpm build`; see the server log\n";
+
 /**
  * On every answer, including the refusals.
  *
@@ -192,7 +200,8 @@ const createStaticHandler = (
       try {
         root = await realpath(configured);
       } catch {
-        sendText(req, res, 503, { "cache-control": "no-store" }, `${NOT_BUILT(configured)}\n`);
+        console.error(NOT_BUILT(configured));
+        sendText(req, res, 503, { "cache-control": "no-store" }, NOT_BUILT_PUBLIC);
         return;
       }
 
