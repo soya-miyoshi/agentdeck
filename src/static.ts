@@ -266,8 +266,20 @@ export const withClient = (
     // Routing asks the normalised path, because that is the path the API's own routes match on.
     // Serving asks the RAW one: `new URL` resolves `/../x` to `/x` before any check of ours runs,
     // so the traversal the client sent has to reach the static handler as it was written.
-    const raw = (req.url ?? "/").split(/[?#]/)[0] ?? "/";
-    if (isApiPath(new URL(req.url ?? "/", "http://localhost").pathname)) {
+    const target = req.url ?? "/";
+    const raw = target.split(/[?#]/)[0] ?? "/";
+    // `new URL` runs synchronously in the request listener, before any catch of ours: the WHATWG
+    // parser reads `//` and `/\` as an authority and throws on the empty host, which with nothing
+    // supervising the process is the deck gone. A target the parser refuses is not one of our API
+    // routes, so route it as the raw path - `locate` resolves that itself and refuses anything that
+    // leaves the build directory.
+    let pathname: string;
+    try {
+      pathname = new URL(target, "http://localhost").pathname;
+    } catch {
+      pathname = raw;
+    }
+    if (isApiPath(pathname)) {
       api(req, res);
       return;
     }

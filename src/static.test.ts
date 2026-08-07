@@ -194,6 +194,23 @@ void describe("escaping the build directory", () => {
     });
   }
 
+  // A request target the WHATWG parser refuses outright. `//` and `/\` read as the start of an
+  // authority with an empty host, and `http://[` as a broken IPv6 literal: `new URL` throws on each.
+  // That parse runs synchronously in the request listener, so an unguarded throw there ends the
+  // process - every attached phone loses its socket and nothing restarts the deck. The assertion is
+  // deliberately weak (a status line came back at all, and the next request still gets served),
+  // because the point is that the server is still alive.
+  const unparseable = ["//", "/\\", "http://["];
+  for (const path of unparseable) {
+    void test(`${path} is answered rather than taking the process down`, async () => {
+      const res = await get(path);
+      assert.ok(Number.isFinite(res.status), `${path} got no status line`);
+      assert.ok(!res.body.includes(SECRET), `${path} served the file it tried to steal`);
+      const after = await get("/");
+      assert.equal(after.status, 200, `the server did not survive ${path}`);
+    });
+  }
+
   void test("a double-encoded climb is a filename, and lands inside the build directory", async () => {
     // `%252f` decodes once to the literal text `%2f`, which is a character a filename may
     // contain and not a separator. Plan 001 asks that such a path land inside the build

@@ -189,7 +189,23 @@ export const createHandler = (deps: HttpDeps) => {
   };
 
   return (req: IncomingMessage, res: ServerResponse): void => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    // This parse is synchronous and outside every catch below: `//` and `/\` make the WHATWG parser
+    // throw on the empty host, and an uncaught throw here ends the process. A request target the
+    // parser refuses is not a route we have, so it gets a fixed sentence rather than the deck.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+    } catch {
+      const payload = JSON.stringify({ error: "that request target is not a valid URL path" });
+      res.writeHead(400, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      res.end(payload);
+      return;
+    }
     handle(req, url)
       .then(({ status, body }) => {
         const payload = JSON.stringify(body);

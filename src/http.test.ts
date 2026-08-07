@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 
 import { parseProfiles } from "./agent-profiles.ts";
@@ -88,6 +88,38 @@ const call = async (
   });
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 };
+
+void describe("a request target the URL parser refuses", () => {
+  // `fetch` normalises `//` away before a byte leaves the client, so the request has to be written
+  // onto the socket by hand. The parse of `req.url` is synchronous and outside every catch in the
+  // handler: unguarded, `//` throws `ERR_INVALID_URL` and, with nothing supervising the process,
+  // ends the deck. The proof is that an answer comes back and the next request still works.
+  const raw = async (target: string): Promise<string> => {
+    const socket = connect(Number(new URL(base).port), "127.0.0.1");
+    const chunks: Buffer[] = [];
+    await new Promise<void>((done, fail) => {
+      socket.on("connect", () => {
+        socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+      });
+      socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+      socket.on("error", fail);
+      socket.on("end", () => {
+        socket.destroy();
+        done();
+      });
+    });
+    return Buffer.concat(chunks).toString("utf8");
+  };
+
+  for (const target of ["//", "/\\", "http://["]) {
+    void test(`${target} is a 400, not the process`, async () => {
+      const text = await raw(target);
+      assert.match(text.split("\r\n")[0] ?? "", /^HTTP\/1\.1 400 /);
+      const { status } = await call("/api/health", { auth: false });
+      assert.equal(status, 200, `the server did not survive ${target}`);
+    });
+  }
+});
 
 void describe("health", () => {
   void test("is unauthenticated, because the probe must not need the token that starts processes", async () => {
