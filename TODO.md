@@ -276,11 +276,11 @@ Driven from `curl` only. No client.
       not listed and not killed. Plans 002, 003 and 005, the README and `CwdAllowlist.refusal`
       were all claiming the old behaviour and now state this one.
 
-- [ ] **`m2/reconnect`** (BLOCKED on `m2/session-metadata-survives-restart`, and the branch
-      `m2/reconnect` is left unmerged rather than ticked against the half it can do. The socket-drop
-      half and telling a refused origin from a lost network are done on that branch; the epoch half
-      is not reachable from the client at all, because after a restart there is no session to
-      re-attach to. Splitting this item is a person's call, not mine.)
+- [ ] **`m2/reconnect`** (UNBLOCKED on 2026-08-08: `m2/session-metadata-survives-restart` landed,
+      so a session that outlives the server is listed and attachable again and the epoch half is
+      now reachable. The branch `m2/reconnect` already carries the socket-drop half and telling a
+      refused origin from a lost network; it needs `main` merged into it and the epoch half
+      finished. Was blocked because after a restart there was no session to re-attach to at all.)
       ORIGINAL: — exponential backoff capped low; a rejected token stops retrying,
       drops stored state and shows the paste field.
       **Done when:** the socket is killed mid-output and the reconnect repaints instead of showing
