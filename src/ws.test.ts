@@ -279,7 +279,7 @@ void describe("refusals", () => {
 // they replace, and a second copy of the listen/open/collect dance is where the two halves drift.
 type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "repaint">;
 
-const ownServer = async (overrides: Partial<SnapshotDeps>) => {
+const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapshotTimeoutMs">>) => {
   const own = createServer();
   const ownStream = new SessionStream({ sessionId: "s1" });
   const close = attachWebSocketServer(own, {
@@ -302,12 +302,36 @@ const ownServer = async (overrides: Partial<SnapshotDeps>) => {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
+  // A second phone on the SAME server: a per-session cache that wedges is a defect other clients
+  // inherit, so a test for it needs a client that arrives after the first one broke.
+  const extras: WebSocket[] = [];
+  const connect = async () => {
+    const other = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
+    const otherFrames: Frame[] = [];
+    other.on("message", (raw: Buffer) =>
+      otherFrames.push(JSON.parse(raw.toString("utf8")) as Frame),
+    );
+    await new Promise<void>((resolve, reject) => {
+      other.once("open", resolve);
+      other.once("error", reject);
+    });
+    extras.push(other);
+    return {
+      socket: other,
+      frames: otherFrames,
+      attach: () =>
+        other.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 })),
+    };
+  };
+
   return {
     socket,
     frames,
     stream: ownStream,
+    connect,
     attach: () => socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 })),
     stop: () => {
+      for (const extra of extras) extra.close();
       socket.close();
       close();
       own.close();
@@ -391,6 +415,78 @@ void describe("a failing capture costs one message, not the process", () => {
 
 // ---------------------------------------------------------------------------------------------
 
+// Coalescing snapshots per session means one build's fate is every caller's fate, so both ways a
+// build can end badly - never settling, and failing - have to leave the session usable for the
+// next phone that attaches.
+void describe("a bad snapshot build is not inherited by the next client", () => {
+  void test("a capture that never returns is abandoned, and the next attach builds its own", async () => {
+    // A tmux server that stops answering is a capture-pane that never returns: Tmux.#exec passes
+    // no execFile timeout, and any process on this uid can stop the tmux server. Evicting the map
+    // entry only in `.finally()` pinned it forever, and every later attach joined the dead build.
+    let calls = 0;
+    const wedged = await ownServer({
+      snapshotTimeoutMs: 150,
+      captureHistory: async () => {
+        calls += 1;
+        if (calls === 1) return await new Promise<string>(() => undefined);
+        return await Promise.resolve("healthy scrollback\n");
+      },
+    });
+    wedged.attach();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(wedged.frames.at(-1)?.["t"], "error", "the hung build was never bounded");
+
+    const second = await wedged.connect();
+    second.attach();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const snapshot = second.frames.find((frame) => frame["t"] === "snapshot");
+    assert.ok(snapshot, "a fresh client inherited the wedged build instead of making its own");
+    assert.equal(snapshot["history"], "healthy scrollback\n");
+    wedged.stop();
+  });
+
+  void test("a failed snapshot detaches, so a retry gets a listener that forwards", async () => {
+    // The forwarding listener queues until the snapshot is away. When the snapshot failed, the
+    // queue was never released and the listener stayed registered - so the tab saw nothing ever
+    // again, every byte was retained in memory, and a retry found `client.attached` already set
+    // and registered nothing.
+    let calls = 0;
+    const failing = await ownServer({
+      captureHistory: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await Promise.resolve();
+          throw new Error("stdout maxBuffer length exceeded");
+        }
+        return await Promise.resolve("healthy scrollback\n");
+      },
+    });
+    failing.attach();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(failing.frames.at(-1)?.["t"], "error");
+
+    failing.frames.length = 0;
+    failing.attach();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(
+      failing.frames.some((frame) => frame["t"] === "snapshot"),
+      "the retry got no snapshot",
+    );
+
+    failing.stream.write(Buffer.from("after the retry"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const chunks = failing.frames.filter((frame) => frame["t"] === "chunk");
+    assert.equal(
+      chunks.filter((frame) => String(frame["data"]).includes("after the retry")).length,
+      1,
+      "the client is silently blind: the poisoned listener swallowed the bytes",
+    );
+    failing.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
 // The repaint's bytes come back through the same stream the forwarding listener is on, so a
 // listener that SENDS before the snapshot delivers chunks to a client that has no position yet.
 // The client answers those with `resync` (src/client/stream-position.ts), and for any session past
@@ -458,5 +554,89 @@ void describe("a cold attach is told where it is before it is told what changed"
       "the repaint's bytes were painted twice",
     );
     socket.close();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// Coalescing shares one snapshot build across every socket asking for the same session. Sharing
+// the SUCCESS is the point. Sharing the FAILURE meant one client's flood - or one capture-pane
+// past its buffer - decided the outcome for whichever client happened to attach beside it, and the
+// attach path treats a failed snapshot as a reason to detach. The victim's socket stays OPEN, so
+// nothing tells it to try again: the shipped client sends `attach` on mount and on reconnect only.
+void describe("one client's failed snapshot does not detach another", () => {
+  let shServer: ReturnType<typeof createServer>;
+  let shClose: () => void;
+  let shUrl: string;
+  let shStream: SessionStream;
+  let attempts = 0;
+
+  before(async () => {
+    shStream = new SessionStream({ sessionId: "s1" });
+    shServer = createServer();
+    shClose = attachWebSocketServer(shServer, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? shStream : undefined),
+      captureHistory: async () => await Promise.resolve("scrollback\n"),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
+      // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets
+      // a snapshot rather than inheriting the first caller's exception.
+      repaint: async () => {
+        attempts += 1;
+        await Promise.resolve();
+        if (attempts === 1) throw new Error("stdout maxBuffer length exceeded");
+        return { data: "repainted", seq: shStream.buffer.headSeq };
+      },
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    }).close;
+    await new Promise<void>((done) => shServer.listen(0, "127.0.0.1", done));
+    shUrl = `ws://127.0.0.1:${String((shServer.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    shClose();
+    shServer.close();
+  });
+
+  void test("the second client still gets its snapshot and stays attached", async () => {
+    const sockets = [
+      new WebSocket(shUrl, TOKEN, { origin: ORIGIN }),
+      new WebSocket(shUrl, TOKEN, { origin: ORIGIN }),
+    ];
+    const seen: Frame[][] = [[], []];
+    sockets.forEach((socket, index) => {
+      socket.on("message", (raw: Buffer) => {
+        seen[index]?.push(JSON.parse(raw.toString("utf8")) as Frame);
+      });
+    });
+    await Promise.all(
+      sockets.map(
+        async (socket) =>
+          await new Promise<void>((resolve, reject) => {
+            socket.once("open", resolve);
+            socket.once("error", reject);
+          }),
+      ),
+    );
+
+    // Both attach inside one in-flight window, so the second joins the first's build.
+    for (const socket of sockets) {
+      socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const gotSnapshot = seen.filter((frames) => frames.some((f) => f["t"] === "snapshot")).length;
+    assert.ok(
+      gotSnapshot >= 1,
+      "neither client got a snapshot: the shared failure took both of them down",
+    );
+    assert.ok(
+      shStream.clients.size >= 1,
+      "a failed build detached every client, leaving open sockets with no listener",
+    );
+    for (const socket of sockets) socket.close();
   });
 });

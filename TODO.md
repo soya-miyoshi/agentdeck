@@ -223,13 +223,21 @@ Driven from `curl` only. No client.
       **Done when:** a client attaching to a long-running session sees scrollback then a correct
       live screen; and in alternate-screen mode `history` is absent rather than wrong.
 
-- [ ] **`m2/resync-ping`** (PARTIAL: `resync` is implemented and demonstrated end to end,
-      including the stale-epoch case. Ping/pong is implemented on a 15s interval but has NOT been
-      verified against a real half-open connection, which is the only failure it exists for.)
-      ORIGINAL: — gap detection driving `resync`; server pings every 15s and closes at
+- [x] **`m2/resync-ping`** — gap detection driving `resync`; server pings every 15s and closes at
       30s without a pong; client reconnects after two silent intervals.
       **Done when:** pulling the network is noticed by the ping before it is noticed by a status
       that stopped changing.
+      **Verified against a real half-open socket** — `src/half-open.test.ts` runs a TCP proxy that
+      stops forwarding in both directions without closing either side, which is the only failure
+      the ping exists for; a close, a destroy or an error all produce events the server already
+      reacts to. The test records what the proxy does not model.
+      **A per-socket frame budget landed with the automatic retry**, because a reconnect ladder in
+      front of an unbounded fire-and-forget message path is the wrong order to build in.
+      **Known defect, open in `audit.md`:** the socket's 64 KB `maxPayload` applies to `input`, and
+      xterm delivers a paste as one frame — so an ordinary paste of a log closes the transport with
+      no error frame, and the client reconnects and re-attaches every tab. Fixing it is a choice
+      between an application-layer bound and client-side chunking; the latter wants
+      `m2/client-minimal`.
 
 - [x] **`m2/resize-min`** — pane sized to the minimum over _currently attached_ clients; detach
       releases the constraint; an empty set resizes nothing.
