@@ -118,7 +118,9 @@ void describe("create or attach", () => {
     assert.deepEqual(commandsOf(create)[1], [
       "set-option",
       "-t",
-      "web-claude-abc",
+      // `=name:` and not `name`: a window target that resolves by prefix or fnmatch would set the
+      // option on whatever session happens to share the prefix.
+      "=web-claude-abc:",
       "remain-on-exit",
       "on",
     ]);
@@ -181,9 +183,42 @@ void describe("create or attach", () => {
     ]);
     for (const command of commandsOf(create).filter((c) => c[0] === "set-environment")) {
       // -u is unset rather than set-to-empty, and -t is the session it was just given to.
-      assert.deepEqual(command.slice(0, 4), ["set-environment", "-t", "s", "-u"]);
+      assert.deepEqual(command.slice(0, 4), ["set-environment", "-t", "=s", "-u"]);
       assert.equal(command.length, 5);
     }
+  });
+
+  void test("a failed create does not put the secret or an API key in the error", async () => {
+    // node puts the whole argv into the rejection message of a failed execFile, and this argv
+    // carries `-e AGENTDECK_SECRET=... -e ANTHROPIC_API_KEY=...`. That message reached the client
+    // verbatim through the generic 500, so the phone rendered the operator's key. Any non-zero
+    // exit does it: a socket tmux refuses to connect to, a fork failure, a chained set-option
+    // that fails.
+    const { tmux } = fake({
+      "list-sessions": "",
+      "new-session": Object.assign(
+        new Error(
+          "Command failed: tmux -L agdz new-session -d -A -s x -c /tmp " +
+            "-e AGENTDECK_SECRET=s3cret -e ANTHROPIC_API_KEY=sk-live-xyz -- /bin/sh",
+        ),
+        { stderr: "error connecting to /tmp/tmux-501/agdz" },
+      ),
+    });
+    await assert.rejects(
+      async () =>
+        await tmux.createOrAttach("x", "/tmp", "/bin/sh", [], {
+          AGENTDECK_SECRET: "s3cret",
+          ANTHROPIC_API_KEY: "sk-live-xyz",
+        }),
+      (error: Error) => {
+        assert.doesNotMatch(error.message, /s3cret/);
+        assert.doesNotMatch(error.message, /sk-live-xyz/);
+        // Still says what went wrong - a redaction that also removes the diagnosis is a different
+        // failure, not a fix.
+        assert.match(error.message, /error connecting to/);
+        return true;
+      },
+    );
   });
 
   void test("the command is passed after --, so an argument cannot become a tmux flag", () => {

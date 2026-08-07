@@ -5,21 +5,28 @@
 > because its reasoning is still the best account of what the boundary was for, not because it
 > describes what runs.
 >
-> **What this removes.** Everything the section below calls *protected* is no longer protected:
+> **What this removes.** Everything the section below calls _protected_ is no longer protected:
 > the home directory, SSH keys, browser profiles, other repositories, keychain, system files. An
 > agent that runs `rm -rf ~` or a poisoned `curl | sh` now reaches the Mac. The blast radius was
 > "the union of the mount list"; it is now the user's account.
 >
-> **What this does not change.** Every hazard this plan describes as *inside* the boundary
+> **What this does not change.** Every hazard this plan describes as _inside_ the boundary
 > survives unchanged, because it never depended on the container: same-uid between the server and
 > every session, so file mode buys nothing; one agent able to read another's secrets by the means
-> this host has (see *What macOS does instead of `/proc`* below); `cwd` being where a session was
+> this host has (see _What macOS does instead of `/proc`_ below); `cwd` being where a session was
 > pointed rather than a wall it is held
 > behind. The self-mount consequence generalises rather than lifts — the files the host executes
 > (`eslint.config.mjs`, `.prettierrc*`, `package.json` scripts, `pnpm-lock.yaml`,
 > `src/**/*.test.ts`, `mise.toml`, `.claude/`, `scripts/` - `package.json`'s own `postinstall` runs
 > `scripts/fix-node-pty-permissions.mjs` on every `pnpm install`) are agent-writable as before, and there is no
-> longer a container between that and the machine. `src/containment.test.ts` tests that this stays
+> longer a container between that and the machine. The agent profiles file `AGENTDECK_PROFILES`
+> names belongs in that enumeration and was missing from it: `command` and `args` go unmodified
+> into `tmux new-session -- command args` and run as the human, so it is a more direct execution
+> surface than any config the toolchain evaluates. Since 2026-08-07 the server refuses to start
+> when it resolves inside an allowlist entry, the same rule and the same test as the token file,
+> and `waiting.settings` must be relative to the agent-state directory and stay inside it — it was
+> otherwise an arbitrary-JSON-write primitive, rewritten at every boot, aimed wherever a profile
+> said (the operator's real `~/.claude/settings.json`, for one). `src/containment.test.ts` tests that this stays
 > written down, and still applies.
 >
 > **The token file's home, decided 2026-08-07 (m0/host-boundary).** `~/.agentdeck/token`, mode
@@ -37,7 +44,13 @@
 > whose `cwd` is on the allowlist; everything else on the tmux socket is left alone. The socket is
 > `/tmp/tmux-<uid>/agentdeck`, writable by every process running as this user, so without it
 > `tmux -L agentdeck new-session -d -c / -- /bin/sh` was a tab the phone could type into within
-> one 2s sync. **The accepted cost, written here rather than left implicit:** a session started by
+> one 2s sync. **What is matched, corrected 2026-08-07:** `#{session_path}`, what tmux reports,
+> and the remembered cwd must agree with it. Matching the remembered value alone enforced the
+> allowlist against a NAME, and the name is `sessionId(cwd, agent)` — a pure function of two
+> knowable things, so anything running as this user could kill a session and recreate it under the
+> same name with `-c /`. `DELETE /api/sessions/:id` goes through the same filtered list, so a
+> session that is not listed is not killable either, and every tmux `-t` target is `=<id>` so that
+> a stale or mistyped id misses instead of matching by prefix or fnmatch. **The accepted cost, written here rather than left implicit:** a session started by
 > hand under that socket does not appear as a tab, because agentdeck only knows the directory of
 > the sessions it started; and a session that outlives a server restart stops being listed and
 > streamed for the same reason, one step worse than the metadata loss `CwdAllowlist.refusal`
@@ -137,12 +150,12 @@ That hides it; it does not isolate it, because same-uid remains same-uid. The on
 isolates it is the distinct uid for agent sessions named below, which is still not taken.
 
 So the honest claim is: **the blast radius is the union of the mount list**, and the container
-boundary is around the *machine*, not around the work and not around a session. "If something
+boundary is around the _machine_, not around the work and not around a session. "If something
 worrying happens it is just within the container" is true for the Mac and false for every
 repository currently mounted.
 
 **And one entry on that mount list is agentdeck itself**, which is the repository whose files the
-*host* runs. `eslint.config.*` is loaded and evaluated as JavaScript by `eslint .`, and
+_host_ runs. `eslint.config.*` is loaded and evaluated as JavaScript by `eslint .`, and
 `.prettierrc*` is the same hole one tool over — prettier 3 imports every entry of its `plugins`
 array as JavaScript relative to the config file, so `"plugins": ["./scripts/fmt.mjs"]` is host
 execution at the next `pnpm lint`; the
@@ -181,7 +194,7 @@ human types the prescribed `git diff`, which makes the review command its own tr
 `post-checkout`, `pre-commit`, `post-merge` or `pre-push` hook fires on the branch, commit and
 merge steps the iterate skill prescribes, with `~/.ssh` and the human's GitHub identity in reach —
 exactly what the credential split below exists to keep away from the agent. And `.claude/` is not agent
-data at all: it is instruction and configuration a Claude Code process running *on the Mac* loads
+data at all: it is instruction and configuration a Claude Code process running _on the Mac_ loads
 — `.claude/skills/*/SKILL.md`, `CLAUDE.md`, `.claude/settings.json` and its hooks. That last one
 has the weakest trigger of anything on this list: it needs no `--build` and no host `pnpm` run,
 only a human starting an agent session in this repo on the Mac. It is also the file that
@@ -207,7 +220,7 @@ agent it constrains cannot write it. Until that is done, review is the only cont
 untracked, so the review is as blind to them as to `node_modules` — and worse, `git diff` is
 itself the trigger, since git runs `[core] pager` and `!alias` entries. An earlier draft said
 `.git` could not be masked because the container needs the repository's git metadata; that was
-wrong about the requirement. The iterate pipeline's agents run git on the *host*, so an empty
+wrong about the requirement. The iterate pipeline's agents run git on the _host_, so an empty
 container-local volume over `/workspace/agentdeck/.git` removes the surface at no cost to
 anything that actually uses it. The cost it does have: an agent working on agentdeck **inside**
 the container has no git at all, which contradicts "the agent commits, the human pushes" for this
@@ -347,7 +360,7 @@ exposure is decided, exactly as plan 001 intended.
 
 ### Container hygiene
 
-- **Non-root user.** Whether its uid must *match* the host user is Linux-host advice: OrbStack maps
+- **Non-root user.** Whether its uid must _match_ the host user is Linux-host advice: OrbStack maps
   ownership across VirtioFS itself, so files may come out correct regardless. Verify at M0 with one
   `touch` in a mounted repo rather than inheriting the folklore — but keep the non-root part, which
   is not folklore.
@@ -374,7 +387,7 @@ exposure is decided, exactly as plan 001 intended.
   It presents as a health check reporting "no server running" moments after the entrypoint logged
   that the server was up.
 - **`node-pty` is the one native dependency, and its install is `node scripts/prebuild.js ||
-  node-gyp rebuild`** (verified on 1.1.0). The `||` is the whole point: the day a prebuild is
+node-gyp rebuild`** (verified on 1.1.0). The `||` is the whole point: the day a prebuild is
   missing for the pinned base — a Node minor, an ABI bump, an arm64 gap — the image silently falls
   through to compiling, and fails only if the toolchain is absent. So build in a multi-stage image
   with `python3`, `make` and `g++` present in the builder and absent from the runtime. Pin the base
@@ -396,7 +409,8 @@ exposure is decided, exactly as plan 001 intended.
 
   Consequence for [plan 004](004-agent-profiles.md): the agent-state store is now a directory a
   human also opens. The settings fragment merged in at container start must stay idempotent
-  *and* must not clobber keys it did not write.
+  _and_ must not clobber keys it did not write.
+
 - **Do not mount the whole `~/ghq` tree** for the same reason: one session should see one
   repository.
 

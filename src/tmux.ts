@@ -73,7 +73,30 @@ export interface TmuxSession {
   dead: boolean;
   exitCode: number | undefined;
   startedAt: number;
+  /** Where tmux says the session is, not where we remember pointing it. See `Registry.list`. */
+  path: string;
 }
+
+/**
+ * An EXACT tmux target.
+ *
+ * `-t name` is not an exact match: tmux resolves a target by exact name, then by prefix, then as
+ * an fnmatch pattern. Verified on tmux 3.7b: with sessions `notesalpha` and `other` on one socket,
+ * `kill-session -t notes` killed `notesalpha` and `kill-session -t 'oth*'` killed `other`, both
+ * exit 0, while `-t '=alp'` failed with "can't find session". Every target this class sends is a
+ * session id that arrived from a client, so a stale or mistyped one must miss rather than hit
+ * whatever happens to share a prefix.
+ */
+export const exactTarget = (id: string): string => `=${id}`;
+
+/**
+ * The same thing for a command whose `-t` is a WINDOW or PANE target rather than a session one.
+ *
+ * `=name` alone is not a window target - verified on tmux 3.7b, `set-option -t =alpha` answers
+ * "no such window" and `capture-pane -t =alpha` answers "can't find pane". The trailing colon is
+ * what makes it "this session, its current window", exactly: `=alpha:` works and `=alp:` fails.
+ */
+export const exactWindowTarget = (id: string): string => `=${id}:`;
 
 // A field separator that cannot appear in the values being formatted. tmux format strings are
 // substituted before we see them, so a separator a session name could contain would let a
@@ -138,33 +161,43 @@ export class Tmux {
         ";",
         "set-environment",
         "-t",
-        id,
+        exactTarget(id),
         "-u",
         k,
       ]);
-      await this.#tmux([
-        "new-session",
-        "-d",
-        "-A",
-        "-s",
-        id,
-        "-c",
-        cwd,
-        ...envArgs,
-        "--",
-        command,
-        ...args,
-        // Set per session rather than relying on a global: a session created by a human by hand
-        // must behave the same as one the server made, and the server cannot assume its own
-        // tmux.conf reached a server someone else started.
-        ";",
-        "set-option",
-        "-t",
-        id,
-        "remain-on-exit",
-        "on",
-        ...unsetArgs,
-      ]);
+      // The whole invocation is wrapped, because node puts the full argv into the rejection
+      // message of a failed execFile - and the argv here carries the per-session hook secret and
+      // every profile-passed API key as `-e NAME=VALUE`. That message reaches the client verbatim
+      // through the generic 500 in `createHandler`, so it must not contain a value in the first
+      // place. Any non-zero exit does it: a socket tmux refuses to connect to, a fork failure, or
+      // a failure in the chained set-option/set-environment, since chaining fails the whole call.
+      try {
+        await this.#tmux([
+          "new-session",
+          "-d",
+          "-A",
+          "-s",
+          id,
+          "-c",
+          cwd,
+          ...envArgs,
+          "--",
+          command,
+          ...args,
+          // Set per session rather than relying on a global: a session created by a human by hand
+          // must behave the same as one the server made, and the server cannot assume its own
+          // tmux.conf reached a server someone else started.
+          ";",
+          "set-option",
+          "-t",
+          exactWindowTarget(id),
+          "remain-on-exit",
+          "on",
+          ...unsetArgs,
+        ]);
+      } catch (error) {
+        throw new Error(redactSecrets(messageOf(error), Object.values(env)));
+      }
     }
     return { attached: existed };
   }
@@ -228,7 +261,16 @@ export class Tmux {
       stdout = await this.#tmux([
         "list-sessions",
         "-F",
-        ["#{session_name}", "#{pane_dead}", "#{pane_dead_status}", "#{session_created}"].join(SEP),
+        [
+          "#{session_name}",
+          "#{pane_dead}",
+          "#{pane_dead_status}",
+          "#{session_created}",
+          // Where tmux says this session is. The allowlist is matched against THIS rather than
+          // against a remembered cwd, because a session name is a pure function of (path, agent)
+          // and so is forgeable by anything that can write the socket.
+          "#{session_path}",
+        ].join(SEP),
       ]);
     } catch (error) {
       // "no server running" and "no sessions" are both non-zero exits, and only one is a failure.
@@ -241,9 +283,10 @@ export class Tmux {
       .split("\n")
       .filter((line) => line !== "")
       .map((line) => {
-        const [id = "", dead = "0", status = "", created = "0"] = line.split(SEP);
+        const [id = "", dead = "0", status = "", created = "0", path = ""] = line.split(SEP);
         return {
           id,
+          path,
           dead: dead === "1",
           // An empty dead_status is not zero: tmux leaves it blank for a live pane, and reporting
           // "exited 0" for a running agent would be a confidently wrong answer.
@@ -255,7 +298,7 @@ export class Tmux {
 
   async kill(id: string): Promise<void> {
     try {
-      await this.#tmux(["kill-session", "-t", id]);
+      await this.#tmux(["kill-session", "-t", exactTarget(id)]);
     } catch (error) {
       // Killing a session that is already gone is the desired end state, not a failure.
       if (!isMissingSession(error) && !isEmptyTmux(error)) throw error;
@@ -270,7 +313,7 @@ export class Tmux {
         "-p",
         "-e",
         "-t",
-        id,
+        exactWindowTarget(id),
         "-S",
         `-${String(lines)}`,
         "-E",
@@ -284,13 +327,40 @@ export class Tmux {
 
   /** Make tmux repaint the live screen into the stream we are already reading. */
   async refresh(id: string): Promise<void> {
+    // `-t` here is a CLIENT target, not a session one, so it is not one of the targets that can
+    // resolve to somebody else's session. Left as it is.
     await this.#tmux(["refresh-client", "-t", id, "-R"]);
   }
 
   async resize(id: string, cols: number, rows: number): Promise<void> {
-    await this.#tmux(["resize-window", "-t", id, "-x", String(cols), "-y", String(rows)]);
+    await this.#tmux([
+      "resize-window",
+      "-t",
+      exactWindowTarget(id),
+      "-x",
+      String(cols),
+      "-y",
+      String(rows),
+    ]);
   }
 }
+
+/**
+ * Take every secret VALUE out of a message, wherever it appears.
+ *
+ * By value rather than by `-e NAME=` shape: the same string can appear in the argv, in tmux's own
+ * stderr, and quoted differently in each, and a message that leaks the secret in one of those is
+ * as leaked as one that leaks it in all three. Empty values are skipped - replacing "" would
+ * rewrite the whole string.
+ */
+export const redactSecrets = (text: string, values: readonly string[]): string => {
+  let out = text;
+  for (const value of values) {
+    if (value === "") continue;
+    out = out.split(value).join("<redacted>");
+  }
+  return out;
+};
 
 const messageOf = (error: unknown): string => {
   if (error === null || typeof error !== "object") return "";

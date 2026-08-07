@@ -115,6 +115,15 @@ export class Registry {
    * before a restart, since `#meta` is memory only - has no `#meta` entry and is not allowlisted.
    * It is left alone: not listed, not attached, not reaped. That cost is deliberate and recorded
    * in plan 005.
+   *
+   * What is enforced, stated exactly, because the previous wording claimed more than the code did:
+   * the allowlist is matched against `#{session_path}` - where TMUX says the session is - and the
+   * remembered cwd must agree with it. Matching against `#meta` alone was enforcement against a
+   * remembered NAME, and the name is `sessionId(cwd, agent)`, a pure function of two knowable
+   * things. Anything running as this user could kill `repo-claude-1a2b3c4d` and recreate it with
+   * `-c /`, and within one sync the shell in `/` was a tab, reported as being in the allowlisted
+   * repository. A same-uid process still owns the socket, so this is a filter on where a session
+   * is, not a claim that agentdeck started it.
    */
   async list(): Promise<Session[]> {
     const live = await this.#tmux.list();
@@ -122,11 +131,12 @@ export class Registry {
       // Dropping the entry and reading its metadata are one step, so there is no branch left in
       // which a listed session has no cwd, agent or name to report.
       const meta = this.#meta.get(entry.id);
-      if (meta === undefined || !this.#allowlist.allows(meta.cwd)) return [];
+      if (meta === undefined) return [];
+      if (!this.#allowlist.allows(entry.path) || entry.path !== meta.cwd) return [];
       const session: Session = {
         id: entry.id,
-        name: sessionName(meta.cwd),
-        cwd: meta.cwd,
+        name: sessionName(entry.path),
+        cwd: entry.path,
         agent: meta.agent,
         state: entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle"),
         startedAt: entry.startedAt,
@@ -136,7 +146,17 @@ export class Registry {
     });
   }
 
+  /**
+   * Kill one of OUR sessions, and nothing else.
+   *
+   * The id arrives as a raw path segment from `DELETE /api/sessions/:id`, so it goes through the
+   * same allowlist-filtered `list()` as everything else first. Without that, the boundary was
+   * one-way: a session this class refuses to list, attach or reap - the one a human started by
+   * hand under the same socket - was still killable, along with everything running in it.
+   */
   async close(id: string): Promise<void> {
+    const ours = (await this.list()).some((session) => session.id === id);
+    if (!ours) return;
     await this.#tmux.kill(id);
     this.#meta.delete(id);
     this.#states.delete(id);

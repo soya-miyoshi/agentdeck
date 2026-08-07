@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AgentProfile } from "./agent-profiles.ts";
@@ -47,6 +48,9 @@ interface Handled {
 
 const MAX_BODY_BYTES = 64 * 1024;
 
+/** Typed so the route can answer 413 with this sentence rather than the generic 500. */
+class BodyTooLargeError extends Error {}
+
 const readJson = async (req: IncomingMessage): Promise<unknown> => {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -55,7 +59,7 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
     size += buf.length;
     // Bounded before buffering, not after: an unbounded read is a denial of service that needs
     // no credentials at all.
-    if (size > MAX_BODY_BYTES) throw new Error("request body too large");
+    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError("request body too large");
     chunks.push(buf);
   }
   if (size === 0) return undefined;
@@ -129,7 +133,17 @@ export const createHandler = (deps: HttpDeps) => {
     }
 
     if (method === "POST" && path === "/api/sessions") {
-      const body = await readJson(req);
+      // Caught here rather than at the generic 500, which now answers with a fixed sentence: a
+      // body the server refused to buffer is a thing the client can act on, and a sentence
+      // someone wrote on purpose is safe to hand back.
+      let body: unknown;
+      try {
+        body = await readJson(req);
+      } catch (error) {
+        if (error instanceof BodyTooLargeError)
+          return { status: 413, body: { error: error.message } };
+        return { status: 400, body: { error: "expected a JSON object" } };
+      }
       if (typeof body !== "object" || body === null) {
         return { status: 400, body: { error: "expected a JSON object" } };
       }
@@ -190,9 +204,15 @@ export const createHandler = (deps: HttpDeps) => {
         res.end(payload);
       })
       .catch((error: unknown) => {
-        // Errors are sentences the client renders verbatim, so this one must not leak a stack.
-        const message = error instanceof Error ? error.message : "unknown error";
-        const payload = JSON.stringify({ error: message });
+        // The typed errors above are deliberately worded and reach the client as themselves.
+        // Everything here is an error nobody wrote for a reader, and the client renders `message`
+        // verbatim - `execFile` alone puts the whole argv, secrets included, in one. So: a fixed
+        // sentence and an id, with the real text on the server's log where it belongs.
+        const id = randomBytes(6).toString("hex");
+        console.error(`agentdeck: unhandled request error ${id}:`, error);
+        const payload = JSON.stringify({
+          error: `the server failed to handle that request (ref ${id}); see the server log`,
+        });
         res.writeHead(500, {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(payload),

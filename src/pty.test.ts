@@ -88,7 +88,8 @@ void describe("what gets spawned", () => {
     const { spawned } = build();
     const args = spawned[0]?.args ?? [];
     assert.deepEqual(args.slice(0, 2), ["-L", "test"]);
-    assert.equal(args.at(-1), "web-claude-abc");
+    // Exact: `-t name` would attach to whatever session shares a prefix with a stale id.
+    assert.equal(args.at(-1), "=web-claude-abc");
   });
 
   void test("opens at the size it was given", () => {

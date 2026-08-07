@@ -13,7 +13,10 @@ const SEP = "\u001f";
  * rather than one call at a time.
  */
 const fakeTmux = () => {
-  const sessions = new Map<string, { dead: boolean; status: string; created: number }>();
+  const sessions = new Map<
+    string,
+    { dead: boolean; status: string; created: number; path: string }
+  >();
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
@@ -21,15 +24,22 @@ const fakeTmux = () => {
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]
-          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, String(s.created)].join(SEP))
+          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, String(s.created), s.path].join(SEP))
           .join("\n");
         return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
       }
       if (verb === "new-session") {
         const id = rest[rest.indexOf("-s") + 1] ?? "";
-        sessions.set(id, { dead: false, status: "", created: 1_700_000_000 });
+        const path = rest[rest.indexOf("-c") + 1] ?? "";
+        sessions.set(id, { dead: false, status: "", created: 1_700_000_000, path });
       }
-      if (verb === "kill-session") sessions.delete(rest[rest.indexOf("-t") + 1] ?? "");
+      if (verb === "kill-session") {
+        // The real tmux resolves `=name` as an exact match and anything else by prefix or
+        // fnmatch; the fake only needs to accept the exact form the code is required to send.
+        const target = rest[rest.indexOf("-t") + 1] ?? "";
+        assert.ok(target.startsWith("="), `kill target must be exact, got ${target}`);
+        sessions.delete(target.slice(1));
+      }
       return await Promise.resolve({ stdout: "", stderr: "" });
     },
   });
@@ -37,17 +47,20 @@ const fakeTmux = () => {
     const existing = sessions.get(id);
     if (existing) sessions.set(id, { ...existing, dead: true, status });
   };
-  return { tmux, sessions, die };
+  const plant = (id: string, path: string) => {
+    sessions.set(id, { dead: false, status: "", created: 1_700_000_000, path });
+  };
+  return { tmux, sessions, die, plant };
 };
 
 const build = () => {
-  const { tmux, sessions, die } = fakeTmux();
+  const { tmux, sessions, die, plant } = fakeTmux();
   const { profiles } = parseProfiles({
     claude: { command: "/bin/sh", name: "Claude Code" },
     gemini: { command: "/bin/sh", name: "Gemini CLI" },
   });
   const allowlist = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
-  return { registry: new Registry(tmux, profiles, allowlist), sessions, die };
+  return { registry: new Registry(tmux, profiles, allowlist), sessions, die, plant };
 };
 
 void describe("creating sessions", () => {
@@ -205,5 +218,44 @@ void describe("closing", () => {
   void test("closing something already gone is not an error", async () => {
     const { registry } = build();
     await assert.doesNotReject(async () => await registry.close("never-existed"));
+  });
+
+  void test("will not kill a session it would not list", async () => {
+    // The boundary was one-way: a session started by hand under the same socket is not listed,
+    // not attached and not reaped - and was still killable by DELETE /api/sessions/:id, along
+    // with everything running in it.
+    const { registry, sessions, plant } = build();
+    plant("notes", "/home/someone");
+    await registry.close("notes");
+    assert.ok(sessions.has("notes"));
+  });
+
+  void test("a prefix of a real id kills nothing", async () => {
+    // tmux -t resolves by prefix and then as an fnmatch pattern, so a stale or mistyped id from
+    // the phone must miss rather than hit whatever happens to share a prefix.
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    await registry.close(session.id.slice(0, 4));
+    await registry.close("*");
+    assert.ok(sessions.has(session.id));
+  });
+});
+
+void describe("the allowlist is matched against where tmux says a session is", () => {
+  void test("a session renamed onto ours, pointed elsewhere, is not listed", async () => {
+    // The session name is sessionId(cwd, agent) - a pure function of two knowable things - so
+    // anything running as this user can kill ours and recreate it under the same name with -c /.
+    // Enforcing against the remembered cwd made that shell a tab, reported as being in the repo.
+    const { registry, sessions, plant } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    sessions.delete(session.id);
+    plant(session.id, "/");
+    assert.deepEqual(await registry.list(), []);
+  });
+
+  void test("the reported cwd is the one tmux reports", async () => {
+    const { registry } = build();
+    await registry.create("/workspace/web", "claude");
+    assert.equal((await registry.list())[0]?.cwd, "/workspace/web");
   });
 });

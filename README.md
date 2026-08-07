@@ -73,7 +73,7 @@ an agent that runs `rm -rf ~` or a poisoned `curl | sh` reaches the home directo
 the browser profiles and every other repository. This was a container once, and
 [`plans/005-containment.md`](plans/005-containment.md) is kept as the best account of what that
 bought and what its removal costs. The remaining lever is the `cwd` allowlist — a short list of
-the repositories actually worked in — and it decides where a session *starts*, not where it can
+the repositories actually worked in — and it decides where a session _starts_, not where it can
 reach. A git remote is what protects the work.
 
 The blast radius therefore includes agentdeck's own repository, and that is the one whose contents
@@ -129,15 +129,15 @@ Why git push credentials stay away from the agent is in
 
 Every variable the server reads. All of them are optional; the row says what an unset one means.
 
-| Variable | Default | Unset means |
-| --- | --- | --- |
-| `AGENTDECK_PORT` | `7777` | Loopback only either way; `tailscale serve` decides exposure. |
-| `AGENTDECK_TOKEN_FILE` | `~/.agentdeck/token` | Generated 0600 on first run. Never inside an allowlist entry — the server refuses to start. |
-| `AGENTDECK_MOUNTS` | empty | **No directory is startable.** Colon-separated absolute paths; exact match, never prefix. |
-| `AGENTDECK_PROFILES` | none | No agents, so nothing to start. See `agents.example.json`. |
-| `AGENTDECK_AGENT_STATE_DIR` | `~/.agentdeck/agent-state` | Hook settings land there, and an agent only reads them if its profile points it there. |
-| `AGENTDECK_ORIGIN` | none | **The Origin check plan 001 describes is off**: `/api` and `/ws` accept any Origin, so any page the browser visits can drive the socket with a token it holds. Set it to the `https://<host>.ts.net` origin the phone loads. |
-| `TMUX_SOCKET` | `agentdeck` | The `-L` name. Sessions are found on this socket and nowhere else. |
+| Variable                    | Default                    | Unset means                                                                                                                                                                                                                  |
+| --------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTDECK_PORT`            | `7777`                     | Loopback only either way; `tailscale serve` decides exposure.                                                                                                                                                                |
+| `AGENTDECK_TOKEN_FILE`      | `~/.agentdeck/token`       | Generated 0600 on first run. Never inside an allowlist entry — the server refuses to start.                                                                                                                                  |
+| `AGENTDECK_MOUNTS`          | empty                      | **No directory is startable.** Colon-separated absolute paths; exact match, never prefix.                                                                                                                                    |
+| `AGENTDECK_PROFILES`        | none                       | No agents, so nothing to start. See `agents.example.json`, and copy it somewhere outside every allowlist entry — it decides what command each session runs, and the server refuses to start if it is inside one.             |
+| `AGENTDECK_AGENT_STATE_DIR` | `~/.agentdeck/agent-state` | Hook settings land there, and an agent only reads them if its profile points it there.                                                                                                                                       |
+| `AGENTDECK_ORIGIN`          | none                       | **The Origin check plan 001 describes is off**: `/api` and `/ws` accept any Origin, so any page the browser visits can drive the socket with a token it holds. Set it to the `https://<host>.ts.net` origin the phone loads. |
+| `TMUX_SOCKET`               | `agentdeck`                | The `-L` name. Sessions are found on this socket and nowhere else.                                                                                                                                                           |
 
 A session's own environment is **built, not inherited**: a pane gets `PATH`, `HOME`, `SHELL`,
 `TERM`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`, `LOGNAME`, plus whatever names that agent's profile
@@ -209,8 +209,13 @@ now, which makes the review below the only control rather than the second of two
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/` and
-`.github/workflows/`. **That
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
+`.github/workflows/` and the agent profiles file `AGENTDECK_PROFILES` points at. That last one is
+the most direct host-execution surface of the lot and had been on none of these lists: a profile's
+`command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
+profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.
+The server refuses to start when that file resolves inside an allowlist entry, the same rule the
+token file gets, so keeping it out of this repository is the supported arrangement. **That
 list is a floor, not the whole job**: the host tools discover their own config, so the exception
 requires reading every added or modified file in the diff, not only the named ones. The same
 review is owed before starting an agent session in this repo,

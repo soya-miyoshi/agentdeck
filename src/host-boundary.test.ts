@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -232,6 +232,63 @@ void describe("the token is never inside a tree a session is pointed at", () => 
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
+  });
+});
+
+void describe("the agent profiles file is a host-execution surface, not config", () => {
+  void test("a profiles file inside an allowlisted tree refuses the boot", async () => {
+    // `command` and `args` go unmodified into `tmux new-session -- command args` and run as the
+    // human, so a profiles file inside a tree an agent is started in lets that agent choose what
+    // the next session executes - and no prescribed review command looks at the file. The same
+    // rule as the token, for the file that is the more direct surface of the two.
+    const home = mkdtempSync(join(tmpdir(), "agentdeck-prof-home-"));
+    const work = mkdtempSync(join(tmpdir(), "agentdeck-prof-work-"));
+    try {
+      const profiles = join(work, "agents.json");
+      writeFileSync(profiles, JSON.stringify({ shell: { command: "/bin/sh" } }));
+      const { code, stderr } = await boot({
+        HOME: home,
+        AGENTDECK_PORT: "0",
+        AGENTDECK_MOUNTS: work,
+        AGENTDECK_PROFILES: profiles,
+      });
+      assert.equal(code, 1, `boot should have refused\n${stderr}`);
+      assert.match(stderr, /profiles file/i);
+      assert.match(stderr, /AGENTDECK_MOUNTS/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  void test("a profiles file outside every entry is an ordinary boot", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agentdeck-prof2-home-"));
+    const work = mkdtempSync(join(tmpdir(), "agentdeck-prof2-work-"));
+    const conf = mkdtempSync(join(tmpdir(), "agentdeck-prof2-conf-"));
+    try {
+      const profiles = join(conf, "agents.json");
+      writeFileSync(profiles, JSON.stringify({ shell: { command: "/bin/sh" } }));
+      const { code, signal, stdout } = await boot({
+        HOME: home,
+        AGENTDECK_PORT: "0",
+        AGENTDECK_MOUNTS: work,
+        AGENTDECK_PROFILES: profiles,
+      });
+      assert.match(stdout, /listening on 127\.0\.0\.1/);
+      assert.ok(code === 0 || signal === "SIGTERM", `boot exited ${String(code)}`);
+    } finally {
+      for (const dir of [home, work, conf]) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  void test("the README review list and plan 005 both name it", async () => {
+    // It was on neither, which is how the most direct execution surface of the lot went
+    // unreviewed by the checklist that exists for exactly this.
+    const readme = await readDoc("README.md");
+    const list = readme.slice(readme.indexOf("clean of unreviewed agent edits"));
+    assert.match(list.slice(0, 1200), /AGENTDECK_PROFILES/);
+    const plan = await readDoc("plans/005-containment.md");
+    assert.match(plan.slice(0, plan.indexOf("\n## ", 1)), /AGENTDECK_PROFILES/);
   });
 });
 

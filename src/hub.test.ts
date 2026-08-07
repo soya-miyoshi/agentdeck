@@ -12,7 +12,7 @@ import { Tmux } from "./tmux.ts";
 const SEP = "\u001f";
 
 const fakeTmux = () => {
-  const sessions = new Map<string, { dead: boolean; status: string }>();
+  const sessions = new Map<string, { dead: boolean; status: string; path: string }>();
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
@@ -20,14 +20,19 @@ const fakeTmux = () => {
       if (verb === "list-sessions") {
         if (sessions.size === 0) throw Object.assign(new Error("x"), { stderr: "no sessions" });
         const out = [...sessions.entries()]
-          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000"].join(SEP))
+          .map(([id, s]) => [id, s.dead ? "1" : "0", s.status, "1700000000", s.path].join(SEP))
           .join("\n");
         return await Promise.resolve({ stdout: `${out}\n`, stderr: "" });
       }
       if (verb === "new-session") {
-        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", { dead: false, status: "" });
+        sessions.set(rest[rest.indexOf("-s") + 1] ?? "", {
+          dead: false,
+          status: "",
+          path: rest[rest.indexOf("-c") + 1] ?? "",
+        });
       }
-      if (verb === "kill-session") sessions.delete(rest[rest.indexOf("-t") + 1] ?? "");
+      if (verb === "kill-session")
+        sessions.delete((rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, ""));
       if (verb === "capture-pane")
         return await Promise.resolve({ stdout: "history\n", stderr: "" });
       return await Promise.resolve({ stdout: "", stderr: "" });
@@ -37,7 +42,8 @@ const fakeTmux = () => {
     const existing = sessions.get(id);
     if (existing) sessions.set(id, { ...existing, dead: true, status });
   };
-  return { tmux, sessions, die };
+  const plant = (id: string, path: string) => sessions.set(id, { dead: false, status: "", path });
+  return { tmux, sessions, die, plant };
 };
 
 /** A stand-in for the live attachment, so the hub is tested without spawning anything. */
@@ -61,7 +67,7 @@ const fakePty = (sessionId: string) => {
 };
 
 const build = () => {
-  const { tmux, die } = fakeTmux();
+  const { tmux, die, sessions, plant } = fakeTmux();
   const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
   const allowlist = new CwdAllowlist(["/workspace/a", "/workspace/b"]);
   const registry = new Registry(tmux, profiles, allowlist);
@@ -78,7 +84,7 @@ const build = () => {
       return pty;
     },
   });
-  return { hub, registry, tmux, die, created, ptys };
+  return { hub, registry, tmux, die, created, ptys, sessions, plant };
 };
 
 void describe("the allowlist bounds the session set, not only what can be created", () => {

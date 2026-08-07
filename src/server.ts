@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { parseProfiles } from "./agent-profiles.ts";
@@ -42,6 +42,9 @@ export const defaultTokenFile = (): string => join(homedir(), ".agentdeck", "tok
 
 /**
  * Whether `tokenPath` sits inside a tree a session can be started in.
+ *
+ * Used for two files now: the bearer token, and the agent profiles file, which is the more direct
+ * surface of the two - it decides the command every session runs, as the human.
  *
  * Plan 005 states this rule in prose in three places and until now nothing checked it. Same uid
  * means the 0600 mode buys nothing between the server and its agents, so placement is the whole
@@ -187,7 +190,22 @@ export const main = async (): Promise<void> => {
 
   let profilesRaw: unknown = {};
   const profilesPath = process.env["AGENTDECK_PROFILES"];
+  // The same rule as the token file, for the file that is a more direct host-execution surface
+  // than the token is: `command` and `args` go unmodified into `tmux new-session -- command args`
+  // and run as the human. Inside a tree an agent is started in, an agent rewrites one profile to
+  // `/bin/sh -c 'curl ...|sh'` and the next tap of that agent in the picker runs it - and no
+  // prescribed review command looks at the file. A refusal, because there is no degraded mode.
   if (profilesPath !== undefined) {
+    const profilesClash = tokenInsideAllowlist(profilesPath, allowlist.paths);
+    if (profilesClash !== undefined) {
+      console.error(
+        `agentdeck: the agent profiles file ${resolve(profilesPath)} is inside ${profilesClash}, ` +
+          `which is on the session allowlist. That file decides what command every session runs, ` +
+          `as this user, so an agent started there can choose what the next session executes. ` +
+          `Move it outside every allowlist entry, or take that entry off AGENTDECK_MOUNTS.`,
+      );
+      process.exit(1);
+    }
     try {
       profilesRaw = JSON.parse(readFileSync(profilesPath, "utf8"));
     } catch (error) {
@@ -212,9 +230,10 @@ export const main = async (): Promise<void> => {
   // secret, and those go through the environment at spawn (plan 004).
   for (const profile of profiles.values()) {
     if (profile.waiting?.via !== "hook") continue;
-    const settingsPath = isAbsolute(profile.waiting.settings)
-      ? profile.waiting.settings
-      : join(agentStateDir, profile.waiting.settings);
+    // Always under the agent-state directory: `parseWaiting` refuses an absolute path or one that
+    // climbs out, because this file is written at every boot and would otherwise be an arbitrary
+    // JSON write aimed wherever a profiles file said.
+    const settingsPath = join(agentStateDir, profile.waiting.settings);
     try {
       const { changed } = installHookSettings(settingsPath, port);
       console.log(

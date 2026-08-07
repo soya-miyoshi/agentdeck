@@ -2,7 +2,7 @@ import type { IPty } from "node-pty";
 import { spawn } from "node-pty";
 
 import { SessionStream } from "./stream.ts";
-import { baseEnv } from "./tmux.ts";
+import { baseEnv, exactTarget } from "./tmux.ts";
 
 // The producer the stream has been waiting for: a PTY running `tmux attach`.
 //
@@ -48,7 +48,7 @@ export class SessionPty {
     // own arithmetic over a set we do not control.
     this.#pty = spawnFn(
       "tmux",
-      ["-L", options.socket, "attach-session", "-d", "-t", options.sessionId],
+      ["-L", options.socket, "attach-session", "-d", "-t", exactTarget(options.sessionId)],
       // The same explicit environment every other tmux invocation gets. This one is a tmux
       // CLIENT, and a client is a way into a session's environment: `update-environment` copies
       // named variables from the attaching client into the session. That option is emptied in

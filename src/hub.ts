@@ -52,10 +52,12 @@ export class Hub {
    *
    * "Allowed" is not decided here. `Registry.list` applies the cwd allowlist, and it is the only
    * place that does: a boundary two callers apply separately is one that can be applied
-   * differently. What that filter keeps out is a session on the socket that agentdeck did not
-   * start - `/tmp/tmux-<uid>/agentdeck` is writable by every process running as this user, so
-   * `tmux -L agentdeck new-session -d -c / -- /bin/sh` would otherwise become a tab within one
-   * sync interval, streamed to the phone and accepting typed input, having asked nobody.
+   * differently. What that filter keeps out is a session whose directory - the one TMUX reports,
+   * not one remembered here - is not on the allowlist: `/tmp/tmux-<uid>/agentdeck` is writable by
+   * every process running as this user, so `tmux -L agentdeck new-session -d -c / -- /bin/sh`
+   * would otherwise become a tab within one sync interval, streamed to the phone and accepting
+   * typed input, having asked nobody. It is a filter on WHERE a session is, not a claim that
+   * agentdeck started it - a same-uid process owns the socket either way.
    *
    * The cost, accepted deliberately and written into plan 005 rather than left implicit: a
    * session started by hand in tmux does not appear as a tab. Neither does one this server

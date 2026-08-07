@@ -75,6 +75,16 @@ const parseWaiting = (
     if (typeof settings !== "string") {
       return { waiting: undefined, reason: "waiting.via=hook needs a settings path" };
     }
+    // Relative to the agent-state directory, always. The server writes this file at every boot,
+    // so an absolute path - or a `../` out of the directory - is an arbitrary-JSON-write primitive
+    // that a profiles file could point at the operator's real ~/.claude/settings.json. The
+    // mechanism is disabled rather than the profile, so the agent stays startable.
+    if (isAbsolute(settings) || settings.split("/").includes("..")) {
+      return {
+        waiting: undefined,
+        reason: `waiting.settings must be relative to the agent-state directory and stay inside it, not ${settings}`,
+      };
+    }
     return { waiting: { via: "hook", settings }, reason: undefined };
   }
   if (via === "log") {
