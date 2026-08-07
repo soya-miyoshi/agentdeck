@@ -646,3 +646,65 @@ found them, and two are only dangerous because of properties this branch added.
 - **No rate limit on the ws message path.** `m2/reconnect` is the item that will make clients
   retry automatically, so the bound wants to exist before that lands rather than after.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/resync-ping - final whole-codebase pass - 2026-08-08
+
+The ping is now tested against a genuinely half-open connection: `src/half-open.test.ts` puts a TCP
+proxy between the ws client and the server and stops forwarding in both directions without closing
+either side, which is the failure the ping exists for and the one a close, a destroy or an error
+cannot model. The test says in its own comment what the proxy does NOT model - a real radio drop
+also stops the server's writes from being acknowledged, and here the proxy accepts them - so the
+limit of the evidence is on the record beside it. The comparative half of the done-when is in the
+assertion rather than in prose: the ping notices before a status that stopped changing could.
+
+The audit's `high` was introduced by this branch and is fixed here. Two mediums are open, and one
+of them breaks an ordinary user action.
+
+### Findings
+
+- [high] src/ws.ts:279 - A coalesced snapshot build cached rejections as well as successes, so one
+  client's failure became every joining client's failure - and the attach path treats a failed
+  snapshot as a reason to detach. The victim is left detached server-side with its socket still
+  OPEN and `status` still reading "open", and the shipped client sends `attach` only on pane mount
+  and on reconnect, so an `error` frame just appends a banner: that tab shows a stale screen for
+  the life of the process while the strip keeps reporting state from the registry. `applySize`
+  after the forced detach also reflows the remaining clients' panes mid-session. Verified by the
+  gate with a two-socket harness: one repaint call, two failures, `stream.clients` left empty.
+  Status: FIXED in 57ad3b8. Sharing the success is the point of coalescing; a joiner that inherits
+  a rejection now makes its own attempt, and the attach catch undoes only what that invocation
+  registered.
+
+- [medium] src/ws.ts:101 - **`maxPayload` at 64 KB kills the socket on an ordinary paste.** It
+  applies to `input` frames, and xterm's `onData` delivers a paste as ONE event, so a pasted diff
+  or stack trace is one frame. Verified by the gate: a 70 KB paste yields close 1009 with
+  `sendInput` never called. The application-level error frame cannot fire, because `ws` rejects at
+  the receiver before `message` - so the client sees a bare close, cannot tell it from a phone in a
+  lift, runs the backoff ladder, reconnects and re-attaches every tab, each re-attach a cold
+  snapshot with a real capture-pane. The paste is gone with no explanation, so the user pastes
+  again. The effective limit is well below 64 KB of plaintext because `data` is JSON-stringified
+  and control bytes inflate 2-6x, putting a 15-30 KB log paste over the line. Status: **OPEN, and
+  it is a shipped defect rather than a hardening gap.** Not fixed here because the two ways out are
+  a design choice rather than a correction: raise the socket's `maxPayload` and bound `input` at
+  the application layer so an over-size frame gets an `error` naming the limit and keeps the
+  socket, or chunk large pastes client-side below the cap. The second wants the client work in
+  `m2/client-minimal`.
+
+- [medium] src/ws.ts:370 - The 15s snapshot bound abandons a build it cannot cancel. `Tmux.#exec`
+  passes no execFile `timeout` and a 16 MB `maxBuffer`, so with tmux wedged each eviction lets the
+  next attach start a fresh child that never exits - one accumulating spawn per 15s per session, on
+  a process nothing restarts. `Hub.#repaintOnce` also leaks its `onChunk` listener permanently in
+  that state, because `off()` sits in a `finally` after an await that never returns, and
+  `Hub.#repaints` pins the dead promise so every later build joins it. Status: OPEN. The fix named
+  by the gate is the right one and is small - pass `timeout` to execFile in `Tmux.#exec`, which
+  `probeTmux` already does - but it changes the failure mode of every tmux call on the branch that
+  just hardened them, so it wants its own item rather than a late edit here.
+
+### Open after this iteration
+
+- **A paste can close the transport.** Named above. It is the first thing a person will hit that
+  this file describes as known.
+- **No execFile timeout on the tmux path**, so a wedged tmux accumulates children.
+- **The repaint still targets every client**, carried from `m2/snapshot`.
+- **Same-uid**, unchanged.
