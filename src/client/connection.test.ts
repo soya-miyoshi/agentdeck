@@ -42,6 +42,17 @@ interface Harness {
   verdict: TokenVerdict;
   /** How many times the token has been re-presented to the server over HTTP. */
   probes: number;
+  /**
+   * Hold the probe's answer until the test releases it.
+   *
+   * `verifyToken` is a network request with no timeout, and the ladder awaits it with no socket -
+   * so on a bad network the window it leaves open is as long as the request takes. Everything the
+   * user or the browser can do during that window is reachable only with a probe that can be left
+   * pending.
+   */
+  deferProbe: boolean;
+  /** Answer the pending probe. */
+  answer: (verdict: TokenVerdict) => void;
 }
 
 interface FakeSocket {
@@ -82,6 +93,8 @@ const harness = (): Harness => {
     unauthorized: 0,
     verdict: "ok",
     probes: 0,
+    deferProbe: false,
+    answer: () => assert.fail("no probe was pending"),
   };
 
   const events: ConnectionEvents = {
@@ -117,7 +130,13 @@ const harness = (): Harness => {
       },
       verifyToken: () => {
         state.probes += 1;
-        return Promise.resolve(state.verdict);
+        if (!state.deferProbe) return Promise.resolve(state.verdict);
+        return new Promise<TokenVerdict>((resolve) => {
+          state.answer = (verdict) => {
+            state.answer = () => assert.fail("no probe was pending");
+            resolve(verdict);
+          };
+        });
       },
       // The ladder's jitter pinned to its top, so these tests still assert the delays the ladder
       // is designed around rather than a draw. The spread itself is tested in backoff.test.ts.
@@ -1167,5 +1186,128 @@ void describe("a tab that was in the background", () => {
     assert.equal(h.unauthorized, 1);
     h.connection.poke();
     assert.equal(h.sockets.length, 1, "a rejected token was re-presented on the next wake");
+  });
+});
+
+void describe("what happens during the window the token probe is open", () => {
+  // `verifyToken` is an HTTP request with no timeout, and `#onClosed` awaits it having already
+  // dropped `#socket`. On the network this ladder exists for, that window is not a microtask - it
+  // is however long a request takes to fail on a phone that has just lost signal. Everything the
+  // browser fires at a tab in that state lands inside it, and `online` fires at exactly the moment
+  // the pending probe was waiting for.
+
+  void test("a wake does not open a second socket while the probe is still out", async () => {
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    assert.equal(h.probes, 1, "the close did not probe at all");
+
+    // `online`, or the tab coming back to the foreground. The guard in `poke()` is `#socket !==
+    // undefined`, and `#onClosed` cleared `#socket` before awaiting - so the guard is open.
+    h.connection.poke();
+    assert.equal(
+      h.sockets.length,
+      1,
+      "the wake opened a second socket while the first close was still being diagnosed",
+    );
+  });
+
+  void test("and the answer, when it comes, does not leave a socket nobody owns", async () => {
+    // The worse half. The probe resumes into a ladder that no longer describes the sockets that
+    // exist: it schedules a retry, the retry calls `#open`, and `#open` overwrites `#socket`
+    // without closing what was there. The overwritten socket is still connected, still delivering
+    // frames, and still holding a `closed` handler that will run the ladder a second time - two
+    // ladders for one connection, each re-attaching every tab, against the server that was already
+    // the reason for the reconnect.
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+    h.connection.poke();
+
+    h.answer("ok");
+    await settle();
+    const reconnect = h.timers.find((timer) => timer.delayMs === 250);
+    reconnect?.run();
+    await settle();
+
+    const live = h.sockets.filter((socket) => !socket.closed);
+    assert.equal(
+      live.length,
+      1,
+      `expected one live socket, got ${String(live.length)} of ${String(h.sockets.length)}`,
+    );
+  });
+
+  void test("a probe answering after the connection was closed does not sign the user out", async () => {
+    // `stop()` is teardown: the component unmounted, or the page already signed out and is showing
+    // the paste field. A verdict that arrives afterwards is about a socket nobody is watching, and
+    // `unauthorized` is not a notification - it clears the stored token and replaces the page. The
+    // ordering it destroys is real: the user pastes a good token, a new Connection starts, and the
+    // dead one's late 401 wipes what they just pasted.
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+
+    h.connection.stop();
+    h.answer("rejected");
+    await settle();
+    assert.equal(h.unauthorized, 0, "a stopped connection signed the user out");
+    assert.equal(h.statuses.at(-1), "closed", "a stopped connection reported a status after stop");
+  });
+
+  void test("a forbidden verdict arriving after stop does not speak either", async () => {
+    const h = harness();
+    h.deferProbe = true;
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+
+    h.connection.stop();
+    h.answer("forbidden");
+    await settle();
+    assert.deepEqual(h.errors, [], "a stopped connection reported a configuration mistake");
+    assert.equal(h.statuses.at(-1), "closed");
+  });
+});
+
+void describe("the ladder left running while nobody is looking", () => {
+  void test("holds one socket and one pending retry however long it runs", async () => {
+    // A backgrounded tab does not stop the ladder, it slows it: the browser throttles the timers,
+    // so the cycles are minutes apart and there may be a great many of them before anyone looks.
+    // Nothing per-cycle may accumulate - not sockets, not timers, not probes - because the tab
+    // that comes back is the same object that has been running unwatched since it was hidden.
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    for (let cycle = 0; cycle < 12; cycle++) {
+      h.last().handlers.closed();
+      await settle();
+      assert.deepEqual(
+        h.timers.map((timer) => timer.delayMs),
+        [Math.min(4000, 250 * 2 ** cycle)],
+        `cycle ${String(cycle)} was holding more than the one retry it had scheduled`,
+      );
+      h.fire();
+    }
+    assert.equal(h.sockets.length, 13, "a cycle opened more than one socket");
+    assert.equal(h.probes, 12, "a cycle re-presented the token more than once");
+    // The live socket's silence watchdog, and nothing else.
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+    );
+    // And it is still the same attachment set, so the tab that comes back repaints where it was
+    // rather than as a new one.
+    h.last().handlers.opened();
+    assert.deepEqual(
+      sentMessages(h.last()).filter((frame) => frame["t"] === "attach"),
+      [{ t: "attach", sessionId: "a", cols: 80, rows: 24 }],
+    );
   });
 });
