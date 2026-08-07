@@ -84,8 +84,8 @@ export class Registry {
     // `createOrAttach` sets `remain-on-exit on`, so a session whose agent exited stays on the
     // socket. `#adopt` now recovers such a corpse after a restart, so `reap()` at boot usually
     // clears it; this stays because reaping is not run on a timer and a corpse can also be one
-    // this process watched exit. tmux would otherwise report `attached: true` and the phone get a 201
-    // saying "a claude session was already running in <cwd>; you are attached to it rather than to
+    // this process watched exit. Otherwise tmux would report `attached: true` and the phone would
+    // get a 201 saying "a claude session was already running in <cwd>; you are attached to it rather than to
     // a new one" - false, with a tab pinned at `exited` and no agent started. A tab that is
     // confidently wrong is the one output this design refuses, so the corpse goes first.
     //
@@ -180,11 +180,8 @@ export class Registry {
    *
    * Best-effort: a kill that fails leaves the orphan, and the original failure is still the one
    * worth reporting.
-   */
-  /**
-   * Kill the session this call started, and refuse to kill anything else.
    *
-   * `attached === false` is not on its own a warrant. It comes from a `has()` that ran BEFORE
+   * It kills the session this call started and refuses to kill anything else. `attached === false` is not on its own a warrant. It comes from a `has()` that ran BEFORE
    * `new-session -A`, and the name is `sessionId(cwd, agent)` - a pure function of two values any
    * client reads from `GET /api/cwds` and `GET /api/agents`, and any same-uid process can compute
    * offline. Something that creates that name inside the window makes `-A` attach to ITS session

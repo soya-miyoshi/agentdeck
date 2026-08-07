@@ -98,8 +98,10 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
   return { tmux, sessions, die, plant, fail };
 };
 
-const build = () => {
-  const { tmux, sessions, die, plant, fail } = fakeTmux();
+// Handed the socket state of an earlier registry, this builds a second one over it - which is
+// what a server restart is: the sessions are there and nothing remembers anything about them.
+const build = (existing?: FakeSessions) => {
+  const { tmux, sessions, die, plant, fail } = fakeTmux(existing);
   const { profiles } = parseProfiles({
     claude: { command: "/bin/sh", name: "Claude Code" },
     gemini: { command: "/bin/sh", name: "Gemini CLI" },
@@ -109,17 +111,8 @@ const build = () => {
 };
 
 void describe("adopting a session that outlived the process which created it", () => {
-  // m2/session-metadata-survives-restart. A fresh Registry over the SAME socket state is what a
-  // restart is: the sessions are there and nothing remembers anything about them.
-  const restart = (sessions: FakeSessions, allowed = ["/workspace/agentdeck", "/workspace/web"]) =>
-    new Registry(
-      fakeTmux(sessions).tmux,
-      parseProfiles({
-        claude: { command: "/bin/sh", name: "Claude Code" },
-        gemini: { command: "/bin/sh", name: "Gemini CLI" },
-      }).profiles,
-      new CwdAllowlist(allowed),
-    );
+  // m2/session-metadata-survives-restart.
+  const restart = (sessions: FakeSessions): Registry => build(sessions).registry;
 
   void test("the survivor is listed again, with the cwd and agent recovered from tmux", async () => {
     const { registry, sessions } = build();
