@@ -294,6 +294,18 @@ export class Registry {
       if (sessionId(path, agent) !== id) continue;
       const meta: SessionMeta = { cwd: path, agent };
       this.#meta.set(id, meta);
+      // Say so, every time. Adoption is arithmetic on what tmux reports and cannot establish that
+      // WE created the session - `sessionId(cwd, agent)` is a pure function of two values any
+      // client reads from `GET /api/cwds` and `GET /api/agents`, so anything running as this user
+      // can put a session on the socket under the name we would derive, and it becomes a tab the
+      // operator streams and types into. Provenance would need something written down, which plan
+      // 001 forecloses; what is available instead is visibility. An adoption during the first
+      // seconds after a restart is the expected case; one at any other time is not, and the log is
+      // the only place that difference can be seen.
+      console.error(
+        `agentdeck: adopted session ${id} at ${path} - this process has no record of creating it, ` +
+          `and its hook secret is gone, so it will not report waiting until its agent restarts`,
+      );
       return meta;
     }
     return undefined;
