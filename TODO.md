@@ -244,8 +244,18 @@ Driven from `curl` only. No client.
       **Done when:** two clients of different sizes attach and the pane matches the smaller; the
       small one detaches and the pane grows.
 
-- [ ] **`m2/client-minimal`** — Vue plus `@xterm/xterm` and `addon-fit`, one session, typing works.
+- [x] **`m2/client-minimal`** — Vue plus `@xterm/xterm` and `addon-fit`, one session, typing works.
       **Done when:** an agent is driven from the browser end to end.
+      **Demonstrated by** `src/client/end-to-end.test.ts`: the real client modules against a spawned
+      server, the real tmux binary, a real pty and a real `/bin/sh` over a real WebSocket, with the
+      two DOM-bound pieces named rather than faked. The manual recipe is in the README.
+      **The paste defect carried from `m2/resync-ping` is closed here** by chunking client-side, so
+      the client never sends a frame the receiver would refuse.
+      **Found by the audit and fixed before merge:** the new input queue outlived the connection it
+      was paced for, replaying everything typed during an outage into whatever the agent was doing
+      by then. Also two defects in the dev recipe this branch documented — the token shared an
+      origin with every Vite project on the machine, and the flow failed silently and forever
+      against a server with `AGENTDECK_ORIGIN` set.
 
 - [ ] **`m2/reconnect`** — exponential backoff capped low; a rejected token stops retrying,
       drops stored state and shows the paste field.
