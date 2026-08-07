@@ -388,24 +388,29 @@ export class Tmux {
       throw error;
     }
 
-    return stdout
-      .split("\n")
-      .filter((line) => line !== "")
+    const lines = stdout.split("\n").filter((line) => line !== "");
+
+    // Loud, not lenient - but only for the failure this refusal was written for. Under the locale
+    // mangling (see `baseEnv`) tmux rewrites EVERY U+001F, so no line at all carries a separator
+    // and no field is recoverable; that is the m0/create-500 case, where `id` became the whole
+    // line, `Registry.list()` silently dropped the session, and `create` reported failure over a
+    // session that was running. A single separator-less line is a different animal:
+    // `#{session_path}` is last in the format and a path may legally contain a newline, so one
+    // odd session splits into a parseable line plus a remainder. That must cost at most that one
+    // session, never `list()` for every other one - anything running as this user can create such
+    // a session, and killing the whole list is exactly the denial of service the allowlist exists
+    // to prevent.
+    if (lines.length > 0 && !lines.some((line) => line.includes(SEP))) {
+      throw new Error(
+        `tmux returned list-sessions output with no field separator: ${JSON.stringify(lines[0])}. ` +
+          `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
+          `set LC_ALL or LC_CTYPE to a UTF-8 locale for the process running agentdeck.`,
+      );
+    }
+
+    return lines
+      .filter((line) => line.includes(SEP))
       .map((line) => {
-        // Loud, not lenient. A missing separator means tmux rewrote our format's U+001F - see
-        // `baseEnv` - and the fields cannot be recovered from what is left. Reading such a line
-        // leniently is how m0/create-500 presented: `id` became the whole line, `Registry.list()`
-        // silently dropped the session, and `create` reported failure over a session that was
-        // running. A crafted session name can add separators but cannot remove them, so this can
-        // only fire on the mangling. It survives an LC_ALL the operator set to a non-UTF-8 value,
-        // which is the one case `baseEnv` cannot fix without overwriting their setting.
-        if (!line.includes(SEP)) {
-          throw new Error(
-            `tmux returned a list-sessions line with no field separator: ${JSON.stringify(line)}. ` +
-              `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
-              `set LC_ALL or LC_CTYPE to a UTF-8 locale for the process running agentdeck.`,
-          );
-        }
         const [id = "", dead = "0", status = "", created = "0", path = ""] = line.split(SEP);
         return {
           id,

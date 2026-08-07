@@ -93,18 +93,35 @@ void describe("listing sessions", () => {
     assert.deepEqual(await tmux.list(), []);
   });
 
-  void test("one mangled line fails the whole list rather than being read as a session", async () => {
+  void test("mangled output fails the whole list rather than being read as sessions", async () => {
     // m0/create-500. A client tmux does not believe is UTF-8 gets `_` in place of every byte tmux
     // considers non-printable, including the U+001F this format is built on. Reading such a line
     // leniently gave every session the whole line as its id, which `Registry.list()` then dropped
     // for having no metadata - a create that had worked, reported as a 500, agent still running.
     // Refusing is the point: half a list is worse than an error, because nothing downstream can
     // tell it from a machine with fewer sessions on it. The mangled line is the one the real tmux
-    // returned on the reported run, byte for byte.
+    // returned on the reported run, byte for byte. The mangling rewrites EVERY U+001F, so the
+    // signature is that no line at all carries a separator.
     const { tmux } = fake({
-      "list-sessions": `${line("a-claude-1", "0", "")}\nrepo-sh-df464c46_0__1786113059_/x\n`,
+      "list-sessions": "a-claude-1_0__1700000000_/a\nrepo-sh-df464c46_0__1786113059_/x\n",
     });
     await assert.rejects(async () => await tmux.list(), /field separator[\s\S]*UTF-8/);
+  });
+
+  void test("a newline in one session's path costs that session, not the whole list", async () => {
+    // `#{session_path}` is last in the format and a path may legally contain a newline, so a
+    // session created in `/tmp/ro\ngue` splits into a parseable record plus a separator-less
+    // remainder. Anything running as this user can create one; if that remainder failed `list()`
+    // every 2s tick, one rogue session would take every other session's stream and every tab
+    // with it, with no supervisor to restart the process. It must cost at most itself.
+    const { tmux } = fake({
+      "list-sessions": `${line("a-claude-1", "0", "")}${SEP}/tmp/ro\ngue\n${line("b-claude-2", "0", "")}${SEP}/tmp/ok\n`,
+    });
+    const sessions = await tmux.list();
+    assert.deepEqual(
+      sessions.map((s) => s.id),
+      ["a-claude-1", "b-claude-2"],
+    );
   });
 
   void test("a session name containing the separator is still parsed, not called mangled", async () => {

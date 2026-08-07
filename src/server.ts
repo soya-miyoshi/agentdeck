@@ -258,8 +258,15 @@ export const main = async (): Promise<void> => {
 
   // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
   // finish, or did I lose it", and expiring it after five minutes puts the question back.
-  const reaped = await registry.reap();
-  if (reaped.length > 0) console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
+  // A tmux that will not answer at boot is not a reason to refuse to serve: the sync timer
+  // reconciles again in a moment, and /api/health reports the truth in the meantime.
+  try {
+    const reaped = await registry.reap();
+    if (reaped.length > 0)
+      console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
+  } catch (error) {
+    console.error("agentdeck: reap at boot failed, continuing:", error);
+  }
 
   let token: string;
   try {
@@ -272,7 +279,9 @@ export const main = async (): Promise<void> => {
   const server = createServer(
     createHandler({
       onSessionsChanged: () => {
-        void hub.sync();
+        hub.sync().catch((error: unknown) => {
+          console.error("agentdeck: sync failed:", error);
+        });
       },
       registry,
       profiles,
@@ -296,8 +305,19 @@ export const main = async (): Promise<void> => {
 
   // Attach to whatever tmux already has before serving, so the first request sees real state
   // rather than an empty list that fills in a moment later.
-  await hub.sync();
-  const syncTimer = setInterval(() => void hub.sync(), SYNC_INTERVAL_MS);
+  // A failed poll is a stale session list for one tick. It must never be an exited process:
+  // nothing supervises this one (m0/supervisor-crash-test), so a crash costs every attached
+  // phone its socket until a human with shell access restarts it by hand.
+  try {
+    await hub.sync();
+  } catch (error) {
+    console.error("agentdeck: initial sync failed, retrying on the next tick:", error);
+  }
+  const syncTimer = setInterval(() => {
+    hub.sync().catch((error: unknown) => {
+      console.error("agentdeck: sync failed:", error);
+    });
+  }, SYNC_INTERVAL_MS);
   syncTimer.unref();
 
   // A port already in use is the most ordinary startup failure there is, and Node's default for
