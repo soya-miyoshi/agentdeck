@@ -98,6 +98,38 @@ const open = async (protocols: string | string[] = TOKEN): Promise<Client> => {
   return { socket, next, take };
 };
 
+/**
+ * A second server, of the same shape as the one above but with its own `repaint`.
+ *
+ * The three describes below each need a snapshot build they can make fail, or count, on their own
+ * terms - which the shared server cannot offer without changing what every other test in the file
+ * sees. Everything except the stream and the build is the same server, so it is written once.
+ */
+const privateServer = async (
+  ownStream: SessionStream,
+  repaint: WsDeps["repaint"],
+): Promise<{ url: string; close: () => void }> => {
+  const own = createServer();
+  const closeOwn = attachWebSocketServer(own, {
+    token: TOKEN,
+    origin: ORIGIN,
+    streamFor: (id) => (id === "s1" ? ownStream : undefined),
+    captureHistory: async () => await Promise.resolve("scrollback\n"),
+    isAlternateScreen: async () => await Promise.resolve(false),
+    repaint,
+    sendInput: () => undefined,
+    applyPaneSize: () => undefined,
+  }).close;
+  await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+  return {
+    url: `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`,
+    close: () => {
+      closeOwn();
+      own.close();
+    },
+  };
+};
+
 void describe("the upgrade is authenticated before a socket exists", () => {
   void test("a valid token opens, and the subprotocol is echoed back", async () => {
     // The echo is not decoration: without it the browser closes the connection at the socket
@@ -494,37 +526,22 @@ void describe("a bad snapshot build is not inherited by the next client", () => 
 // refresh-client - on every cold attach, which is the most common path in the product. Observed
 // against the real server before the fix: three chunk frames arrived ahead of the snapshot.
 void describe("a cold attach is told where it is before it is told what changed", () => {
-  let ordServer: ReturnType<typeof createServer>;
-  let ordClose: () => void;
+  const ordStream = new SessionStream({ sessionId: "s1" });
   let ordUrl: string;
-  let ordStream: SessionStream;
+  let ordClose: () => void;
 
   before(async () => {
-    ordStream = new SessionStream({ sessionId: "s1" });
-    ordServer = createServer();
-    ordClose = attachWebSocketServer(ordServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? ordStream : undefined),
-      captureHistory: async () => await Promise.resolve("scrollback\n"),
-      isAlternateScreen: async () => await Promise.resolve(false),
-      // What a real repaint does: write into the stream the client is attached to, then report
-      // the seq those bytes ended at.
-      repaint: async () => {
-        ordStream.write(Buffer.from("REPAINT-BYTES"));
-        await Promise.resolve();
-        return { data: "REPAINT-BYTES", seq: ordStream.buffer.headSeq };
-      },
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => ordServer.listen(0, "127.0.0.1", done));
-    ordUrl = `ws://127.0.0.1:${String((ordServer.address() as AddressInfo).port)}`;
+    // What a real repaint does: write into the stream the client is attached to, then report the
+    // seq those bytes ended at.
+    ({ url: ordUrl, close: ordClose } = await privateServer(ordStream, async () => {
+      ordStream.write(Buffer.from("REPAINT-BYTES"));
+      await Promise.resolve();
+      return { data: "REPAINT-BYTES", seq: ordStream.buffer.headSeq };
+    }));
   });
 
   after(() => {
     ordClose();
-    ordServer.close();
   });
 
   void test("no chunk arrives before the snapshot", async () => {
@@ -565,40 +582,25 @@ void describe("a cold attach is told where it is before it is told what changed"
 // attach path treats a failed snapshot as a reason to detach. The victim's socket stays OPEN, so
 // nothing tells it to try again: the shipped client sends `attach` on mount and on reconnect only.
 void describe("one client's failed snapshot does not detach another", () => {
-  let shServer: ReturnType<typeof createServer>;
-  let shClose: () => void;
+  const shStream = new SessionStream({ sessionId: "s1" });
   let shUrl: string;
-  let shStream: SessionStream;
+  let shClose: () => void;
   let attempts = 0;
 
   before(async () => {
-    shStream = new SessionStream({ sessionId: "s1" });
-    shServer = createServer();
-    shClose = attachWebSocketServer(shServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? shStream : undefined),
-      captureHistory: async () => await Promise.resolve("scrollback\n"),
-      isAlternateScreen: async () => await Promise.resolve(false),
-      // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
-      // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets
-      // a snapshot rather than inheriting the first caller's exception.
-      repaint: async () => {
-        attempts += 1;
-        await Promise.resolve();
-        if (attempts === 1) throw new Error("stdout maxBuffer length exceeded");
-        return { data: "repainted", seq: shStream.buffer.headSeq };
-      },
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => shServer.listen(0, "127.0.0.1", done));
-    shUrl = `ws://127.0.0.1:${String((shServer.address() as AddressInfo).port)}`;
+    // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
+    // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets a
+    // snapshot rather than inheriting the first caller's exception.
+    ({ url: shUrl, close: shClose } = await privateServer(shStream, async () => {
+      attempts += 1;
+      await Promise.resolve();
+      if (attempts === 1) throw new Error("stdout maxBuffer length exceeded");
+      return { data: "repainted", seq: shStream.buffer.headSeq };
+    }));
   });
 
   after(() => {
     shClose();
-    shServer.close();
   });
 
   void test("the second client still gets its snapshot and stays attached", async () => {
@@ -657,40 +659,25 @@ void describe("one client's failed snapshot does not detach another", () => {
 // first of them to resume installs its own entry before any other can look, so the rest join that
 // one instead.
 void describe("a reconnect storm is not a spawn storm", () => {
-  let stServer: ReturnType<typeof createServer>;
-  let stClose: () => void;
+  const stStream = new SessionStream({ sessionId: "s1" });
   let stUrl: string;
-  let stStream: SessionStream;
+  let stClose: () => void;
   let builds = 0;
   let failFirst = true;
 
   before(async () => {
-    stStream = new SessionStream({ sessionId: "s1" });
-    stServer = createServer();
-    stClose = attachWebSocketServer(stServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? stStream : undefined),
-      captureHistory: async () => await Promise.resolve("scrollback\n"),
-      isAlternateScreen: async () => await Promise.resolve(false),
-      repaint: async () => {
-        builds += 1;
-        // A real build is several process spawns and does not settle in the same tick, which is
-        // what gives a storm the window to pile onto it.
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        if (failFirst && builds === 1) throw new Error("stdout maxBuffer length exceeded");
-        return { data: "repainted", seq: stStream.buffer.headSeq };
-      },
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => stServer.listen(0, "127.0.0.1", done));
-    stUrl = `ws://127.0.0.1:${String((stServer.address() as AddressInfo).port)}`;
+    ({ url: stUrl, close: stClose } = await privateServer(stStream, async () => {
+      builds += 1;
+      // A real build is several process spawns and does not settle in the same tick, which is what
+      // gives a storm the window to pile onto it.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (failFirst && builds === 1) throw new Error("stdout maxBuffer length exceeded");
+      return { data: "repainted", seq: stStream.buffer.headSeq };
+    }));
   });
 
   after(() => {
     stClose();
-    stServer.close();
   });
 
   /** Open `count` sockets, attach them all to s1 at once, and answer what each one received. */

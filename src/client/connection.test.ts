@@ -196,11 +196,17 @@ const settle = async (): Promise<void> => {
   for (let turn = 0; turn < 8; turn++) await Promise.resolve();
 };
 
+/** A started connection whose first socket has completed the handshake. */
+const openHarness = (): Harness => {
+  const h = harness();
+  h.connection.start();
+  h.last().handlers.opened();
+  return h;
+};
+
 void describe("one socket, multiplexed", () => {
   void test("every attached session shares a single socket", () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.connection.attach("b", 80, 24);
     assert.equal(h.sockets.length, 1);
@@ -216,9 +222,7 @@ void describe("one socket, multiplexed", () => {
   void test("typing sends input and renders nothing locally", () => {
     // Input returns as ordinary output because that is what a PTY does, and the agent may be in a
     // mode that transforms or refuses it.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.connection.input("a", "ls\r");
     assert.deepEqual(sentMessages(h.last()).at(-1), { t: "input", sessionId: "a", data: "ls\r" });
@@ -398,9 +402,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     // fires onData for the replies it owes to escape sequences the AGENT wrote - one event per
     // `\e[6n`. Paced one frame per slot regardless of size, 200,000 eight-byte replies hold the
     // window for over an hour, and Ctrl-C is exactly what a person reaches for by then.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     for (let i = 0; i < 200_000; i += 1) h.connection.input("a", "\u001b[24;80R");
     h.connection.input("a", "\u0003");
@@ -421,9 +423,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
 
   void test("the queue is bounded, and what it drops it says out loud", () => {
     // The producer is an agent in a loop; the drain is fixed. Unbounded, the tab dies instead.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     const megabyte = "x".repeat(1024 * 1024);
     for (let i = 0; i < 64; i += 1) h.connection.input("a", megabyte);
@@ -459,9 +459,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     // Frames 1-40 have already been applied to the shell; the rest are discarded by the reset. A
     // silent discard is indistinguishable from a paste that never started, so the user pastes
     // again and the lines that already ran run twice.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.connection.input(
       "a",
@@ -475,9 +473,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
 
 void describe("position tracking across a reconnect", () => {
   void test("a snapshot clears and repaints, and a following chunk appends", () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 5, data: "hello" });
     h.last().deliver({ t: "chunk", sessionId: "a", epoch: "e1", seq: 8, data: "!!!" });
@@ -489,9 +485,7 @@ void describe("position tracking across a reconnect", () => {
   });
 
   void test("a gap sends resync rather than rendering a hole", () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 5, data: "hello" });
     h.last().deliver({ t: "chunk", sessionId: "a", epoch: "e1", seq: 40, data: "abc" });
@@ -505,9 +499,7 @@ void describe("position tracking across a reconnect", () => {
   });
 
   void test("re-attach carries the epoch and seq the tab got to", () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 5, data: "hello" });
 
@@ -522,9 +514,7 @@ void describe("position tracking across a reconnect", () => {
   void test("a server restart repaints the tab rather than leaving it blank forever", () => {
     // The epoch case: the session is alive with the same id, the client holds a seq in a counter
     // that no longer exists, and every signal except the pane looks correct.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 4_000_000, data: "old" });
 
@@ -539,9 +529,7 @@ void describe("position tracking across a reconnect", () => {
 
 void describe("reconnection", () => {
   void test("the first retry is silent and the second announces itself", async () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
 
     h.last().handlers.closed();
     // The socket carried nothing, so the token is checked over HTTP before this counts as a
@@ -579,9 +567,7 @@ void describe("a token rejected mid-session, rather than at startup", () => {
     // handshake. So the discovery is one ladder step after the drop, and no sooner: the drop
     // itself arrives on a connection that was working, which is the ordinary outage. What must not
     // happen is the refused handshake being read as more of the same outage.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
     h.last().handlers.closed();
     await settle();
@@ -614,9 +600,7 @@ void describe("a token rejected mid-session, rather than at startup", () => {
     // The server was restarted with a different AGENTDECK_ORIGIN under a client that had been
     // connected all along. Nothing about the token changed, so asking for a new one would send the
     // user after the wrong thing.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
     h.last().handlers.closed();
     await settle();
@@ -746,9 +730,7 @@ void describe("a rejected token is not a network failure", () => {
   });
 
   void test("stopping cancels the pending retry", () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.last().handlers.closed();
     h.connection.stop();
     assert.deepEqual(h.timers, []);
@@ -784,9 +766,7 @@ void describe("what is typed while disconnected", () => {
     // no longer on screen; two halves of a command line concatenate into one nobody typed. Pacing
     // a paste means holding input across the CONNECTING window - `#socket` is assigned before the
     // socket opens - and that is all it means.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.last().handlers.closed();
     await settle();
 
@@ -814,9 +794,7 @@ void describe("what is typed while disconnected", () => {
     // flight while everything queued after it is still sent, so the pty receives a hole and then
     // resumes - the concatenation of two fragments nobody typed, which this file names as worse
     // than dropping the lot.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
 
     const flood = (): void => {
       // Well past MAX_PENDING_INPUT_BYTES, with the window budget spent so nothing drains.
@@ -851,13 +829,6 @@ const watchdogs = (h: Harness): { delayMs: number; run: () => void }[] =>
   h.timers.filter(
     (timer) => timer.delayMs === DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS,
   );
-
-const openHarness = (): Harness => {
-  const h = harness();
-  h.connection.start();
-  h.last().handlers.opened();
-  return h;
-};
 
 void describe("the client-visible heartbeat", () => {
   void test("the pre-first-frame default is the server's interval, not a second number", () => {
@@ -1099,9 +1070,7 @@ void describe("the client-visible heartbeat", () => {
   void test("a socket that carries a frame resets the ladder", async () => {
     // The other half of the rule: evidence of traffic, not merely a handshake, starts the ladder
     // from the bottom again - so an ordinary outage still reconnects fast.
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.fire();
     await settle();
     h.fire();
@@ -1606,9 +1575,7 @@ void describe("dropping the previous socket from inside #open", () => {
   });
 
   void test("the watchdog's own drop leaves exactly one retry, and it opens one socket", async () => {
-    const h = harness();
-    h.connection.start();
-    h.last().handlers.opened();
+    const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: PING_INTERVAL_MS });
 
     h.fire();

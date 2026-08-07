@@ -267,12 +267,15 @@ export class Connection {
   /** Pieces of input waiting for room in the window, oldest first. */
   #pendingInput: PendingInput[] = [];
   #pendingBytes = 0;
-  /** `input()` calls that have had at least one piece released while another still waits. */
-  // Which SESSIONS have had part of their queued input released while more is still queued.
-  // This was a Set of per-call group ids that only emptied when the queue fully drained, so a
-  // producer that keeps the queue backed up - xterm answering an agent's `\\e[6n` loop, which is
-  // the case the byte bound exists for - added ~300k ids a second that were never removed. The
-  // byte bound held while the Set ate the tab, which is the outcome it was added to prevent.
+  /**
+   * Which SESSIONS have had part of their queued input released while more is still queued.
+   *
+   * Per session, not per `input()` call. A Set of per-call group ids only emptied when the queue
+   * fully drained, so a producer that keeps the queue backed up - xterm answering an agent's
+   * `\e[6n` loop, which is the case the byte bound exists for - added ~300k ids a second that were
+   * never removed. The byte bound held while the Set ate the tab, which is the outcome it was
+   * added to prevent.
+   */
   #partiallyReleased = new Set<string>();
   #overflowed = false;
   #framesThisWindow = 0;
@@ -562,12 +565,12 @@ export class Connection {
    */
   #noteTraffic(): void {
     this.#cancelSilence?.();
+    // The range check is applied here too, not only where the interval is stored, so no path can
+    // arm a bound that expires before a healthy server could possibly have spoken again.
     this.#cancelSilence = this.#schedule(
       () => {
         this.#cancelSilence = undefined;
         this.#dropSocket?.();
-        // The floor is applied here too, not only where the interval is stored, so no path can arm
-        // a bound that expires before a healthy server could possibly have spoken again.
       },
       usableHeartbeatInterval(this.#heartbeatIntervalMs) * HEARTBEAT_GRACE_INTERVALS,
     );
@@ -712,7 +715,7 @@ export class Connection {
     // token, with nothing to diagnose it from.
     if (!this.#carried) {
       this.#probing = true;
-      let verdict;
+      let verdict: TokenVerdict;
       try {
         verdict = await this.#probe();
       } finally {

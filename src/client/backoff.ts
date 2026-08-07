@@ -54,7 +54,10 @@ export const backoffDelay = (attempt: number, random: () => number = Math.random
 export type CloseReason = "network" | "token-rejected" | "origin-rejected";
 
 export interface RetryDecision {
-  /** False only for a rejected token, which is not a network failure and must not be retried. */
+  /**
+   * False only for an answer from the server - a rejected token or a refused origin - which is not
+   * a network failure and cannot be retried away.
+   */
   retry: boolean;
   delayMs: number;
   /**
@@ -94,10 +97,10 @@ export class ReconnectPolicy {
   /**
    * A socket closed.
    *
-   * A rejected token and a refused origin both stop the ladder outright. Backing off forever against a server that is
-   * answering correctly is the worst version of this failure: it looks exactly like being out of
-   * range, so the one thing the user could do about it - paste the new token - never gets asked
-   * for.
+   * A rejected token and a refused origin both stop the ladder outright. Backing off forever
+   * against a server that is answering correctly is the worst version of this failure: it looks
+   * exactly like being out of range, so the one thing the user could do about it - paste the new
+   * token, or open the address the server expects - never gets asked for.
    */
   closed(reason: CloseReason): RetryDecision {
     if (reason !== "network") {
