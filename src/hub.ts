@@ -15,12 +15,23 @@ import type { Tmux } from "./tmux.ts";
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 40;
 
+// A repaint is finished when tmux stops writing, and tmux does not say so. There is no marker in
+// the stream and nothing to synchronise on: `refresh-client` returns as soon as the redraw is
+// queued, not when the client has received it. So the end of the repaint is the quiet after it,
+// with a cap for the case where the pane is drawing on its own at the same time - a snapshot that
+// waits for an animated spinner to stop waits forever.
+const REPAINT_QUIET_MS = 120;
+const REPAINT_MAX_MS = 1000;
+
 export interface HubOptions {
   tmux: Tmux;
   registry: Registry;
   socket: string;
   /** Injected for tests: builds the live attachment for a session. */
   createPty?: (sessionId: string) => SessionPty;
+  /** Injected so a test of the repaint does not have to spend a real second on it. */
+  repaintQuietMs?: number;
+  repaintMaxMs?: number;
 }
 
 export class Hub {
@@ -29,11 +40,15 @@ export class Hub {
   #socket: string;
   #createPty: (sessionId: string) => SessionPty;
   #ptys = new Map<string, SessionPty>();
+  #repaintQuietMs: number;
+  #repaintMaxMs: number;
 
   constructor(options: HubOptions) {
     this.#tmux = options.tmux;
     this.#registry = options.registry;
     this.#socket = options.socket;
+    this.#repaintQuietMs = options.repaintQuietMs ?? REPAINT_QUIET_MS;
+    this.#repaintMaxMs = options.repaintMaxMs ?? REPAINT_MAX_MS;
     this.#createPty =
       options.createPty ??
       ((sessionId) =>
@@ -114,6 +129,51 @@ export class Hub {
 
   async captureHistory(sessionId: string, lines: number): Promise<string> {
     return await this.#tmux.captureHistory(sessionId, lines);
+  }
+
+  async isAlternateScreen(sessionId: string): Promise<boolean> {
+    return await this.#tmux.isAlternateScreen(sessionId);
+  }
+
+  /**
+   * Ask tmux to repaint, and collect the bytes it repaints with.
+   *
+   * The collection is the point. `refresh-client -R` writes into the PTY this hub is already
+   * reading, so the repaint arrives as ordinary output on the session's stream - which is what
+   * makes its `seq` answerable at all. Reading it back off the stream rather than out of the ring
+   * buffer is what separates the live screen from whatever output happened to be recent.
+   *
+   * Any output the agent produces during the window comes with it. That is correct: those bytes
+   * are in the stream too, and the seq returned is the count after all of them, so a client that
+   * discards chunks at or below it neither loses nor doubles anything.
+   */
+  async repaint(sessionId: string): Promise<{ data: string; seq: number }> {
+    const stream = this.#ptys.get(sessionId)?.stream;
+    if (stream === undefined) throw new Error(`no session ${sessionId} to repaint`);
+
+    const parts: Buffer[] = [];
+    let seq = stream.buffer.headSeq;
+    let quiet: NodeJS.Timeout | undefined;
+    let finish = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const off = stream.onChunk((chunk) => {
+      parts.push(chunk.data);
+      seq = chunk.seq;
+      if (quiet !== undefined) clearTimeout(quiet);
+      quiet = setTimeout(finish, this.#repaintQuietMs);
+    });
+    const cap = setTimeout(finish, this.#repaintMaxMs);
+    try {
+      await this.#tmux.repaint(sessionId);
+      await settled;
+    } finally {
+      off();
+      if (quiet !== undefined) clearTimeout(quiet);
+      clearTimeout(cap);
+    }
+    return { data: Buffer.concat(parts).toString("utf8"), seq };
   }
 
   /** Detach from everything. The agents keep running; only our attachments go. */

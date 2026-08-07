@@ -207,12 +207,14 @@ Driven from `curl` only. No client.
       **Done when:** a browser opens the socket (proving the echo), and omitting the echo
       reproduces the failure so the test is known to test something.
 
-- [ ] **`m2/snapshot`** (PARTIAL: `history` from capture-pane works and is tested; `data` is
-      currently the ring buffer's contents rather than a `refresh-client -R` repaint, so a first
-      attach to a long-idle session shows recent output rather than the live screen. The seq
-      arithmetic is already correct for the repaint; only the source is wrong.)
-      ORIGINAL: — cold snapshot as `capture-pane` scrollback in `history` plus a
+- [x] **`m2/snapshot`** — cold snapshot as `capture-pane` scrollback in `history` plus a
       `refresh-client -R` repaint in `data`, carrying the `seq` the repaint reflects.
+      Demonstrated on tmux 3.7b against a session idle since before the attach: `history` held the
+      lines that had scrolled off and `data` was the live screen with `seq === headSeq`; with the
+      pane on the alternate screen `history` was absent and `data` was the TUI's own frame.
+      `refresh-client` takes a CLIENT target, so the session is resolved to its client tty first;
+      the end of a repaint is the quiet after it, capped, because tmux puts no marker in the
+      stream.
       **Done when:** a client attaching to a long-running session sees scrollback then a correct
       live screen; and in alternate-screen mode `history` is absent rather than wrong.
 

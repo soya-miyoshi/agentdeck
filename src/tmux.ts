@@ -516,11 +516,47 @@ export class Tmux {
     }
   }
 
-  /** Make tmux repaint the live screen into the stream we are already reading. */
-  async refresh(id: string): Promise<void> {
-    // `-t` here is a CLIENT target, not a session one, so it is not one of the targets that can
-    // resolve to somebody else's session. Left as it is.
-    await this.#tmux(["refresh-client", "-t", id, "-R"]);
+  /**
+   * Whether the pane is on the alternate screen.
+   *
+   * A full-screen TUI has no scrollback to show, and `capture-pane` there returns the alternate
+   * screen's contents, which is not history. Verified on tmux 3.7b: `#{alternate_on}` prints `0`
+   * before `\033[?1049h` and `1` after, and prints it as clean ASCII to a client with no locale
+   * set at all.
+   */
+  async isAlternateScreen(id: string): Promise<boolean> {
+    try {
+      const stdout = await this.#tmux([
+        "display-message",
+        "-p",
+        "-t",
+        exactWindowTarget(id),
+        "#{alternate_on}",
+      ]);
+      return stdout.trim() === "1";
+    } catch (error) {
+      // A session that has gone has no alternate screen and no history either, so the answer the
+      // caller acts on is the same one it would get from the capture that follows.
+      if (isMissingSession(error) || isEmptyTmux(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * Make tmux repaint the live screen into the stream we are already reading.
+   *
+   * `refresh-client` takes a CLIENT target and nothing else, so the session has to be turned into
+   * the tty of the client we attached to it. That is the client this server's own PTY owns -
+   * `attach-session -d` detached every other one - so the repaint lands in the stream whose byte
+   * counter the snapshot's `seq` comes from, which is the entire reason `data` is a repaint
+   * rather than a capture (plan 002).
+   */
+  async repaint(id: string): Promise<void> {
+    const tty = (
+      await this.#tmux(["list-clients", "-t", exactTarget(id), "-F", "#{client_tty}"])
+    ).trim();
+    if (tty === "") throw new Error(`no tmux client is attached to ${id}, so it cannot repaint`);
+    await this.#tmux(["refresh-client", "-t", tty, "-R"]);
   }
 
   async resize(id: string, cols: number, rows: number): Promise<void> {

@@ -299,6 +299,8 @@ export const main = async (): Promise<void> => {
     origin: process.env["AGENTDECK_ORIGIN"],
     streamFor: (id) => hub.streamFor(id),
     captureHistory: async (id) => await hub.captureHistory(id, HISTORY_LINES),
+    isAlternateScreen: async (id) => await hub.isAlternateScreen(id),
+    repaint: async (id) => await hub.repaint(id),
     sendInput: (id, data) => hub.sendInput(id, data),
     applyPaneSize: (id, cols, rows) => hub.applyPaneSize(id, cols, rows),
   });

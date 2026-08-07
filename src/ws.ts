@@ -27,6 +27,10 @@ export interface WsDeps {
   streamFor: (sessionId: string) => SessionStream | undefined;
   /** Scrollback for a cold snapshot. The depth belongs to whoever implements this. */
   captureHistory: (sessionId: string) => Promise<string>;
+  /** Whether the pane is on the alternate screen, where there is no scrollback to show. */
+  isAlternateScreen: (sessionId: string) => Promise<boolean>;
+  /** The live screen for a cold snapshot, and the seq the bytes of it end at. */
+  repaint: (sessionId: string) => Promise<{ data: string; seq: number }>;
   /** Raw bytes the user typed, straight to the PTY. */
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
@@ -220,6 +224,8 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     const snapshot = await buildSnapshot({
       buffer: stream.buffer,
       captureHistory: async () => await deps.captureHistory(sessionId),
+      alternateScreen: async () => await deps.isAlternateScreen(sessionId),
+      repaint: async () => await deps.repaint(sessionId),
     });
     send(client.socket, { t: "snapshot", sessionId, ...snapshot });
   };

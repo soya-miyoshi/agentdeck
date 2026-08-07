@@ -26,6 +26,9 @@ before(async () => {
     origin: ORIGIN,
     streamFor: (id) => (id === "s1" ? stream : undefined),
     captureHistory: async () => await Promise.resolve("scrollback\n"),
+    isAlternateScreen: async () => await Promise.resolve(false),
+    repaint: async () =>
+      await Promise.resolve({ data: "repainted screen", seq: stream.buffer.headSeq }),
     sendInput: (_id, data) => input.push(data),
     applyPaneSize: (_id, cols, rows) => sizes.push({ cols, rows }),
   }).close;
@@ -147,6 +150,9 @@ void describe("attach", () => {
     const [snapshot, state] = await client.take(2);
     assert.equal(snapshot?.["t"], "snapshot");
     assert.equal(snapshot?.["history"], "scrollback\n");
+    // The live screen is the repaint, not the ring buffer: "live bytes" is what happened to be
+    // recent, which for a session idle at a prompt is not what the screen shows.
+    assert.equal(snapshot?.["data"], "repainted screen");
     assert.equal(snapshot?.["epoch"], stream.epoch);
     assert.equal(state?.["t"], "state");
     client.socket.close();
@@ -289,6 +295,8 @@ void describe("a failing capture costs one message, not the process", () => {
         await Promise.resolve();
         throw new Error("stdout maxBuffer length exceeded");
       },
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => await Promise.resolve({ data: "", seq: failStream.buffer.headSeq }),
       sendInput: () => undefined,
       applyPaneSize: () => undefined,
     }).close;

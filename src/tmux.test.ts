@@ -466,10 +466,42 @@ void describe("capture and repaint", () => {
     assert.equal(await tmux.captureHistory("s", 100), "");
   });
 
-  void test("refresh asks tmux to repaint into the stream we already read", async () => {
-    const { tmux, calls } = fake({ "refresh-client": "" });
-    await tmux.refresh("s");
-    assert.ok(calls[0]?.includes("-R"));
+  void test("repaint targets the client tty, because refresh-client takes nothing else", async () => {
+    // `refresh-client -t` is a CLIENT target. Handing it a session name is not a narrower target,
+    // it is a different namespace, and tmux answers "can't find client" - so the repaint that the
+    // snapshot's `data` is made of would never happen.
+    const { tmux, calls } = fake({ "list-clients": "/dev/ttys010\n", "refresh-client": "" });
+    await tmux.repaint("s");
+    assert.deepEqual(calls[0]?.slice(-4), ["-t", "=s", "-F", "#{client_tty}"]);
+    assert.deepEqual(calls[1]?.slice(-3), ["-t", "/dev/ttys010", "-R"]);
+  });
+
+  void test("a session with no attached client cannot repaint, and says so", async () => {
+    const { tmux } = fake({ "list-clients": "" });
+    await assert.rejects(
+      async () => await tmux.repaint("s"),
+      /no tmux client is attached to s/,
+      "an unlabelled failure here reads to the client as an empty screen",
+    );
+  });
+});
+
+void describe("alternate screen", () => {
+  void test("reports the pane's mode from #{alternate_on}", async () => {
+    // Verified by hand on tmux 3.7b: `0` at a shell prompt, `1` after the pane writes
+    // `\\033[?1049h`, and clean ASCII either way to a client with no locale set at all.
+    const on = fake({ "display-message": "1\n" });
+    assert.equal(await on.tmux.isAlternateScreen("s"), true);
+    assert.ok(on.calls[0]?.includes("#{alternate_on}"));
+
+    const off = fake({ "display-message": "0\n" });
+    assert.equal(await off.tmux.isAlternateScreen("s"), false);
+  });
+
+  void test("a session that has gone is not on the alternate screen", async () => {
+    const error = Object.assign(new Error("exited"), { stderr: "can't find session: s" });
+    const { tmux } = fake({ "display-message": error });
+    assert.equal(await tmux.isAlternateScreen("s"), false);
   });
 });
 
