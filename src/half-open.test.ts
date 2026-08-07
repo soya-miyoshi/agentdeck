@@ -130,9 +130,16 @@ const attach = async (wsPort: number, sessionId: string): Promise<Attached> => {
   });
   await new Promise<void>((done) => socket.once("open", done));
   socket.send(JSON.stringify({ t: "attach", sessionId, cols: 80, rows: 24 }));
-  await waitFor(() => attached.lastStateAt > 0, 2000);
+  // An attach that never landed would otherwise fail further down as something else entirely.
+  assert.ok(await waitFor(() => attached.lastStateAt > 0, 2000), `attach to ${sessionId} failed`);
   return attached;
 };
+
+/** Errors the server sent this client, read out of the frames the harness already collects. */
+const errorsOf = (attached: Attached): string[] =>
+  attached.frames
+    .filter((frame) => frame.t === "error")
+    .map((frame) => (typeof frame.message === "string" ? frame.message : ""));
 
 void describe("a half-open connection", () => {
   void test("production keeps the two-intervals relation this test scales", () => {
@@ -203,21 +210,17 @@ void describe("a half-open connection", () => {
   void test("one socket cannot send frames without a bound", async () => {
     const client = await attach(port, "live");
     input.length = 0;
-    const errors: string[] = [];
-    client.socket.on("message", (raw: Buffer) => {
-      const frame = JSON.parse(raw.toString("utf8")) as { t: string; message?: string };
-      if (frame.t === "error" && frame.message !== undefined) errors.push(frame.message);
-    });
 
     const sent = MAX_FRAMES_PER_WINDOW + 50;
     for (let i = 0; i < sent; i++) {
       client.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
     }
 
-    await waitFor(() => errors.length > 0, 2000);
+    await waitFor(() => errorsOf(client).length > 0, 2000);
     // Same reason as above: an unclosed socket turns a failed assertion into a hung run, so the
     // no-bound case has to report as a failure rather than as silence.
     try {
+      const errors = errorsOf(client);
       assert.ok(input.length < sent, "every frame was handled, so there is no bound");
       assert.ok(input.length <= MAX_FRAMES_PER_WINDOW);
       assert.equal(errors.length, 1, "one sentence per window, not one per dropped frame");
