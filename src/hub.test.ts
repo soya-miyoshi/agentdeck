@@ -348,6 +348,27 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
     assert.equal(live.seq, Buffer.byteLength(live.data, "utf8"));
   });
 
+  void test("a pane that floods is cut at the ring buffer's capacity, not at the clock", async () => {
+    // Without a byte budget the only stop for a pane that never goes quiet is the 1000ms cap, and
+    // a pane writing flat out delivers tens of megabytes inside it - which the snapshot then
+    // copies four times over (parts, concat, string, JSON escape) on a process nothing restarts.
+    // A compromised agent needs no credential for that, only its own stdout and the next routine
+    // reconnect. The bytes dropped here are not lost: they arrive as chunks past the seq below.
+    const { hub, id, stream } = await attached((pane) => {
+      const block = Buffer.alloc(64 * 1024, 0x78);
+      for (let i = 0; i < 40; i += 1) pane.write(block);
+    });
+
+    const live = await hub.repaint(id);
+    const capacity = stream.buffer.capacity;
+    assert.ok(
+      Buffer.byteLength(live.data, "utf8") <= capacity + 64 * 1024,
+      `collected ${String(Buffer.byteLength(live.data, "utf8"))} bytes past the budget`,
+    );
+    // The seq still names the last byte included, so the client discards exactly what it was given.
+    assert.equal(live.seq, Buffer.byteLength(live.data, "utf8"));
+  });
+
   void test("a repaint that collected nothing fails rather than returning a blank screen", async () => {
     // A snapshot is authoritative: the client clears the terminal and writes what it is given. So
     // `{data:""}` paints a live session blank, with the socket and the session list still correct

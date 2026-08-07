@@ -146,6 +146,14 @@ export class Hub {
    * Any output the agent produces during the window comes with it. That is correct: those bytes
    * are in the stream too, and the seq returned is the count after all of them, so a client that
    * discards chunks at or below it neither loses nor doubles anything.
+   *
+   * The collection stops at a byte budget as well as at the quiet and the cap. A pane that writes
+   * without pause - an agent looping on stdout, deliberately or not - delivers tens of megabytes
+   * inside the 1000ms cap, and every copy the snapshot then makes (the parts, the concat, the
+   * string, the JSON escape) is that size again, on a process nothing restarts. The budget is the
+   * ring buffer's capacity, which is the bound the rest of the protocol already lives inside.
+   * Truncating costs nothing: `seq` is the seq of the last chunk actually included, so the bytes
+   * left behind reach the client as ordinary chunks with a greater seq, in order.
    */
   async repaint(sessionId: string): Promise<{ data: string; seq: number }> {
     const stream = this.#ptys.get(sessionId)?.stream;
@@ -158,11 +166,16 @@ export class Hub {
     const settled = new Promise<void>((resolve) => {
       finish = resolve;
     });
+    const budget = stream.buffer.capacity;
+    let collected = 0;
     const off = stream.onChunk((chunk) => {
+      if (collected >= budget) return;
       parts.push(chunk.data);
+      collected += chunk.data.length;
       seq = chunk.seq;
       if (quiet !== undefined) clearTimeout(quiet);
       quiet = setTimeout(finish, this.#repaintQuietMs);
+      if (collected >= budget) finish();
     });
     const cap = setTimeout(finish, this.#repaintMaxMs);
     try {
