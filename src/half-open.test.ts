@@ -143,56 +143,61 @@ void describe("a half-open connection", () => {
     const proxy = await startProxy(port);
     const deadClient = await attach(proxy.port, "dead");
     const liveClient = await attach(port, "live");
+    // Cleanup has to survive a failing assertion. Without it, the negative control - taking the
+    // terminate() away - leaves a half-open socket and a proxy holding the loop open, and the run
+    // hangs instead of reporting which assertion failed. A test whose failure mode is a hang is a
+    // test nobody can read the result of.
+    try {
+      assert.equal(dead.attachedCount, 1);
+      assert.equal(live.attachedCount, 1);
 
-    assert.equal(dead.attachedCount, 1);
-    assert.equal(live.attachedCount, 1);
+      const framesBeforeFreeze = deadClient.frames.length;
+      const frozenAt = Date.now();
+      proxy.freeze();
 
-    const framesBeforeFreeze = deadClient.frames.length;
-    const frozenAt = Date.now();
-    proxy.freeze();
+      // The server drops the client when the ping goes unanswered: it detaches from the stream in
+      // its close handler, so the attached count falling is the server having NOTICED, observed
+      // where the noticing happens rather than where a socket event happens.
+      const noticed = await waitFor(() => dead.attachedCount === 0, TEST_PONG_TIMEOUT_MS * 3);
+      const pingNoticedMs = Date.now() - frozenAt;
 
-    // The server drops the client when the ping goes unanswered: it detaches from the stream in
-    // its close handler, so the attached count falling is the server having NOTICED, observed
-    // where the noticing happens rather than where a socket event happens.
-    const noticed = await waitFor(() => dead.attachedCount === 0, TEST_PONG_TIMEOUT_MS * 3);
-    const pingNoticedMs = Date.now() - frozenAt;
+      assert.ok(noticed, "the ping never noticed the half-open connection");
+      assert.ok(
+        pingNoticedMs <= TEST_PONG_TIMEOUT_MS,
+        `ping noticed after ${String(pingNoticedMs)}ms, past the ${String(TEST_PONG_TIMEOUT_MS)}ms bound`,
+      );
 
-    assert.ok(noticed, "the ping never noticed the half-open connection");
-    assert.ok(
-      pingNoticedMs <= TEST_PONG_TIMEOUT_MS,
-      `ping noticed after ${String(pingNoticedMs)}ms, past the ${String(TEST_PONG_TIMEOUT_MS)}ms bound`,
-    );
+      // The connection really was half-open, not closed or errored: the client end is still OPEN and
+      // heard nothing at all after the freeze. Neither of those is true of a socket that was closed
+      // or destroyed, which is the whole reason this test carries a proxy.
+      assert.equal(deadClient.socket.readyState, WebSocket.OPEN);
+      assert.equal(deadClient.frames.length, framesBeforeFreeze);
 
-    // The connection really was half-open, not closed or errored: the client end is still OPEN and
-    // heard nothing at all after the freeze. Neither of those is true of a socket that was closed
-    // or destroyed, which is the whole reason this test carries a proxy.
-    assert.equal(deadClient.socket.readyState, WebSocket.OPEN);
-    assert.equal(deadClient.frames.length, framesBeforeFreeze);
+      // THE OTHER CLOCK. The dead session's status has not changed since its attach - and neither
+      // has the live one's, because an idle agent legitimately says nothing for minutes. Both look
+      // identical from the strip, which is the confidently-wrong tab this design refuses.
+      const deadStatusUnchangedMs = Date.now() - deadClient.lastStateAt;
+      const liveStatusUnchangedMs = Date.now() - liveClient.lastStateAt;
 
-    // THE OTHER CLOCK. The dead session's status has not changed since its attach - and neither
-    // has the live one's, because an idle agent legitimately says nothing for minutes. Both look
-    // identical from the strip, which is the confidently-wrong tab this design refuses.
-    const deadStatusUnchangedMs = Date.now() - deadClient.lastStateAt;
-    const liveStatusUnchangedMs = Date.now() - liveClient.lastStateAt;
+      // The live socket is demonstrably alive at this instant: an input round-trips to the server
+      // while its status has been just as stale as the dead one's.
+      input.length = 0;
+      liveClient.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
+      assert.ok(await waitFor(() => input.length === 1, 2000), "the live socket was not alive");
 
-    // The live socket is demonstrably alive at this instant: an input round-trips to the server
-    // while its status has been just as stale as the dead one's.
-    input.length = 0;
-    liveClient.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
-    assert.ok(await waitFor(() => input.length === 1, 2000), "the live socket was not alive");
-
-    // Both timings, in the assertion. Any status-staleness threshold low enough to have called the
-    // dead socket by now would have called the live one at the same moment - so the status clock
-    // cannot beat the ping without being wrong about a healthy session.
-    assert.ok(
-      pingNoticedMs <= deadStatusUnchangedMs && liveStatusUnchangedMs >= pingNoticedMs,
-      `ping noticed at ${String(pingNoticedMs)}ms; the dead session's status had been unchanged for ` +
-        `${String(deadStatusUnchangedMs)}ms and a LIVE session's for ${String(liveStatusUnchangedMs)}ms`,
-    );
-
-    deadClient.socket.terminate();
-    liveClient.socket.close();
-    proxy.close();
+      // Both timings, in the assertion. Any status-staleness threshold low enough to have called the
+      // dead socket by now would have called the live one at the same moment - so the status clock
+      // cannot beat the ping without being wrong about a healthy session.
+      assert.ok(
+        pingNoticedMs <= deadStatusUnchangedMs && liveStatusUnchangedMs >= pingNoticedMs,
+        `ping noticed at ${String(pingNoticedMs)}ms; the dead session's status had been unchanged for ` +
+          `${String(deadStatusUnchangedMs)}ms and a LIVE session's for ${String(liveStatusUnchangedMs)}ms`,
+      );
+    } finally {
+      deadClient.socket.terminate();
+      liveClient.socket.close();
+      proxy.close();
+    }
   });
 
   void test("one socket cannot send frames without a bound", async () => {
@@ -210,11 +215,15 @@ void describe("a half-open connection", () => {
     }
 
     await waitFor(() => errors.length > 0, 2000);
-    assert.ok(input.length < sent, "every frame was handled, so there is no bound");
-    assert.ok(input.length <= MAX_FRAMES_PER_WINDOW);
-    assert.equal(errors.length, 1, "one sentence per window, not one per dropped frame");
-    assert.match(errors[0] ?? "", /messages in a second/);
-
-    client.socket.close();
+    // Same reason as above: an unclosed socket turns a failed assertion into a hung run, so the
+    // no-bound case has to report as a failure rather than as silence.
+    try {
+      assert.ok(input.length < sent, "every frame was handled, so there is no bound");
+      assert.ok(input.length <= MAX_FRAMES_PER_WINDOW);
+      assert.equal(errors.length, 1, "one sentence per window, not one per dropped frame");
+      assert.match(errors[0] ?? "", /messages in a second/);
+    } finally {
+      client.socket.close();
+    }
   });
 });
