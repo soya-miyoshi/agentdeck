@@ -187,7 +187,7 @@ const connectClient = async (wsPort: number, sessionId: string): Promise<ClientU
   let opened = false;
   let lastStateAt = 0;
   const connection = new Connection(
-    { token: TOKEN, connect, verifyToken: () => Promise.resolve(true) },
+    { token: TOKEN, connect, verifyToken: () => Promise.resolve("ok" as const) },
     {
       render: () => undefined,
       state: () => {

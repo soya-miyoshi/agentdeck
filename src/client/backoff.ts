@@ -43,10 +43,21 @@ export const backoffDelay = (attempt: number, random: () => number = Math.random
   return Math.round(full * (JITTER_FLOOR + (1 - JITTER_FLOOR) * random()));
 };
 
-export type CloseReason = "network" | "token-rejected";
+/**
+ * Why the socket closed, as far as the client could find out.
+ *
+ * `origin-rejected` is a server that answered and refused this page's origin (a 403). It is kept
+ * apart from `token-rejected` because the remedy is different and the client says a different
+ * sentence: the token is fine, `AGENTDECK_ORIGIN` and the address the page was opened from
+ * disagree, and pasting a new token would not help.
+ */
+export type CloseReason = "network" | "token-rejected" | "origin-rejected";
 
 export interface RetryDecision {
-  /** False only for a rejected token, which is not a network failure and must not be retried. */
+  /**
+   * False only for an answer from the server - a rejected token or a refused origin - which is not
+   * a network failure and cannot be retried away.
+   */
   retry: boolean;
   delayMs: number;
   /**
@@ -86,13 +97,13 @@ export class ReconnectPolicy {
   /**
    * A socket closed.
    *
-   * A rejected token stops the ladder outright. Backing off forever against a server that is
-   * answering correctly is the worst version of this failure: it looks exactly like being out of
-   * range, so the one thing the user could do about it - paste the new token - never gets asked
-   * for.
+   * A rejected token and a refused origin both stop the ladder outright. Backing off forever
+   * against a server that is answering correctly is the worst version of this failure: it looks
+   * exactly like being out of range, so the one thing the user could do about it - paste the new
+   * token, or open the address the server expects - never gets asked for.
    */
   closed(reason: CloseReason): RetryDecision {
-    if (reason === "token-rejected") {
+    if (reason !== "network") {
       this.#attempts = 0;
       return { retry: false, delayMs: 0, showReconnecting: false };
     }

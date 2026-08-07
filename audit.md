@@ -867,15 +867,20 @@ alternative, a blind silence timer, would make every idle tab reconnect in a loo
   `#onClosed`, which calls `verifyToken()` - `GET /api/sessions`, which reaches `registry.list()`
   and spawns `tmux list-sessions` - every cycle. `verifyToken` returns true for anything that is
   not a 401, so the loop never terminates and never surfaces a diagnosis. It re-presents the bearer
-  token to whatever is answering, once per cycle, forever. Status: OPEN, and it is the same
-  `verifyToken` blind spot recorded under `m2/client-minimal`: it cannot see a 403 either. Both
-  want the same fix and `m2/reconnect` owns the ladder.
+  token to whatever is answering, once per cycle, forever. Status: FIXED in `m2/reconnect`.
+  `verifyToken` sees a 403, and it now also tells "the server answered" from "nothing answered" -
+  which is what makes the stuck case sayable at all. A probe that says the server is answering and
+  this token is good, while three sockets in a row have carried nothing, is neither the network nor
+  the token, and the client says so once. It does NOT stop the ladder: unlike a 401 or a 403 this
+  is two facts agreeing rather than an answer from the server.
 
 ### Open after this iteration
 
 - **`verifyToken` treats everything that is not a 401 as success**, so an origin refusal and a
   captive portal both read as "token still good" and retry forever. Two audits have now landed on
   it. `m2/reconnect` owns it and is blocked on `m2/session-metadata-survives-restart`.
+  Status: FIXED in `m2/reconnect`. The verdict is now one of four - `ok`, `rejected`, `forbidden`,
+  `unreachable` - and plan 002 was edited before the code was.
 - **Same-uid**, unchanged.
 
 ---
@@ -931,3 +936,127 @@ boundary holds.
 - **`waitingDetectionLost` has no reader** until `m3/tab-strip`.
 - **Exited panes are retained indefinitely** once adopted.
 - **Same-uid**, unchanged, and this branch is the clearest illustration of it so far.
+
+---
+
+## m2/reconnect - final whole-codebase pass - 2026-08-08
+
+The reconnect ladder, reviewed rather than rebuilt. Both halves of the done-when were already
+asserted against real infrastructure in `src/client/end-to-end.test.ts` - a socket killed
+mid-output repaints with no hole, and a real server SIGKILLed and restarted under a live client
+repaints in a new epoch - and both still pass unchanged. This pass looked for the one failure the
+whole item exists to prevent and that a green suite cannot show: a combination of the ladder's
+flags (`#stopped`, `#probing`, `#carried`, `#opened`, per-socket `handled`, `#diagnosed`) that
+leaves the connection with no socket, no scheduled retry and no status the user can act on. Three
+were reachable, all three are fixed here, and each has a test that fails without its fix.
+
+The server half of the storm question was checked and is sound: `buildCoalescedSnapshot` coalesces
+per session, a joiner that inherits a rejection looks again before starting its own build, and the
+build is raced against a bound that evicts - so a reconnect storm after a restart is one build per
+session, not one per tab.
+
+### Findings
+
+- [high] src/client/connection.ts:717 - **A token probe that never settles wedged the connection
+  permanently.** `#onClosed` clears `#socket`, sets `#probing` and awaits `verifyToken()`, which is
+  `fetch` with no timeout - and the case the probe exists for is precisely the one where the
+  network has gone. In that window there is no socket, nothing scheduled, and `poke()` returns
+  immediately because `#probing` is the guard that stops a wake opening a second socket beside a
+  ladder that is still deciding. So a request that never settles - routine on iOS for a request
+  issued as the tab is backgrounded - took the connection out for the life of the tab, and the two
+  events App.vue wires to `poke()`, `visibilitychange` and `online`, both hit the guard. A phone
+  unlocking fires both, which is the exact moment this item is about. Status: FIXED. The probe is
+  raced against `TOKEN_PROBE_TIMEOUT_MS` (10 s, generous next to the ladder's 4 s cap because a
+  slow answer is still an answer); expiry is `unreachable`, not `ok`, so nothing is asserted to the
+  user and the token is kept. A rejection from the injected `verifyToken` is the same answer for
+  the same reason - the ladder cannot survive not getting a decision.
+
+- [medium] src/client/connection.ts:626 - **A socket that cannot be CONSTRUCTED threw out of the
+  ladder.** `new WebSocket` throws rather than closing for a blocked mixed-content or CSP-refused
+  endpoint. `#open` is called from `start()` and from a scheduled retry callback, so the throw left
+  no socket, no retry, and a `connecting` status that would never move again - and from a timer
+  there is nobody to catch it. Status: FIXED: a socket that cannot be constructed is treated as one
+  that closed, and the ladder carries on. The thrown error is swallowed rather than shown, because
+  a constructor's message quotes the arguments it refused and the second argument is the
+  subprotocol list, which is where the token is.
+
+- [medium] src/client/connection.ts:594 - **`#dropSocket?.()` at the top of `#open` could leave a
+  retry scheduled beside the socket it had just opened.** Dropping a socket that had CARRIED frames
+  runs `#onClosed` synchronously - no probe is needed for a socket the server was talking to
+  seconds ago - and that path ends by scheduling a retry. The retry then fires beside the healthy
+  socket opened immediately afterwards and drops it, and every attached tab re-attaches for
+  nothing: on this client a re-attach after a roll of the ring buffer is a cold snapshot per
+  session, at the server that was already the reason for reconnecting. Status: FIXED: `#open`
+  cancels any outstanding retry after the drop, since an open supersedes one. It cannot recurse -
+  the drop's `#onClosed` either awaits the probe or returns after scheduling, never re-entering
+  `#open`.
+
+- [low] src/client/connection.ts:320 - `stop()` left the probe's bound timer running. Harmless in
+  effect, since `#onClosed` re-checks `#stopped` after the probe, but a timer outliving the object
+  that armed it is how a "closed" connection stops being closed. Status: FIXED: `stop()` cancels
+  it, and `src/client/connection.test.ts` asserts teardown leaves no timers at all.
+
+### Open after this iteration
+
+- **A late `rejected` verdict from a probe the ladder has already abandoned is discarded**, so a
+  token revoked during a 10-second stall is noticed one cycle later rather than immediately. The
+  socket carries nothing in the meantime, so nothing is served on a revoked token; this is latency
+  in signing the user out, not access. Deliberate: acting on a verdict the ladder has moved past is
+  what wiped a freshly pasted token in the defect 99f1855 fixed.
+- **The status stays `open` through the first, silent retry** (`showReconnecting` is false until
+  one retry has failed), so for up to 250 ms a disconnected tab reads as connected. Deliberate, and
+  the alternative is a banner that flashes for every ordinary drop.
+- **Same-uid**, unchanged.
+
+---
+
+## m2/reconnect - final whole-codebase pass - 2026-08-08
+
+The item that stopped twice. First because its epoch half was unreachable - after a restart there
+was no session to re-attach to, which `m2/session-metadata-survives-restart` then fixed; the epoch
+test now ASSERTS the repaint against a real server SIGKILLed under a live client rather than
+measuring the gap. Then at QA, which found three real defects in the ladder and wrote failing tests
+for them rather than bending them to fit. Those three are fixed in 99f1855 and each test is red
+without its fix.
+
+### Findings
+
+- [medium] src/client/api.ts:38 - **Any 403 anywhere in the request path permanently killed the
+  client, and blamed the wrong thing.** `POST /api/probe` traverses `tailscale serve`, whatever is
+  on the phone's path, and in development the Vite proxy; any of them answering 403 once - a
+  Tailscale ACL change, a funnel that is off, a captive portal, a proxy refusing an unknown POST
+  target - set `#stopped`, and `poke()` returns early while stopped, so neither `visibilitychange`
+  nor `online` could revive it. The same shape bit the honest case: an operator who fixed
+  `AGENTDECK_ORIGIN` and restarted got a client that stayed dead, because nothing in the app can
+  restart a stopped Connection. Status: FIXED in 828404b. A 403 is terminal only when it carries
+  the sentence this server writes (`origin not allowed`); anything else is `unreachable` and keeps
+  retrying. And a wake now clears that one stop, so a fixed server does not need the user to know
+  to reload.
+
+- [low] src/client/connection.ts:716 - The probe gate widened from `!#opened` to `!#carried`, so
+  the client now probes after any socket that completed the 101 and then said nothing - the common
+  shape behind a proxy that passes upgrades but not frames, and during a restart. A 401 on that
+  probe reaches `signOut()` and clears the stored token, which a phone cannot regenerate: recovery
+  means reading `~/.agentdeck/token` on the Mac. Status: FIXED in the same commit and by the same
+  rule - a 401 is a rejected token only when it carries `missing or invalid bearer token`.
+
+- [low] src/ws.ts:435 - The inherited-failure cap re-opens the snapshot storm it bounds. Once the
+  cap is hit a caller starts its own build, and `resync` reaches `buildCoalescedSnapshot` from a
+  socket attached to nothing with a client-chosen epoch, so a bogus epoch forces the snapshot
+  branch every time. One authenticated socket can drive up to `MAX_FRAMES_PER_WINDOW` builds per
+  second while builds are failing, each two `execFile` spawns with a 16 MB buffer aimed at the tmux
+  server that is already the failure. The frame budget is per socket and nothing caps sockets.
+  Status: OPEN. The branch narrows this rather than creating it; the real fix is a per-session
+  build token with a cooldown after failure, and rate-limiting `resync` separately from the general
+  frame budget, since it is the one client frame that costs process spawns.
+
+- [low] src/http.ts:136 - `/api/probe` never reads its body, so `MAX_BODY_BYTES` is not in force on
+  it - the one POST route that does not consume its body, while the file states that bound as
+  universal. Node dumps the unread body so heap is bounded, but the stated rule is not true.
+  Status: OPEN.
+
+### Open after this iteration
+
+- **`resync` costs process spawns and is bounded only by the general frame budget.** This is the
+  third audit to land near it. It wants its own item.
+- **Same-uid**, unchanged.

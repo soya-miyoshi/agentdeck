@@ -47,6 +47,29 @@ export const MAX_FRAME_BYTES = 64 * 1024;
  */
 export const SNAPSHOT_TIMEOUT_MS = 15_000;
 
+/**
+ * How many other clients' failed snapshot builds one `attach` may wait out before it stops
+ * joining and builds its own.
+ *
+ * Each individual build is bounded by SNAPSHOT_TIMEOUT_MS, but joining an unbounded chain of them
+ * is not: caller k of a storm of N would wait out builds 1..k-1 in turn, so the last one sits in
+ * the attach path for N x SNAPSHOT_TIMEOUT_MS while holding its queue of the session's output.
+ * Two inherited failures is the pre-branch worst case (one inherited build plus your own), and it
+ * keeps the storm fix intact: the first joiner to wake still installs the shared retry.
+ */
+export const MAX_INHERITED_SNAPSHOT_FAILURES = 2;
+
+/**
+ * How many bytes of live output one attaching client may hold while its snapshot is being built.
+ *
+ * The queue exists to keep chunks from arriving ahead of the snapshot, and it is normally a
+ * handful of frames. A session printing at a few MB/s against a stalled tmux server is the case
+ * that turns it into a heap of the whole stall, per attaching socket. Past this the queue is
+ * dropped and the client is caught up from the ring buffer instead, which is bounded by its own
+ * capacity.
+ */
+export const MAX_QUEUED_ATTACH_BYTES = 4 * 1024 * 1024;
+
 export interface WsDeps {
   token: string;
   origin: string | undefined;
@@ -243,11 +266,26 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
         //
         // So it queues until the snapshot is away, then flushes only what the snapshot does not
         // already reflect.
+        //
+        // And the queue is capped. A build the snapshot timeout is still waiting out is up to
+        // fifteen seconds of whatever the session prints, retained per attaching socket, and the
+        // chunks are the stream's own Buffers. Past MAX_QUEUED_ATTACH_BYTES the queue is dropped
+        // and the client is caught up from the ring buffer after the snapshot instead, so it gets
+        // bytes rather than a hole.
         let queued: { epoch: string; seq: number; data: Buffer }[] | undefined = [];
+        let queuedBytes = 0;
+        let dropped = false;
         const registeredHere = !client.attached.has(message.sessionId);
         if (registeredHere) {
           const off = stream.onChunk((chunk) => {
             if (queued !== undefined) {
+              queuedBytes += chunk.data.length;
+              if (queuedBytes > MAX_QUEUED_ATTACH_BYTES) {
+                queued = [];
+                queuedBytes = 0;
+                dropped = true;
+                return;
+              }
               queued.push(chunk);
               return;
             }
@@ -294,6 +332,33 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
         } finally {
           held = queued ?? [];
           queued = undefined;
+        }
+        if (dropped) {
+          // The queue was thrown away, so the flush cannot be trusted to be a complete run of
+          // bytes - flushing part of one paints a hole. The ring buffer is the authority for the
+          // same window: send what it holds past the snapshot's position, or, if it has rolled
+          // past that position too, everything it holds as a fresh snapshot frame.
+          if (at !== undefined && stream.buffer.covers(stream.epoch, at)) {
+            const data = stream.buffer.since(at);
+            if (data.length > 0) {
+              send(client.socket, {
+                t: "chunk",
+                sessionId: message.sessionId,
+                epoch: stream.epoch,
+                seq: stream.buffer.headSeq,
+                data: data.toString("utf8"),
+              });
+            }
+          } else {
+            send(client.socket, {
+              t: "snapshot",
+              sessionId: message.sessionId,
+              epoch: stream.epoch,
+              seq: stream.buffer.headSeq,
+              data: stream.buffer.snapshot().toString("utf8"),
+            });
+          }
+          held = [];
         }
         for (const chunk of held) {
           // Anything the snapshot already contains would be painted twice.
@@ -363,15 +428,37 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     sessionId: string,
     stream: SessionStream,
   ): Promise<Awaited<ReturnType<typeof buildSnapshot>>> => {
-    const inFlight = snapshots.get(sessionId);
-    if (inFlight !== undefined) {
+    // The generation whose failure this caller has already inherited, so it is never inherited
+    // twice and the loop can only ever move forward.
+    let inherited: number | undefined;
+    let inheritedFailures = 0;
+    for (;;) {
+      const inFlight = snapshots.get(sessionId);
+      if (inFlight === undefined || inFlight.generation === inherited) break;
+      // Bounded, because each of these is up to a whole SNAPSHOT_TIMEOUT_MS spent inside one
+      // `attach` while it holds that client's queue of live output.
+      if (inheritedFailures >= MAX_INHERITED_SNAPSHOT_FAILURES) break;
       try {
         return await inFlight.promise;
       } catch {
         // Coalescing is an optimisation, not a verdict. Sharing the SUCCESS is the point; sharing
         // the FAILURE means one client's flood - or one capture-pane past its buffer - decides the
         // outcome for every client that happened to attach beside it, and the attach path treats a
-        // failed snapshot as a reason to detach. Fall through and make our own attempt.
+        // failed snapshot as a reason to detach. So a joiner makes its own attempt.
+        //
+        // But it must LOOK AGAIN first, which is what this loop is for. Every joiner of a failed
+        // build is woken by the same rejection, so falling straight through made each of them
+        // start a build: eight tabs coming back from one stalled server turned one failure into
+        // eight concurrent capture-panes at the tmux server that was already the problem, which is
+        // the storm the coalescing exists to prevent, reachable only through the failure path.
+        // Measured at eight builds for eight re-attaches before this loop - src/ws.test.ts.
+        //
+        // Looking again is not merely an optimisation here: the first joiner to wake has already
+        // installed its retry by the time the rest look, so the rest join a real, live attempt
+        // rather than duplicating it. The loop cannot spin, because it never inherits the same
+        // generation twice and a newer entry is always a strictly larger one.
+        inherited = inFlight.generation;
+        inheritedFailures += 1;
       }
     }
     const generation = nextGeneration++;

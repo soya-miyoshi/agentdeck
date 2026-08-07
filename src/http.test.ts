@@ -166,6 +166,30 @@ void describe("authentication", () => {
     assert.equal(status, 403);
   });
 
+  void test("POST /api/probe answers ok, needs the token, and is refused for a foreign Origin", async () => {
+    // The route the client's admission check calls. It is a POST so that a browser attaches
+    // `Origin` to it - a same-origin GET carries none, which made the 403 below unreachable from
+    // the only client that ships.
+    const unauth = await call("/api/probe", { method: "POST", auth: false });
+    assert.equal(unauth.status, 401);
+
+    const foreign = await call("/api/probe", {
+      method: "POST",
+      headers: { origin: "https://evil.example" },
+    });
+    assert.equal(foreign.status, 403);
+
+    const before = ((await call("/api/sessions")).body["sessions"] as unknown[]).length;
+    const ok = await call("/api/probe", {
+      method: "POST",
+      headers: { origin: "https://mac.example.ts.net" },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body["ok"], true);
+    // Side-effect-free: it is a question about this client's admission, not a command.
+    assert.equal(((await call("/api/sessions")).body["sessions"] as unknown[]).length, before);
+  });
+
   void test("the expected Origin is allowed", async () => {
     const { status } = await call("/api/sessions", {
       headers: { origin: "https://mac.example.ts.net" },

@@ -20,6 +20,7 @@ route not called by the phone authenticates differently, for reasons given under
 | `GET` | `/api/agents` | `{ agents: AgentSummary[] }` — the configured profiles |
 | `GET` | `/api/cwds` | `{ cwds: Cwd[] }` — the directories a session may be started in |
 | `GET` | `/api/health` | `{ ok: true, version }` |
+| `POST` | `/api/probe` | `{ ok: true }` — the client asking why it cannot get in |
 | `POST` | `/api/hooks/:sessionId` | `{ ok: true }` — an agent reporting its own turn boundary |
 
 ```ts
@@ -113,6 +114,21 @@ started is not on the list, and cannot be until it is restarted.
 `warning` is set whenever the new session's `cwd` already has a live session, in either of the two
 shapes above — two agents in one working tree, which is allowed but worth surfacing, or the same
 agent handed back rather than started twice (plan 004).
+
+### `POST /api/probe`
+
+Side-effect-free, authenticated, and a `POST` on purpose. It exists so the client can find out
+whether the server is refusing this page's origin — the one failure retrying cannot mend — and a
+`GET` cannot find that out. A browser attaches `Origin` to every WebSocket handshake but omits it
+from a same-origin `GET`, and the page and the API are same-origin by construction (plan 001), so
+a `GET /api/sessions` probe is answered 200 by the very server whose upgrade check just returned
+403. The verdict the client needs would never be reachable, and the ladder would run forever over
+a configuration mistake the server knows about exactly. Fetch appends `Origin` to any request
+whose method is not `GET` or `HEAD`, so the `POST` carries the same evidence the upgrade does and
+the origin check answers the same way for both.
+
+It answers `{ ok: true }` and changes nothing: it is a question about this client's admission, not
+a command.
 
 ### `POST /api/hooks/:sessionId`
 
@@ -368,11 +384,64 @@ the normal case, not an error path.
 4. Tabs show a "reconnecting" affordance only after the first retry fails, so a normal
    half-second reconnect does not flash UI at the user.
 
+**A restarted server does not reach step 3 today, and the client cannot make it.** The epoch rule
+above is what makes a restart uneventful once the server still has the session — and since
+`m0/host-boundary` gated `Registry.list()` on the registry's in-memory `#meta`, a session that
+outlived the server process is not listed at all, so the re-attach is answered
+`no session <id>` and the tab is stranded with a live agent behind it. Measured, against a real
+server process killed and restarted under a real client, in `src/client/end-to-end.test.ts`.
+Recreating the session — `new-session -A`, so the same live process — hands the registry its
+metadata back, and from there the epoch half does exactly what this section says: the client's
+stored `seq` is in a space that no longer exists, the server sends an unconditional snapshot in a
+new epoch, and the tab repaints. Nothing on the client can substitute for that recreate; making a
+restart recover by itself is the metadata gap recorded under `m0/supervisor-crash-test`, not a
+reconnection change.
+
 **A rejected token is not a network failure and must not be retried as one.** A `401`, or a
 socket the server closes at the handshake, means the token has been rotated — the client stops
 backing off, drops what it has stored, and shows the paste field with a sentence saying so
 (plan 001, authentication). Backing off forever against a server that is answering correctly is
 the worst version of this: it looks exactly like being out of range.
+
+**A `403` is neither of those, and gets its own sentence.** A server started with
+`AGENTDECK_ORIGIN` set to an address the page was not opened from refuses every `/api` call and
+the socket upgrade alike, and the upgrade's status never reaches a browser — so the probe over
+HTTP is the only place the difference is visible. Read as "not a 401, so the token is good", it
+becomes "must be the network" and the ladder runs forever over a configuration mistake. So the
+probe answers four things rather than two — good, token rejected, origin refused, and the probe
+itself could not reach the server — and "origin refused" stops the ladder and says what has to
+change, without dropping the stored token: the token is not what is wrong, and asking for a new one
+would send the user after the wrong thing.
+
+**"Could not reach the server" is separated from "good" for the same reason `403` was.** Both keep
+the token and both keep retrying, so the ladder cannot tell them apart and does not need to — but
+they are opposite evidence about everything else, and folding them together makes the one inference
+below unsayable.
+
+**The probe answering "good" while no socket carries anything is the third failure, and it is an
+inference rather than a verdict.** A stuck socket — one that never reaches the `101`, or reaches it
+and then forwards nothing — is dropped by the silence bound above and looks exactly like a phone
+out of range, so the ladder runs forever and the client re-presents the bearer token to whatever is
+answering, once a cycle, with nothing ever said. It is only distinguishable here: the probe reached
+the server over HTTP and the server accepted this token, while the socket carried nothing, which is
+neither the network nor the token. Something in front of the server that does not pass WebSocket
+upgrades is the usual cause. After a few such attempts in a row the client says so, **once**, and
+**keeps retrying** — unlike a `401` or a `403` this is two facts agreeing rather than an answer from
+the server, and a proxy that starts passing upgrades would make it wrong.
+
+**The evidence is a frame that arrived, never the handshake.** A `101` is answered by whatever sits
+in front of the server as readily as by the server itself, so a socket that opened proves nothing
+about the token: the client probes after any socket that carried nothing, including one that opened
+first. That is also what makes a token rotated mid-session — every socket refused at the handshake
+from then on — noticed on the first reconnect rather than a ladder step later.
+
+**A re-attach storm must not become a snapshot storm, and the failure path is where that was
+reachable.** Step 3's snapshot is several process spawns, and the server coalesces concurrent
+builds for one session so that N tabs coming back cost one. A build that FAILS is deliberately not
+shared — one client's flood must not decide the outcome for a client that happened to attach beside
+it — but every joiner is woken by the same rejection, so each of them making its own attempt turned
+one failure into N concurrent capture-panes at the tmux server that was already the problem. A
+joiner looks again before starting one, and joins the retry another joiner has already installed.
 
 ## What is deliberately absent
 

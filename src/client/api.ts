@@ -7,9 +7,53 @@ import type { Session } from "../registry.ts";
 
 export class UnauthorizedError extends Error {}
 
-const request = async <T>(token: string, path: string): Promise<T> => {
-  const response = await fetch(path, { headers: { authorization: `Bearer ${token}` } });
-  if (response.status === 401) throw new UnauthorizedError("the server rejected this token");
+/**
+ * The server answered, accepted the token, and refused the ORIGIN this page was opened from.
+ *
+ * Its own condition rather than one more failed request, because it is the one failure that is
+ * neither the network nor the token and is indistinguishable from the network if it is not raised:
+ * the socket upgrade is refused the same way, the client reads "not a 401, so the token is still
+ * good, so it must be the network", and the ladder runs forever against a server that is answering
+ * correctly. What has to change is `AGENTDECK_ORIGIN` or the address the page was opened from, and
+ * no amount of retrying reaches either.
+ */
+export class ForbiddenError extends Error {}
+
+/**
+ * What one authenticated request learned about why this client cannot get in.
+ *
+ * `unreachable` is the probe failing rather than answering. It behaves exactly like `ok` for the
+ * ladder - the token is kept and retrying continues - and is a verdict of its own only because the
+ * two are opposite evidence about everything else: `ok` is a server that answered, and a client
+ * whose sockets carry nothing while the server answers knows something no other state can tell it.
+ */
+export type TokenVerdict = "ok" | "rejected" | "forbidden" | "unreachable";
+
+const request = async <T>(token: string, path: string, method = "GET"): Promise<T> => {
+  const response = await fetch(path, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  // A status code alone does not say WHO answered. `POST /api/probe` traverses `tailscale serve`,
+  // whatever is on the phone's path, and in development the Vite proxy - and any of them can
+  // answer 401 or 403 for reasons that have nothing to do with this server. The consequences are
+  // not symmetric with being wrong in the other direction: a 403 stops the ladder permanently and
+  // blames AGENTDECK_ORIGIN, and a 401 signs the user out and clears the stored token, which on a
+  // phone cannot be regenerated - recovery means reading ~/.agentdeck/token on the Mac. So both
+  // terminal verdicts require the sentence THIS server writes (src/http.ts). Anything else is a
+  // failure to reach it, which keeps retrying and destroys nothing.
+  const refusal = async (): Promise<string | undefined> =>
+    ((await response.json().catch(() => ({}))) as { error?: string }).error;
+  if (response.status === 401) {
+    const error = await refusal();
+    if (error === "missing or invalid bearer token") throw new UnauthorizedError(error);
+    throw new Error(error ?? "something on the way answered 401");
+  }
+  if (response.status === 403) {
+    const error = await refusal();
+    if (error === "origin not allowed") throw new ForbiddenError(error);
+    throw new Error(error ?? "something on the way answered 403");
+  }
   if (!response.ok) {
     // Errors are sentences the server wrote for a person. Rendered verbatim, because rewording a
     // refusal on the client loses the advice it contained.
@@ -26,17 +70,34 @@ export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
   (await request<{ agents: AgentSummary[] }>(token, "/api/agents")).agents;
 
 /**
- * Whether the server still accepts this token.
+ * Why this client cannot get in, as one cheap authenticated request.
  *
- * Deliberately answers `true` when the request itself fails: an unreachable server has not
- * rejected anything, and treating "no network" as "bad token" would throw away a working token
- * every time the phone went through a tunnel.
+ * A request that fails rather than answering is `"unreachable"`, which the caller must treat as
+ * the token still being good: an unreachable server has not rejected anything, and reading "no
+ * network" as "bad token" would throw away a working token every time the phone went through a
+ * tunnel. It is nonetheless not `"ok"`. `"ok"` is the positive claim that the server answered and
+ * accepted this token, and it is the only state that makes a socket carrying nothing diagnosable
+ * as something other than the network - said out loud to the user, which a guess must not be.
+ *
+ * `"forbidden"` is separated from all of them because it is the one condition retrying cannot
+ * mend, and it used to be folded into `"ok"` - so an `AGENTDECK_ORIGIN` that does not match the
+ * address the page was opened from produced a client that reconnected forever with no diagnosis.
+ *
+ * It asks `POST /api/probe` rather than reading `/api/sessions`, and the method is the whole
+ * point. A browser MUST send `Origin` on a WebSocket handshake and MUST NOT send it on a
+ * same-origin GET; the page and the API are same-origin by construction, so a GET probe is
+ * answered 200 by the same server that just refused the upgrade 403, and `"forbidden"` was
+ * unreachable from a browser - the ladder ran forever and `#diagnoseSilence` then blamed a proxy
+ * that was not there. Fetch appends `Origin` to any request whose method is not GET or HEAD, so
+ * the probe now carries the same evidence the upgrade does.
  */
-export const verifyToken = async (token: string): Promise<boolean> => {
+export const verifyToken = async (token: string): Promise<TokenVerdict> => {
   try {
-    await fetchSessions(token);
-    return true;
+    await request<{ ok: true }>(token, "/api/probe", "POST");
+    return "ok";
   } catch (error) {
-    return !(error instanceof UnauthorizedError);
+    if (error instanceof UnauthorizedError) return "rejected";
+    if (error instanceof ForbiddenError) return "forbidden";
+    return "unreachable";
   }
 };

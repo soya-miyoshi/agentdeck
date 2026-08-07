@@ -29,7 +29,7 @@ import { promisify } from "node:util";
 
 import type { Session } from "../registry.ts";
 import { browserSocket } from "./browser-socket.ts";
-import { Connection } from "./connection.ts";
+import { Connection, type SocketLike } from "./connection.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
 const run = promisify(execFile);
@@ -46,6 +46,8 @@ const home = temp("agentdeck-e2e-home-");
 // would fail as "the shell did not answer" rather than as what it is.
 const work = temp("agentdeck-e2e-work-");
 const pasteWork = temp("agentdeck-e2e-paste-");
+const dropWork = temp("agentdeck-e2e-drop-");
+const restartWork = temp("agentdeck-e2e-restart-");
 const conf = temp("agentdeck-e2e-conf-");
 
 const profiles = join(conf, "agents.json");
@@ -70,8 +72,8 @@ const freePort = async (): Promise<number> =>
     });
   });
 
-before(async () => {
-  port = await freePort();
+/** Start the server the way a person does, and resolve once it is listening. */
+const startServer = async (): Promise<ChildProcess> => {
   const started = spawn(process.execPath, [serverPath], {
     env: {
       PATH: process.env["PATH"] ?? "/usr/bin:/bin",
@@ -80,7 +82,7 @@ before(async () => {
       LC_ALL: "en_US.UTF-8",
       TMUX_SOCKET: socket,
       AGENTDECK_PORT: String(port),
-      AGENTDECK_MOUNTS: `${work}:${pasteWork}`,
+      AGENTDECK_MOUNTS: `${work}:${pasteWork}:${dropWork}:${restartWork}`,
       AGENTDECK_PROFILES: profiles,
       AGENTDECK_AGENT_STATE_DIR: join(conf, "agent-state"),
     },
@@ -109,6 +111,13 @@ before(async () => {
       reject(new Error(`the server exited ${String(code)} instead of listening\n${stderr}`));
     });
   });
+  return started;
+};
+
+before(async () => {
+  port = await freePort();
+  await startServer();
+  // The token is generated on first run and kept, so a restart below is the same token.
   token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
 
   // `browserSocket` names two browser globals and nothing else: `WebSocket`, which node has, and
@@ -124,15 +133,22 @@ after(async () => {
   } catch {
     // Already gone: the desired end state.
   }
-  for (const dir of [home, work, pasteWork, conf]) rmSync(dir, { recursive: true, force: true });
+  for (const dir of [home, work, pasteWork, dropWork, restartWork, conf]) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /** What xterm would have painted, in the order it would have painted it. */
-const paintedTerminal = (): TerminalHandle & { text: () => string } => {
+const paintedTerminal = (): TerminalHandle & { text: () => string; clears: () => number } => {
   let painted = "";
+  let clears = 0;
   return {
     write: (data) => (painted += data),
-    clear: () => (painted = ""),
+    clear: () => {
+      clears += 1;
+      painted = "";
+    },
+    clears: () => clears,
     size: () => ({ cols: 80, rows: 24 }),
     focus: () => undefined,
     text: () => painted,
@@ -157,6 +173,10 @@ interface Driven {
   screen: () => string;
   /** How many sockets have been opened. More than one means the transport dropped. */
   opens: () => number;
+  /** How many times the tab was cleared and repainted from a snapshot. */
+  repaints: () => number;
+  /** Kill the transport under the client, the way a phone losing signal does. */
+  drop: () => void;
   errors: string[];
 }
 
@@ -180,19 +200,35 @@ const drive = async (cwd: string): Promise<Driven> => {
   const terminal = paintedTerminal();
   const errors: string[] = [];
   let opens = 0;
+  let live: SocketLike | undefined;
 
   const connection = new Connection(
     {
       token,
       connect: (value, handlers) => {
         opens += 1;
-        return browserSocket(value, handlers);
+        live = browserSocket(value, handlers);
+        return live;
       },
+      // api.ts's `verifyToken` restated against an absolute URL: node's fetch has no page to take
+      // a base from. The four verdicts are the ones that module produces, including the 403 that
+      // used to read as "not a 401, so the token is good, so it must be the network". The catch
+      // matters as much as the statuses: the restart test below probes while the server is down,
+      // and a probe that REJECTS rather than answering would abandon `#onClosed` half-way and
+      // leave the ladder with no retry scheduled at all - a permanently blank tab, which is the
+      // thing that test exists to catch.
       verifyToken: async () => {
-        const response = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
-          headers: { authorization: `Bearer ${token}` },
-        });
-        return response.status !== 401;
+        try {
+          const response = await fetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+          });
+          if (response.status === 401) return "rejected";
+          if (response.status === 403) return "forbidden";
+          return response.ok ? "ok" : "unreachable";
+        } catch {
+          return "unreachable";
+        }
       },
     },
     {
@@ -214,7 +250,15 @@ const drive = async (cwd: string): Promise<Driven> => {
   await waitFor("the socket to open", () => connection.status === "open");
   connection.attach(session.id, 80, 24);
   await waitFor("the first paint", () => terminal.text() !== "");
-  return { connection, session, screen: () => terminal.text(), opens: () => opens, errors };
+  return {
+    connection,
+    session,
+    screen: () => terminal.text(),
+    opens: () => opens,
+    repaints: () => terminal.clears(),
+    drop: () => live?.close(),
+    errors,
+  };
 };
 
 void describe("an agent driven from the browser, end to end", () => {
@@ -271,6 +315,144 @@ void describe("an agent driven from the browser, end to end", () => {
       assert.equal(driven.opens(), 1, "the paste closed the transport and it reconnected");
       assert.equal(driven.connection.status, "open");
       assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+});
+
+void describe("the reconnection ladder, against the real transport", () => {
+  void test("the socket is killed mid-output and the reconnect repaints instead of leaving a hole", async () => {
+    const driven = await drive(dropWork);
+    try {
+      // Forty markers over about four seconds, so the socket can be killed while the agent is
+      // still writing and the bytes it produces while there is no client are real ones.
+      driven.connection.input(
+        driven.session.id,
+        "i=0; while [ $i -lt 40 ]; do i=$((i+1)); echo mid-output-$i; sleep 0.1; done\r",
+      );
+      // The pty ends its lines with CR LF, and `mid-output-4` is a prefix of `mid-output-40`, so
+      // the boundary is part of the match rather than assumed.
+      const at = (n: number): number =>
+        driven.screen().search(new RegExp(`mid-output-${String(n)}\\D`));
+      const marker = (n: number): boolean => at(n) >= 0;
+      await waitFor("the agent to start writing", () => marker(3));
+
+      // Not `connection.stop()`, which would be the user leaving: this is the transport dying
+      // under a client that still wants it, which is what a phone losing signal does.
+      driven.drop();
+      await waitFor("the ladder to open a second socket", () => driven.opens() >= 2);
+      await waitFor("the socket to come back", () => driven.connection.status === "open");
+      await waitFor("the rest of the output to arrive", () => marker(40), 30_000);
+
+      // The whole run is on screen, in order, with nothing missing across the gap. A hole is the
+      // failure this is written for: the bytes written while the socket was gone are exactly the
+      // ones a client that resumed from the wrong place would skip.
+      let previous = -1;
+      for (let n = 1; n <= 40; n++) {
+        const found = at(n);
+        assert.ok(
+          found > previous,
+          `mid-output-${String(n)} is missing or out of order after the drop`,
+        );
+        previous = found;
+      }
+      assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
+  void test("the server process is restarted under an open client", async () => {
+    // THE EPOCH CASE, and the one this item exists for: not a dropped socket but a server that
+    // went away and came back. The tmux session survives with the same id, the client still holds
+    // a (epoch, seq) from a counter that no longer exists, and every signal except the pane looks
+    // correct.
+    //
+    // This used to measure a gap rather than a behaviour: `#meta` was memory only and
+    // `Registry.list()` was gated on it, so after a restart the surviving session was not listed at
+    // all, the re-attach was answered "no session", and nothing the client could do repainted the
+    // tab. `m2/session-metadata-survives-restart` closed that by adopting survivors from what tmux
+    // reports, so the assertion is now the done-when itself: the tab repaints by itself.
+    const driven = await drive(restartWork);
+    try {
+      driven.connection.input(driven.session.id, "echo before-the-restart\r");
+      await waitFor(
+        "the agent's output before the restart",
+        () => (driven.screen().match(/before-the-restart/g) ?? []).length >= 2,
+      );
+      const opensBefore = driven.opens();
+      const repaintsBefore = driven.repaints();
+
+      const old = child;
+      assert.ok(old, "no server process to restart");
+      const exited = new Promise<void>((resolve) => {
+        old.on("exit", () => {
+          resolve();
+        });
+      });
+      old.kill("SIGKILL");
+      await exited;
+      child = undefined;
+      await startServer();
+
+      // The ladder brings the socket back by itself and re-attaches every tab with the epoch and
+      // seq it got to. That much works.
+      await waitFor("the ladder to reconnect", () => driven.opens() > opensBefore, 30_000);
+      await waitFor("the socket to come back", () => driven.connection.status === "open", 30_000);
+
+      // The done-when: the tab repaints by itself. The client's stored seq is in the millions and
+      // in a counter that no longer exists, so the server cannot answer it with chunks - it sends
+      // an unconditional snapshot in a new epoch, and the pane comes back.
+      await waitFor(
+        "the tab to repaint by itself after the restart",
+        () => driven.repaints() > repaintsBefore,
+        30_000,
+      );
+      assert.equal(
+        driven.errors.filter((message) => /no session/.test(message)).length,
+        0,
+        "the re-attach was refused: the survivor was not adopted",
+      );
+      // And the pane holds what it held before the server died - the agent never stopped.
+      assert.match(driven.screen(), /before-the-restart/);
+
+      // Recreating the session is what a person has to do today, and it is `new-session -A`, so it
+      // reattaches to the SAME live process and hands the registry back its metadata. Once it has,
+      // the epoch half of the protocol does its job: the client's stored seq is in the millions
+      // and in a space that no longer exists, and the server answers with an unconditional
+      // snapshot in a new epoch rather than chunks the client would discard as already seen.
+      const recreated = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ cwd: restartWork, agent: "sh" }),
+      });
+      const body = (await recreated.json()) as { session?: Session };
+      assert.equal(body.session?.id, driven.session.id, "the id is not stable across a restart");
+
+      // Re-attached until it takes: the create returns as soon as tmux has the session, and the
+      // hub picks the pane up on its next sync, so the first attach after a recreate can still be
+      // answered "no session". A tab does this by itself - the ladder re-attaches on every open.
+      const deadline = Date.now() + 30_000;
+      while (driven.repaints() === repaintsBefore) {
+        assert.ok(Date.now() < deadline, `the tab never repainted: ${driven.errors.join(" | ")}`);
+        driven.connection.attach(driven.session.id, 80, 24);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      const position = driven.connection.positionOf(driven.session.id);
+      assert.ok(position, "the tab has no position after the repaint");
+      assert.ok(
+        driven.screen().includes("before-the-restart"),
+        `the repaint painted nothing from the surviving pane: ${JSON.stringify(driven.screen().slice(-200))}`,
+      );
+
+      // Still the same agent: the shell that was running before the restart answers now.
+      driven.connection.input(driven.session.id, "echo after-the-restart\r");
+      await waitFor(
+        "the surviving agent to answer",
+        () => (driven.screen().match(/after-the-restart/g) ?? []).length >= 2,
+        30_000,
+      );
     } finally {
       driven.connection.stop();
     }

@@ -98,6 +98,38 @@ const open = async (protocols: string | string[] = TOKEN): Promise<Client> => {
   return { socket, next, take };
 };
 
+/**
+ * A second server, of the same shape as the one above but with its own `repaint`.
+ *
+ * The three describes below each need a snapshot build they can make fail, or count, on their own
+ * terms - which the shared server cannot offer without changing what every other test in the file
+ * sees. Everything except the stream and the build is the same server, so it is written once.
+ */
+const privateServer = async (
+  ownStream: SessionStream,
+  repaint: WsDeps["repaint"],
+): Promise<{ url: string; close: () => void }> => {
+  const own = createServer();
+  const closeOwn = attachWebSocketServer(own, {
+    token: TOKEN,
+    origin: ORIGIN,
+    streamFor: (id) => (id === "s1" ? ownStream : undefined),
+    captureHistory: async () => await Promise.resolve("scrollback\n"),
+    isAlternateScreen: async () => await Promise.resolve(false),
+    repaint,
+    sendInput: () => undefined,
+    applyPaneSize: () => undefined,
+  }).close;
+  await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+  return {
+    url: `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`,
+    close: () => {
+      closeOwn();
+      own.close();
+    },
+  };
+};
+
 void describe("the upgrade is authenticated before a socket exists", () => {
   void test("a valid token opens, and the subprotocol is echoed back", async () => {
     // The echo is not decoration: without it the browser closes the connection at the socket
@@ -494,37 +526,22 @@ void describe("a bad snapshot build is not inherited by the next client", () => 
 // refresh-client - on every cold attach, which is the most common path in the product. Observed
 // against the real server before the fix: three chunk frames arrived ahead of the snapshot.
 void describe("a cold attach is told where it is before it is told what changed", () => {
-  let ordServer: ReturnType<typeof createServer>;
-  let ordClose: () => void;
+  const ordStream = new SessionStream({ sessionId: "s1" });
   let ordUrl: string;
-  let ordStream: SessionStream;
+  let ordClose: () => void;
 
   before(async () => {
-    ordStream = new SessionStream({ sessionId: "s1" });
-    ordServer = createServer();
-    ordClose = attachWebSocketServer(ordServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? ordStream : undefined),
-      captureHistory: async () => await Promise.resolve("scrollback\n"),
-      isAlternateScreen: async () => await Promise.resolve(false),
-      // What a real repaint does: write into the stream the client is attached to, then report
-      // the seq those bytes ended at.
-      repaint: async () => {
-        ordStream.write(Buffer.from("REPAINT-BYTES"));
-        await Promise.resolve();
-        return { data: "REPAINT-BYTES", seq: ordStream.buffer.headSeq };
-      },
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => ordServer.listen(0, "127.0.0.1", done));
-    ordUrl = `ws://127.0.0.1:${String((ordServer.address() as AddressInfo).port)}`;
+    // What a real repaint does: write into the stream the client is attached to, then report the
+    // seq those bytes ended at.
+    ({ url: ordUrl, close: ordClose } = await privateServer(ordStream, async () => {
+      ordStream.write(Buffer.from("REPAINT-BYTES"));
+      await Promise.resolve();
+      return { data: "REPAINT-BYTES", seq: ordStream.buffer.headSeq };
+    }));
   });
 
   after(() => {
     ordClose();
-    ordServer.close();
   });
 
   void test("no chunk arrives before the snapshot", async () => {
@@ -565,40 +582,25 @@ void describe("a cold attach is told where it is before it is told what changed"
 // attach path treats a failed snapshot as a reason to detach. The victim's socket stays OPEN, so
 // nothing tells it to try again: the shipped client sends `attach` on mount and on reconnect only.
 void describe("one client's failed snapshot does not detach another", () => {
-  let shServer: ReturnType<typeof createServer>;
-  let shClose: () => void;
+  const shStream = new SessionStream({ sessionId: "s1" });
   let shUrl: string;
-  let shStream: SessionStream;
+  let shClose: () => void;
   let attempts = 0;
 
   before(async () => {
-    shStream = new SessionStream({ sessionId: "s1" });
-    shServer = createServer();
-    shClose = attachWebSocketServer(shServer, {
-      token: TOKEN,
-      origin: ORIGIN,
-      streamFor: (id) => (id === "s1" ? shStream : undefined),
-      captureHistory: async () => await Promise.resolve("scrollback\n"),
-      isAlternateScreen: async () => await Promise.resolve(false),
-      // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
-      // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets
-      // a snapshot rather than inheriting the first caller's exception.
-      repaint: async () => {
-        attempts += 1;
-        await Promise.resolve();
-        if (attempts === 1) throw new Error("stdout maxBuffer length exceeded");
-        return { data: "repainted", seq: shStream.buffer.headSeq };
-      },
-      sendInput: () => undefined,
-      applyPaneSize: () => undefined,
-    }).close;
-    await new Promise<void>((done) => shServer.listen(0, "127.0.0.1", done));
-    shUrl = `ws://127.0.0.1:${String((shServer.address() as AddressInfo).port)}`;
+    // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
+    // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets a
+    // snapshot rather than inheriting the first caller's exception.
+    ({ url: shUrl, close: shClose } = await privateServer(shStream, async () => {
+      attempts += 1;
+      await Promise.resolve();
+      if (attempts === 1) throw new Error("stdout maxBuffer length exceeded");
+      return { data: "repainted", seq: shStream.buffer.headSeq };
+    }));
   });
 
   after(() => {
     shClose();
-    shServer.close();
   });
 
   void test("the second client still gets its snapshot and stays attached", async () => {
@@ -638,5 +640,200 @@ void describe("one client's failed snapshot does not detach another", () => {
       "a failed build detached every client, leaving open sockets with no listener",
     );
     for (const socket of sockets) socket.close();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// The other side of the same mechanism. The client's ladder jitters (src/client/backoff.ts), but
+// jitter only spreads a burst - it does not stop one. A server stall past two heartbeat intervals
+// expires every client's silence bound at once, every tab re-attaches, and each of those attaches
+// is a cold snapshot once the ring buffer has rolled: a capture-pane, an alternate-screen probe
+// and a refresh-client, per session, arriving at the loop that was already stalled. Coalescing is
+// what keeps N re-attaches from being N of those. Two tabs of the SAME session on one phone are
+// the small version of it and the common one.
+//
+// The joiner-inherits-a-rejection rule is the part worth pinning: because a failed build is not
+// shared, a storm that arrives on a build that FAILS could have become one build per client. It
+// does not, and the reason is exact - every joiner resumes from the same rejected promise, and the
+// first of them to resume installs its own entry before any other can look, so the rest join that
+// one instead.
+void describe("a reconnect storm is not a spawn storm", () => {
+  const stStream = new SessionStream({ sessionId: "s1" });
+  let stUrl: string;
+  let stClose: () => void;
+  let builds = 0;
+  let failFirst = true;
+
+  before(async () => {
+    ({ url: stUrl, close: stClose } = await privateServer(stStream, async () => {
+      builds += 1;
+      // A real build is several process spawns and does not settle in the same tick, which is what
+      // gives a storm the window to pile onto it.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (failFirst && builds === 1) throw new Error("stdout maxBuffer length exceeded");
+      return { data: "repainted", seq: stStream.buffer.headSeq };
+    }));
+  });
+
+  after(() => {
+    stClose();
+  });
+
+  /** Open `count` sockets, attach them all to s1 at once, and answer what each one received. */
+  const storm = async (count: number): Promise<Frame[][]> => {
+    const sockets = Array.from(
+      { length: count },
+      () => new WebSocket(stUrl, TOKEN, { origin: ORIGIN }),
+    );
+    const seen: Frame[][] = sockets.map(() => []);
+    sockets.forEach((socket, index) => {
+      socket.on("message", (raw: Buffer) => {
+        seen[index]?.push(JSON.parse(raw.toString("utf8")) as Frame);
+      });
+    });
+    await Promise.all(
+      sockets.map(
+        async (socket) =>
+          await new Promise<void>((resolve, reject) => {
+            socket.once("open", resolve);
+            socket.once("error", reject);
+          }),
+      ),
+    );
+    for (const socket of sockets) {
+      socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    for (const socket of sockets) socket.close();
+    return seen;
+  };
+
+  void test("a build that fails under a storm is retried once, not once per client", async () => {
+    const seen = await storm(8);
+    assert.equal(builds, 2, `eight re-attaches cost ${String(builds)} snapshot builds`);
+    // And the retry is not a consolation prize for the one client that started it: every joiner of
+    // the failed build gets the successful one. The eighth is the client whose own build failed -
+    // it is told, and detached, which is the pre-existing behaviour for a snapshot that fails with
+    // nobody else's attempt to fall back on.
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "snapshot")).length,
+      7,
+      "a client that joined the failed build was left with no snapshot and an open socket",
+    );
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "error")).length,
+      1,
+      "the failure was reported to more than the one client that met it",
+    );
+  });
+
+  void test("two tabs of one session reconnecting together share a single build", async () => {
+    failFirst = false;
+    builds = 0;
+    const seen = await storm(2);
+    assert.equal(builds, 1, "each tab paid for its own capture-pane");
+    assert.equal(
+      seen.filter((frames) => frames.some((frame) => frame["t"] === "snapshot")).length,
+      2,
+      "one of the two tabs was left blank",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// What one `attach` may hold, and for how long. The queue that keeps chunks from arriving ahead
+// of the snapshot is released in a `finally`, so its size is whatever the session printed while
+// the build ran - and the build's own bound is fifteen seconds against a tmux server that has
+// stopped answering. A build, a log tail or an agent printing at a few MB/s fills that window
+// with the stream's own Buffers, per attaching socket.
+void describe("an attach cannot hold the session's whole output while it waits", () => {
+  // Assigned before the attach that triggers the repaint below, which is the only thing that
+  // reads it.
+  let noisyStream: SessionStream | undefined;
+  void test("a flood during the build is dropped and answered from the ring buffer", async () => {
+    const noisy = await ownServer({
+      repaint: async () => {
+        // The screen the repaint describes is the one at THIS position; the flood below arrives
+        // after it, which is what leaves the queue with real work to flush.
+        const target = noisyStream;
+        assert.ok(target, "the repaint ran before the stream was known");
+        const seq = target.buffer.headSeq;
+        for (let index = 0; index < 60; index += 1) {
+          target.write(Buffer.alloc(100 * 1024, "x"));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return { data: "repainted", seq };
+      },
+    });
+    noisyStream = noisy.stream;
+    noisy.attach();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const bytes = noisy.frames
+      .filter((frame) => frame["t"] === "chunk" || frame["t"] === "snapshot")
+      .reduce((total, frame) => total + (frame["data"] as string).length, 0);
+    // The ring buffer is 256 KB. Anything near the 6 MB written is the queue, retained in full.
+    assert.ok(
+      bytes < 1024 * 1024,
+      `the attach held ${String(bytes)} bytes of output instead of dropping to the ring buffer`,
+    );
+    // Dropping must not mean going silent: the client is still caught up.
+    assert.ok(
+      noisy.frames.some(
+        (frame) =>
+          (frame["t"] === "snapshot" || frame["t"] === "chunk") &&
+          String(frame["data"]).includes("x"),
+      ),
+      "the client was left with a hole where the flood was",
+    );
+    noisy.stop();
+  });
+});
+
+// The other bound on the same window: how many OTHER clients' failed builds one attach waits out
+// before it stops joining. Each is up to a whole snapshot timeout, so an unbounded chain of them
+// is an unbounded park - caller k of a storm waits builds 1..k-1 in turn.
+void describe("one attach cannot be parked behind every other attach's failure", () => {
+  void test("a storm where every build fails still settles in a bounded number of builds", async () => {
+    const stormStream = new SessionStream({ sessionId: "s1" });
+    const { url: sUrl, close: sClose } = await privateServer(stormStream, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      throw new Error("stdout maxBuffer length exceeded");
+    });
+    const sockets = Array.from({ length: 8 }, () => new WebSocket(sUrl, TOKEN, { origin: ORIGIN }));
+    const errors: number[] = [];
+    await Promise.all(
+      sockets.map(
+        async (socket) =>
+          await new Promise<void>((resolve, reject) => {
+            socket.once("open", resolve);
+            socket.once("error", reject);
+          }),
+      ),
+    );
+    const started = Date.now();
+    for (const socket of sockets) {
+      socket.on("message", (raw: Buffer) => {
+        if ((JSON.parse(raw.toString("utf8")) as Frame)["t"] === "error") {
+          errors.push(Date.now() - started);
+        }
+      });
+      socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    for (const socket of sockets) socket.close();
+    sClose();
+
+    assert.equal(errors.length, 8, "not every client was told its snapshot failed");
+    const last = Math.max(...errors);
+    // Three builds is the bound (two inherited failures plus your own): 240 ms of build here.
+    // Chaining one per client would be eight, and the same shape at the real fifteen-second
+    // timeout is two minutes parked while holding a queue.
+    assert.ok(
+      last < 500,
+      `the last client was parked ${String(last)}ms, which is one build per client`,
+    );
   });
 });
