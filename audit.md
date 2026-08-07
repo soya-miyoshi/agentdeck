@@ -145,3 +145,104 @@ said the iteration had succeeded. Recovered by merging the stray branch; no work
 Two controls added to the skill: the shared prompt now forbids stages from creating or switching
 branches, and the after-workflow steps require checking `git branch --show-current` and the recent
 branch list before merging, and re-running the suite on the branch actually being merged.
+
+## m0/de-containerise - 2026-08-07
+
+The container is gone; agentdeck runs on the Mac. This iteration made the documents say so. Plan
+005 keeps its reasoning under a superseded header, plans 001/003/004/006, the README, `mise.toml`,
+the `cwd` refusal and the port-clash message stopped describing an image, `scripts/healthcheck.mjs`
+gained its `/api/health` half, and the in-image toolchain test was removed rather than left to
+self-skip. `Dockerfile`, `docker-compose.yml` and `docker/` are retained on disk, unreferenced,
+because how this is eventually deployed is deliberately open.
+
+Security gate: two rounds, 6 then 4 findings, 4 and 2 actionable, all fixed; the verify pass
+reported 0 still open. The findings below are the final whole-codebase audit, which by
+construction has no fix round after it. **This branch is NOT merged.** Five of them are `high`,
+two are verified by hand, and three of the five ask for decisions the item put out of scope.
+
+### Findings
+
+- [high] src/tmux.ts:114 - The tmux server inherits the launching shell's whole environment, so
+  plan 004's `env` name allowlist is decorative. `ensureServer()` runs `tmux start-server` as a
+  child of the node process, so the server's global environment is whatever shell ran `pnpm start`;
+  `-e` on `createOrAttach` adds to that rather than replacing it. Failure: every agent session gets
+  `SSH_AUTH_SOCK`, and an agent with the forwarded ssh-agent can `git push --force` to every repo
+  that key reaches - which is exactly the credential split plan 005 exists to enforce, and the
+  README still points at that plan for it.
+  **Verified by hand on this Mac**, and worse than reported: a pane spawned by that server saw
+  both `SSH_AUTH_SOCK` and an arbitrary `SEKRIT` variable from the launching shell that no profile
+  allowlisted. Status: OPEN. Fixing it is a behaviour change to session spawning, outside a
+  documentation item.
+
+- [high] src/hub.ts:55 - The cwd allowlist is now called the only boundary left, and does not bound
+  the session set at all. `Hub.sync()` attaches to everything on the tmux socket by design, and the
+  socket is `/tmp/tmux-<uid>/agentdeck`, reachable by every process running as the user. Failure:
+  `tmux -L agentdeck new-session -d -c / -- /bin/sh` becomes a tab within one 2s sync, streamed to
+  the phone and accepting input, with `CwdAllowlist.allows` never consulted. Status: OPEN, and
+  entangled with the allowlist question the user deferred.
+
+- [high] src/tmux.ts:76 - Per-session hook secrets are one tmux command away from any same-uid
+  process. `createOrAttach` passes `spawnEnv` as `-e NAME=VALUE`, and tmux stores it in the session
+  environment. Failure: `tmux -L <socket> show-environment -t <session>` prints `AGENTDECK_SECRET`
+  in full - no ptrace, no `/proc`. plans/002-wire-protocol.md:131 documents the leak as
+  `/proc/<pid>/environ`, a Linux path macOS does not have, so the plan describes a mechanism this
+  host lacks while the easier one goes unmentioned. **Verified by hand.** Status: OPEN.
+
+- [high] README.md:195 - The documented replacement for the container-local `node_modules` volume
+  cannot see what it claims to, and a test certifies it. `git status --ignored -- node_modules
+  .pnpm-store` emits one line naming the directory, never its contents, so a rewritten
+  `node_modules/.bin/eslint` produces byte-identical output. src/containment.test.ts:121 asserts
+  the string is present in the README, turning an ineffective control into a green check. Status:
+  OPEN.
+
+- [high] plans/005-containment.md:130 - Host paths outside the repo became execution surfaces and
+  the review checklist is still repo-scoped. `~/.gitconfig` (`--local` explicitly does not show it,
+  and an `!alias` fires on the very `git diff` the checklist prescribes), `~/.claude/settings.json`
+  and `~/.claude/skills/`, `~/Library/LaunchAgents/`. Plan 005 still recommends keeping the iterate
+  skill in `~/.claude/skills` "so the agent it constrains cannot write it" - true only because of
+  the container, and the superseded header does not retract it. Status: OPEN.
+
+- [medium] src/de-containerise.test.ts:52 - plan 002 is excluded from the swept document list with
+  the comment "002 never described one". It describes one six times, in the load-bearing places:
+  `Session.cwd` ("absolute path inside the container"), the allowlist definition, the refusal
+  rationale, the hook route. Plan 002 is the wire contract. Status: OPEN, and in this item's scope.
+
+- [medium] src/server.ts:94 - The token file's default is `/var/lib/agentdeck/token`, which no
+  ordinary Mac user can create, so `pnpm start` fails on a clean host. **Confirmed by hand: the
+  server refuses to start.** The one rule plan 005 says survives - never inside a tree a session is
+  pointed at - is prose in three places and checked by no code. Status: OPEN by instruction; the
+  token's home was explicitly deferred.
+
+- [medium] src/server.ts:101 - `agentStateDir` falls back to `CLAUDE_CONFIG_DIR`, which in the
+  container was a dedicated bind mount and on the Mac is the operator's live config. Failure:
+  agentdeck merges its hook fragment into the settings file every Claude Code session on the
+  machine reads, including sessions outside the allowlist, and rewrites it on every boot. The boot
+  warning only fires when neither variable is set, so the silent-landing case is the unwarned one.
+  Status: OPEN.
+
+- [medium] plans/005-containment.md:8 - The superseded header enumerates filesystem reach but not
+  `cpus`/`mem_limit`, `no-new-privileges`/`cap_drop`/non-root, or the container lifecycle as a
+  persistence bound. A runaway agent now takes the laptop, which is an availability failure plan
+  006's watchdog assumes cannot happen; and `~/Library/LaunchAgents` persistence is a category the
+  container previously bounded. Status: OPEN. My header wrote the filesystem half and missed these.
+
+- [low] .github/workflows/ci.yml:6 - Header still says CI is "the one place `pnpm install` runs
+  outside the container", now false. Survived the sweep because it says `container` and the sweep
+  greps `docker`. Status: OPEN.
+
+- [low] src/claude-hooks.ts:211 - src/ still describes a container in four places, and
+  de-containerise.test.ts:151, named "nothing that runs describes a container", asserts only
+  `/docker/i`. Status: OPEN.
+
+- [low] src/server.ts:126 - `AGENTDECK_ORIGIN` appears in no README section and no example env
+  file, only a `console.error` on a process nothing supervises. Unset, `/api` and `/ws` accept any
+  Origin, which is the state of every ordinary run. Status: OPEN.
+
+### Found while verifying, not by the gate
+
+The suite was RED on arrival at the merge step: 2 of 335 failing. `de-containerise.test.ts` scans
+every tracked `*.test.ts` for skip/todo markers and `.dockerenv`, and scanned itself - its own
+search regexes contain those literals. The QA and refactor stages both returned `ok: true`; the
+commits that added the tripping prose (448623a, 7611b75) landed after the stage that ran green.
+Fixed here by excluding the scanner from its own scan. The lesson is the skill's existing one: a
+stage's `ok: true` is a claim about when it ran, not about the branch.

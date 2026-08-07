@@ -222,8 +222,13 @@ void describe("each plan states the post-container claim, not merely the absence
 // -----------------------------------------------------------------------------------------
 
 void describe("the suite has nothing left that skips itself", () => {
+  // This file is excluded from its own scan. It is the one test file that must contain the
+  // markers as literals - they are its search patterns - so scanning itself reports the scanner
+  // rather than a skipped suite, and the failure looks exactly like the thing it exists to catch.
   const testFiles = (): readonly string[] =>
-    trackedFiles().filter((path) => path.endsWith(".test.ts"));
+    trackedFiles().filter(
+      (path) => path.endsWith(".test.ts") && !path.endsWith("de-containerise.test.ts"),
+    );
 
   void test("no suite marks itself skipped or todo", async () => {
     // The in-image toolchain assertions were removed rather than left to notice they were not in
