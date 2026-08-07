@@ -207,7 +207,12 @@ Driven from `curl` only. No client.
       **Done when:** a browser opens the socket (proving the echo), and omitting the echo
       reproduces the failure so the test is known to test something.
 
-- [x] **`m2/snapshot`** — cold snapshot as `capture-pane` scrollback in `history` plus a
+- [x] **`m2/snapshot`** (audit found the cold-attach path raced its own snapshot — three chunk
+      frames arrived ahead of it on a real attach, making every cold attach cost a second full
+      snapshot — and that a repaint which collected nothing threw, which an agent can induce
+      permanently by attaching extra tmux clients. Both fixed before merge; `Tmux.repaint` still
+      refreshes every client tmux lists rather than only ours, which is open in `audit.md`.)
+      ORIGINAL: — cold snapshot as `capture-pane` scrollback in `history` plus a
       `refresh-client -R` repaint in `data`, carrying the `seq` the repaint reflects.
       Demonstrated on tmux 3.7b against a session idle since before the attach: `history` held the
       lines that had scrolled off and `data` was the live screen with `seq === headSeq`; with the
