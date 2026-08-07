@@ -11,6 +11,7 @@ import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
+import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
@@ -23,6 +24,11 @@ const HEALTH_TIMEOUT_MS = 3000;
 // Depth of scrollback a cold snapshot carries. Not a knob: plan 002 refuses pagination outright,
 // so this is the one fixed depth, and reading further back would be a plan rather than a param.
 const HISTORY_LINES = 2000;
+
+// The built client, served unauthenticated on every path no API or socket route owns (plan 001).
+// Relative to this file rather than the working directory, so `pnpm start` from anywhere finds
+// the same build, and fixed rather than configurable: one process serves one build.
+const CLIENT_DIR = resolve(import.meta.dirname, "..", "dist", "client");
 
 // How often the hub reconciles against tmux. This is what makes a session someone started by
 // hand in a terminal appear in the strip, and what notices an agent that exited while nobody was
@@ -175,6 +181,27 @@ export const main = async (): Promise<void> => {
   // one surviving rule made executable: the token is never inside a tree a session is pointed at.
   // A refusal is the right shape because there is no degraded mode - starting anyway would serve
   // exactly the situation the rule exists to prevent, and would do it silently.
+  // `dist/client` is the second dangerous location, and it is dangerous in a way the allowlist
+  // does not describe: everything under it is served to anyone who can reach the port, with NO
+  // bearer token, because the page has to load before a token exists. A token file placed there
+  // is not merely readable by an agent - it is downloadable by any tailnet device with HTTP reach
+  // and no shell at all, at a URL equal to its filename. And the allowlist check cannot catch it:
+  // if this repo is not itself on AGENTDECK_MOUNTS, `tokenInsideAllowlist` says nothing and the
+  // boot check passes.
+  const published = [tokenFile, process.env["AGENTDECK_PROFILES"]]
+    .filter((path): path is string => path !== undefined)
+    .find((path) => tokenInsideAllowlist(path, [CLIENT_DIR]) !== undefined);
+  if (published !== undefined) {
+    console.error(
+      `agentdeck: ${resolve(published)} is inside ${CLIENT_DIR}, which this server publishes ` +
+        `UNAUTHENTICATED on every path that is not an API route - the page has to load before a ` +
+        `token exists. Anything under that directory is downloadable by any device that can reach ` +
+        `the port, at a URL equal to its filename. Move it - the default, ${defaultTokenFile()}, ` +
+        `is outside it.`,
+    );
+    process.exit(1);
+  }
+
   const clash = tokenInsideAllowlist(tokenFile, allowlist.paths);
   if (clash !== undefined) {
     console.error(
@@ -277,21 +304,24 @@ export const main = async (): Promise<void> => {
   }
 
   const server = createServer(
-    createHandler({
-      onSessionsChanged: () => {
-        hub.sync().catch((error: unknown) => {
-          console.error("agentdeck: sync failed:", error);
-        });
-      },
-      registry,
-      profiles,
-      allowlist,
-      token,
-      version: VERSION,
-      origin: process.env["AGENTDECK_ORIGIN"],
-      probe: async () => await probeTmux(socket),
-      streamFor: (id) => hub.streamFor(id),
-    }),
+    withClient(
+      createHandler({
+        onSessionsChanged: () => {
+          hub.sync().catch((error: unknown) => {
+            console.error("agentdeck: sync failed:", error);
+          });
+        },
+        registry,
+        profiles,
+        allowlist,
+        token,
+        version: VERSION,
+        origin: process.env["AGENTDECK_ORIGIN"],
+        probe: async () => await probeTmux(socket),
+        streamFor: (id) => hub.streamFor(id),
+      }),
+      CLIENT_DIR,
+    ),
   );
 
   const ws = attachWebSocketServer(server, {

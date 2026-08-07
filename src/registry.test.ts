@@ -98,8 +98,10 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
   return { tmux, sessions, die, plant, fail };
 };
 
-const build = () => {
-  const { tmux, sessions, die, plant, fail } = fakeTmux();
+// Handed the socket state of an earlier registry, this builds a second one over it - which is
+// what a server restart is: the sessions are there and nothing remembers anything about them.
+const build = (existing?: FakeSessions) => {
+  const { tmux, sessions, die, plant, fail } = fakeTmux(existing);
   const { profiles } = parseProfiles({
     claude: { command: "/bin/sh", name: "Claude Code" },
     gemini: { command: "/bin/sh", name: "Gemini CLI" },
@@ -107,6 +109,156 @@ const build = () => {
   const allowlist = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
   return { registry: new Registry(tmux, profiles, allowlist), sessions, die, plant, fail };
 };
+
+void describe("adopting a session that outlived the process which created it", () => {
+  // m2/session-metadata-survives-restart.
+  const restart = (sessions: FakeSessions): Registry => build(sessions).registry;
+
+  void test("the survivor is listed again, with the cwd and agent recovered from tmux", async () => {
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "gemini");
+
+    const [adopted] = await restart(sessions).list();
+    assert.equal(adopted?.id, session.id, "the survivor was not listed after a restart");
+    assert.equal(adopted?.cwd, "/workspace/agentdeck", "the cwd did not come back");
+    assert.equal(adopted?.agent, "gemini", "the agent did not come back");
+    assert.equal(adopted?.name, "agentdeck");
+  });
+
+  void test("it says its waiting detection is dead, and the hook route agrees", async () => {
+    // The secret was random and lived only in memory and in the agent's environment. Nothing here
+    // can recover it and nothing can deliver a new one to a process already running, so the
+    // session says so rather than reporting working/idle forever as if the hooks still worked.
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+
+    const [adopted] = await restarted.list();
+    assert.equal(adopted?.waitingDetectionLost, true);
+    assert.equal(
+      restarted.secretMatches(session.id, "any-secret-at-all"),
+      false,
+      "a session with no secret authenticated a hook",
+    );
+  });
+
+  void test("recreating it does NOT mint a secret it cannot deliver", async () => {
+    // `new-session -A` attaches to the live session and injects no environment, so a fresh secret
+    // would reach nobody while the session claimed a working hook path. It stays lost, loudly.
+    const { registry, sessions } = build();
+    await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+
+    const again = await restarted.create("/workspace/agentdeck", "claude");
+    assert.match(again.warning ?? "", /already running/, "this was not the reattach path");
+    assert.equal(again.session.waitingDetectionLost, true);
+    const [listed] = await restarted.list();
+    assert.equal(listed?.waitingDetectionLost, true);
+  });
+
+  void test("a session outside the allowlist is not adopted, however it is named", async () => {
+    // The hole m0/host-boundary closed. The name is exactly the one this server would derive for
+    // that path, so the allowlist check on `#{session_path}` is the only thing in the way - and a
+    // same-uid process owns the socket, so it is the thing that has to hold.
+    const { registry, sessions, plant } = build();
+    plant(sessionId("/", "claude"), "/");
+    plant(sessionId("/home/someone", "claude"), "/home/someone");
+
+    assert.deepEqual(await registry.list(), [], "a session off the allowlist became a tab");
+    assert.deepEqual(await restart(sessions).list(), []);
+    assert.equal(sessions.size, 2, "the server killed sessions it refuses to list");
+  });
+
+  void test("an allowlisted session whose name is not one of ours is left alone", async () => {
+    // Adoption is a check, not a parse: the id has to be `sessionId(path, agent)` for a CONFIGURED
+    // agent. A hand-started session in an allowlisted repo, or one naming an agent this server
+    // does not have, is not something it can attach a profile to.
+    const { registry, plant } = build();
+    plant("agentdeck-claude-deadbeef", "/workspace/agentdeck");
+    plant(sessionId("/workspace/agentdeck", "codex"), "/workspace/agentdeck");
+    plant(sessionId("/workspace/web", "claude"), "/workspace/agentdeck");
+
+    assert.deepEqual(await registry.list(), []);
+  });
+
+  void test("a session tmux reports with no path at all is not adopted", async () => {
+    // `#{session_path}` is the whole of what adoption recovers, so an entry without one has
+    // nothing to check against the allowlist and nothing to derive an id from. It is left alone
+    // rather than defaulted to anything.
+    const { registry, sessions, plant } = build();
+    plant(sessionId("", "claude"), "");
+
+    assert.deepEqual(await registry.list(), []);
+    assert.equal(sessions.size, 1, "the server killed a session it refuses to list");
+  });
+
+  void test("an adopted session that has exited still says its waiting detection is dead", async () => {
+    // The flag is about the hook path, not about being alive: a corpse that is listed at all is
+    // listed with the same warning, so nothing reading the list has to special-case it.
+    const { registry, sessions, die } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+    die(session.id, "exited");
+
+    const [adopted] = await restarted.list();
+    assert.equal(adopted?.state, "exited");
+    assert.equal(adopted?.waitingDetectionLost, true);
+  });
+
+  void test("only restarting the AGENT brings waiting detection back", async () => {
+    // The sentence the item refuses to smooth over, as an assertion. Adoption recovers the tab and
+    // not the hook path; recreating the session reattaches to the same process and so recovers
+    // nothing either (above). What ends the loss is the agent itself going away: a session killed
+    // and started again is a NEW process, started with a secret this registry minted and can
+    // therefore check, and it drops the flag.
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+    assert.equal((await restarted.list())[0]?.waitingDetectionLost, true);
+
+    await restarted.close(session.id);
+    const fresh = await restarted.create("/workspace/agentdeck", "claude");
+    assert.equal(fresh.session.id, session.id, "the id is not stable across the agent restart");
+    assert.equal(fresh.warning, undefined, "this was a reattach, not a fresh process");
+    assert.equal(
+      fresh.session.waitingDetectionLost,
+      undefined,
+      "a freshly started agent is still reported as having lost its hook path",
+    );
+    assert.equal((await restarted.list())[0]?.waitingDetectionLost, undefined);
+  });
+
+  void test("a corpse from before the restart survives reap at boot, and a human can still close it", async () => {
+    // The exit report is the whole point. An agent that died while the server was down leaves a
+    // pane whose scrollback says why, and `reap()` at boot runs before the listener is open - so
+    // killing it would delete the answer before any client could ever see it, and take the
+    // `tmux attach` recovery path with it. It stays listed as `exited` until a human closes it.
+    const { registry, sessions, die } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    die(session.id, "1");
+    const restarted = restart(sessions);
+
+    assert.deepEqual(await restarted.reap(), [], "the adopted corpse was reaped at boot");
+    const [listed] = await restarted.list();
+    assert.equal(listed?.id, session.id, "the corpse is no longer listed");
+    assert.equal(listed?.state, "exited");
+    assert.equal(listed?.exitCode, 1, "the exit code did not survive the restart");
+
+    await restarted.close(session.id);
+    assert.equal(sessions.size, 0, "closing an adopted corpse did not kill it");
+  });
+
+  void test("a corpse this process watched exit is still reaped at boot", async () => {
+    // The other half: the secret is the marker for "we started it and saw it die", and reaping
+    // those is what keeps a restart from accumulating dead panes forever.
+    const { registry, sessions, die } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    die(session.id, "1");
+
+    assert.deepEqual(await registry.reap(), [session.id], "our own corpse was not reaped");
+    assert.equal(sessions.size, 0);
+  });
+});
 
 void describe("creating sessions", () => {
   void test("refuses a cwd off the mount list, with a sentence that says what to change", async () => {

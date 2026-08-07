@@ -257,7 +257,31 @@ Driven from `curl` only. No client.
       origin with every Vite project on the machine, and the flow failed silently and forever
       against a server with `AGENTDECK_ORIGIN` set.
 
-- [ ] **`m2/reconnect`** — exponential backoff capped low; a rejected token stops retrying,
+- [x] **`m2/session-metadata-survives-restart`** — **done 2026-08-08.** A restarted server now
+      **adopts** the sessions tmux still holds: `#{session_path}` is the `cwd`, and the id is
+      `sessionId(cwd, agent)`, so the agent is whichever configured profile reproduces the id from
+      that path. Nothing is written down - no database, no sidecar file - and the adoption goes
+      through the same cwd allowlist, matched on the path TMUX reports, so it widens what may be
+      listed and not where. `GET /api/sessions` lists the survivor with the right `cwd` and
+      `agent`, `GET /api/cwds` counts it, the hub attaches and streams it, and a client's
+      re-attach is answered with a snapshot rather than `no session <id>`.
+      **The hook secret is not recovered and cannot be**, and the code refuses to mint a
+      replacement it could never deliver (`new-session -A` injects no environment into a live
+      session). So an adopted session reports working, idle and exited but **never `waiting`
+      again until its own agent is restarted**, and it says so on the wire as
+      `waitingDetectionLost` (plan 002) rather than going quietly deaf. Showing that in the strip
+      is `m3/tab-strip`'s job, and this item deliberately did not build it.
+      Demonstrated against a real server process and real tmux in `src/supervisor-crash.test.ts`,
+      including that a session created on the socket outside the allowlist is still not adopted,
+      not listed and not killed. Plans 002, 003 and 005, the README and `CwdAllowlist.refusal`
+      were all claiming the old behaviour and now state this one.
+
+- [ ] **`m2/reconnect`** (UNBLOCKED on 2026-08-08: `m2/session-metadata-survives-restart` landed,
+      so a session that outlives the server is listed and attachable again and the epoch half is
+      now reachable. The branch `m2/reconnect` already carries the socket-drop half and telling a
+      refused origin from a lost network; it needs `main` merged into it and the epoch half
+      finished. Was blocked because after a restart there was no session to re-attach to at all.)
+      ORIGINAL: — exponential backoff capped low; a rejected token stops retrying,
       drops stored state and shows the paste field.
       **Done when:** the socket is killed mid-output and the reconnect repaints instead of showing
       a hole; **and the server is restarted under an open client and the tab repaints rather than
@@ -304,7 +328,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ## Found while building, not in the original plan
 
-- [ ] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
+- [x] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
       everything else. Plan 001's Authentication section now settles who serves it: this server
       does, from `dist/client`, on every path that is not an API or socket route — unauthenticated
       by necessity, since the page has to load before a token exists. Resolve strictly within the
@@ -312,8 +336,17 @@ Agent-agnostic signals first, so the generic path is the proven one.
       `/ws` alone.
       **Done when:** opening the `ts.net` URL on a phone loads the client with no token, and the
       first thing it shows is the paste field.
+      **Verified by hand against a live server:** encoded traversal is 403, unencoded traversal
+      falls through to the SPA fallback rather than serving a file, and symlinks planted inside
+      `dist/client` pointing at the bearer token and at a canary outside are both 403. `/api/*`
+      still answers JSON. The `ts.net` half waits on `m4/tailscale-serve`; what is demonstrated here
+      is the same page over loopback with no token.
+      **Found by the audit and fixed before merge:** publishing a directory made it a second place a
+      secret must never sit, invisible to the allowlist rule — the server now refuses to start if
+      the token or profiles file resolves inside it — and the unbuilt-client 503 was naming the
+      absolute build path to unauthenticated callers.
 
-- [ ] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
+- [x] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
       ping intervals should reconnect, and that is not implementable as written: the server's
       keepalive is WebSocket ping frames, which JavaScript cannot observe. A blind 30-second
       silence timer is worse than nothing, because an idle agent legitimately sends nothing for

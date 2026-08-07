@@ -32,20 +32,20 @@ test itself starting the process again, standing in for the person who would oth
 What it pins down beyond "the sessions survive":
 
 - the tmux sessions and their processes survive, same ids and same pane pids
-- the registry's `cwd`, agent and per-session hook secret do not — they are memory only, and
-  `Registry.list()` is gated on that memory as well as on the cwd allowlist, so a survivor is
-  **not listed at all** rather than listed under its raw id. `GET /api/sessions` comes back empty
-  and `GET /api/cwds` reports no sessions in the directory, while the agent is still running.
-  Nothing kills or reaps it either; it is left alone. The two-agents-in-one-tree warning is
-  computed from that same list, so starting a second agent in the directory the survivor is
-  working in is answered with no warning at all.
-- every hook POST from the surviving agent is 401, so that tab never reports `waiting` again — and
-  recreating the session does not fix it. `new-session -A` attaches to the live session and
-  injects no environment, so the process keeps the old secret while the registry mints a new one
-  it cannot deliver. Only restarting the agent restores it.
-
-Persisting that metadata is unsolved and not solved here; it belongs with `m4/launchd-watchdog`,
-which makes deliberate restarts routine and therefore makes the loss routine too.
+- the registry's `cwd`, agent and per-session hook secret do not — they are memory only. The first
+  two are recovered: since `m2/session-metadata-survives-restart` the restarted server **adopts**
+  the survivor from tmux, taking its `cwd` from `#{session_path}` and its agent from the id, so
+  `GET /api/sessions` lists it again, `GET /api/cwds` counts it, the hub attaches and streams it,
+  and the two-agents-in-one-tree warning names it. Adoption is allowlist-checked on
+  `#{session_path}` exactly as ordinary listing is, so it is not a way onto the phone for a session
+  anywhere else on the socket. (Before that item a survivor was **not listed at all**, and the tab
+  stayed blank while the agent worked on.)
+- the secret is not recovered and cannot be. Every hook POST from the surviving agent is 401, so
+  that tab reports working, idle and exited but never `waiting` again — and recreating the session
+  does not fix it. `new-session -A` attaches to the live session and injects no environment, so the
+  process keeps the old secret and nothing here can deliver a new one. Only restarting the AGENT
+  restores it. An adopted session says so on the wire as `waitingDetectionLost` (plan 002) rather
+  than going quiet.
 
 `/api/health` must prove the event loop is turning, not merely that a socket accepts — it does a
 hard-timed `tmux list-sessions` round trip and touches nothing else (plan 006).
@@ -85,10 +85,11 @@ The tmux-backed session registry and the HTTP routes. Driven from `curl` only; n
   that says exactly what would have to change, not a generic 403 — this is the refusal a person
   will meet most often, and it has to tell them what to do next.
 
-Done when: creating a session, restarting the server, and **recreating** it hands back the same
-session still running with the same id and the same process — a plain list after a restart shows
-nothing, because the registry's metadata did not survive it (see M0, and
-`src/supervisor-crash.test.ts`); a session can be started under either the `claude` profile or the
+Done when: creating a session, restarting the server and listing again shows the same session
+still running with the same id and the same process, because the restarted server **adopts** it
+from tmux (see M0, `m2/session-metadata-survives-restart` and `src/supervisor-crash.test.ts`) —
+with the one loss adoption cannot undo, the hook secret, reported as `waitingDetectionLost`; a
+session can be started under either the `claude` profile or the
 `shell` profile from the same endpoint; **two different agents in one `cwd` produce two sessions
 and a `warning`, while the same agent twice hands back the one already running**; and a session
 whose command has exited still lists, as `exited`, with its code.

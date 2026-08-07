@@ -780,3 +780,154 @@ property of a path this branch made reachable rather than of code it wrote.
 - **`api.ts` cannot see a 403**, so an origin misconfiguration is indistinguishable from a bad
   network. `m2/reconnect` owns the ladder and is the natural home for it.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/serve-client - final whole-codebase pass - 2026-08-08
+
+The server serves the built client from `dist/client` on every path that is not an API or socket
+route, unauthenticated by necessity. Containment is verified by resolving and then checking against
+the real root rather than by rejecting suspicious-looking strings. **Verified by hand against a
+live server:** encoded traversal (`..%2f`, `%2e%2e%2f`) is 403; unencoded traversal falls through
+to the SPA history fallback and serves index.html rather than any file; a symlink planted inside
+`dist/client` pointing at a canary outside is 403, and so is one pointing at the bearer token; and
+`/api/*` keeps answering JSON rather than becoming the HTML page.
+
+### Findings
+
+- [medium] src/server.ts:184 - Serving `dist/client` created a second dangerous location, and one
+  the allowlist rule cannot describe: everything under it goes out with no bearer token, so a
+  credential placed there is downloadable at a URL equal to its filename by any device with HTTP
+  reach and no shell. `tokenInsideAllowlist` cannot catch it - if this repo is not itself on
+  `AGENTDECK_MOUNTS` the check says nothing and the boot proceeds. The repo is also in its own blast
+  radius, so an agent session started here can write a file into the published directory and have it
+  served; confirmed by hand, a planted file returns 200 with its contents. Status: FIXED in cdf260c
+  for the credential half - the server refuses to start if the token file or the profiles file
+  resolves inside the published directory, with the same shape as the allowlist refusal. **The
+  agent-writes-into-dist half is OPEN and is a property of publishing a directory at all:** an agent
+  with write access to the checkout can publish arbitrary bytes to anyone who can reach the port.
+
+- [low] src/static.ts:195 - The unbuilt-client 503 named the absolute build path on the wire, so an
+  unauthenticated caller learned the account name, the checkout layout and the forge owner, in the
+  state the server is most likely to be probed in. Status: FIXED. The wire answer still says
+  `pnpm build`; where it writes goes to the log.
+
+- [low] src/static.ts:56 - The API routing table now lives in two files and they disagree on case
+  and encoding: `/API/health` and `/%61pi/health` return the SPA rather than the API, on a
+  case-insensitive filesystem. Nothing today is served that should not be, but any future route
+  outside `/api` is silently shadowed by the history fallback - an authenticated 401 becoming an
+  unauthenticated 200 text/html. The `/ws` entry is also a claim nothing enforces: `ws.ts` never
+  reads `req.url` and will complete an upgrade on any path. Status: OPEN.
+
+- [low] src/client/vite.config.ts:17 - The CSP and `X-Frame-Options` this branch adds are set only
+  by the production handler, so the documented dev flow - which runs against real sessions - has
+  neither. Status: OPEN.
+
+### Open after this iteration
+
+- **A directory is published, so whatever is in it is published.** The credential case is refused
+  at boot now; the general case is inherent and stated rather than solved.
+- **Two routing tables**, which is a bypass shape waiting for a route outside `/api`.
+- **`ws.ts` upgrades on any path.**
+- **Same-uid**, unchanged.
+
+---
+
+## m2/client-visible-heartbeat - final whole-codebase pass - 2026-08-08
+
+Plan 002 asked for something unimplementable: a client that reconnects after two ping intervals of
+silence, where the ping is a WebSocket ping frame that JavaScript cannot observe. The plan now
+carries `{ t: "ping", intervalMs }` in its frame table, sent on the same timer as the WebSocket
+ping to every open socket whether or not that socket's agent is doing anything - which is what
+separates "the server is alive and the agent is quiet" from "nothing is arriving". The naive
+alternative, a blind silence timer, would make every idle tab reconnect in a loop.
+
+### Findings
+
+- [medium] src/client/backoff.ts:18 - Silence deadlines are re-armed by a heartbeat off ONE server
+  timer, so every client's deadline sits within a tick of every other, and the ladder had no
+  jitter. A server stall past two intervals - a `capture-pane` over deep scrollback, a burst of
+  `resync`, several concurrent snapshot builds - expires all of them at once and every client walks
+  the ladder in lockstep, re-attaching every open tab together. On a busy session a 30-second stall
+  has rolled the 256 KiB ring buffer, so each of those attaches takes the snapshot path: a
+  capture-pane, an alternate-screen probe and a refresh-client per session, aimed at the loop that
+  was already stalled. Per-session coalescing stops it compounding per client, so the outcome is
+  oscillating recovery rather than a wedge - and nothing restarts this process, so nothing breaks
+  the oscillation. Before this branch nothing on the client could produce a correlated,
+  self-initiated reconnect at all. Status: FIXED in e132cf7. The delay keeps half its step and
+  spreads the rest; `random` is injected so the ladder's shape is still asserted exactly.
+
+- [low] src/client/connection.ts:118 - `MAX_HEARTBEAT_INTERVAL_MS` was 20x the production interval
+  and the stated value was never reset, so it outlived the socket that stated it. One frame saying
+  five minutes moved the silence bound to ten - including the window BEFORE a socket's first frame,
+  which is the stuck-CONNECTING case the watchdog exists for. Status: FIXED in e132cf7: reset per
+  socket, ceiling lowered to sixty seconds.
+
+- [low] src/client/connection.ts:574 - The watchdog makes a stuck-CONNECTING socket reach
+  `#onClosed`, which calls `verifyToken()` - `GET /api/sessions`, which reaches `registry.list()`
+  and spawns `tmux list-sessions` - every cycle. `verifyToken` returns true for anything that is
+  not a 401, so the loop never terminates and never surfaces a diagnosis. It re-presents the bearer
+  token to whatever is answering, once per cycle, forever. Status: OPEN, and it is the same
+  `verifyToken` blind spot recorded under `m2/client-minimal`: it cannot see a 403 either. Both
+  want the same fix and `m2/reconnect` owns the ladder.
+
+### Open after this iteration
+
+- **`verifyToken` treats everything that is not a 401 as success**, so an origin refusal and a
+  captive portal both read as "token still good" and retry forever. Two audits have now landed on
+  it. `m2/reconnect` owns it and is blocked on `m2/session-metadata-survives-restart`.
+- **Same-uid**, unchanged.
+
+---
+
+## m2/session-metadata-survives-restart - final whole-codebase pass - 2026-08-08
+
+A session that outlives the server is adopted again rather than left invisible: `#{session_path}`
+is the cwd, and the id is `sessionId(cwd, agent)`, so the agent is whichever configured profile
+reproduces the id from that path. Nothing is written down - no database, no sidecar - and the hook
+secret is deliberately NOT recovered, because it cannot be: the running agent still holds the old
+one, and a re-minted secret would never reach it. `waitingDetectionLost: true` says so on the wire.
+
+**Verified by hand against a real server and real tmux:** created a session, `kill -9`, restarted -
+`GET /api/sessions` lists it with the right cwd and agent and the lost-detection flag; a session
+planted OUTSIDE the allowlist while the server was down is NOT adopted, so `m0/host-boundary`'s
+boundary holds.
+
+### Findings
+
+- [medium] src/registry.ts:291 - **Adoption promotes a forged session name to a fully streamed,
+  typed-into tab.** Before this branch `list()` required a `#meta` entry and only `create()` wrote
+  one, so a session planted on the socket was dropped. Now the metadata is earned from (path, id)
+  alone, and the id is a pure function of two values any client reads from `GET /api/cwds` and
+  `GET /api/agents`. **Verified by hand:** with the real session killed, a session planted under
+  the derived name at an allowlisted path became a tab, and the pane the phone would have streamed
+  read `I_AM_NOT_YOUR_AGENT`. The operator's keystrokes would go to it. Marginal over what a
+  same-uid attacker already has - `send-keys` into the real session, `capture-pane` off it - but a
+  DIFFERENT primitive: impersonation of a trusted tab rather than interference with a real one.
+  Status: **ACCEPTED WITH A REASON, and it is the most consequential judgement on this branch.**
+  Provenance needs something written down and plan 001 forecloses it; the code already stated the
+  weaker claim - "a filter on where a session is, not a claim that agentdeck started it". The
+  alternative is leaving the tab blank after every restart, which is the gap this item exists to
+  close. Mitigated by visibility rather than prevention: every adoption is logged, so an adoption
+  outside the seconds after a restart is visible somewhere other than in a tab.
+
+- [medium] src/registry.ts:328 - `reap()` cannot reach an adopted corpse, so an exited pane and its
+  full scrollback stay in the tmux server's memory indefinitely, readable by any same-uid process
+  via `capture-pane`. Status: OPEN, and it is a real tradeoff rather than an oversight - 501917e
+  made it deliberate, because the corpse is what holds the exit report the tab shows. Bounding it
+  by age is the obvious answer and the bound is a number nobody has chosen. Worth an item.
+
+- [medium] src/registry.ts:249 - `waitingDetectionLost` is set on the wire and no client reads it.
+  `m3/tab-strip` owns showing it and has not landed. Until then an adopted session comes back
+  looking like a healthy tab that will never report `waiting` again - so after any restart,
+  including the one `CwdAllowlist.refusal()` instructs the operator to perform to add a repo, an
+  agent blocking on a permission prompt sits there with nothing on screen saying its prompt
+  detection is dead. Status: OPEN, and it is a dependency `m3/tab-strip` must honour rather than a
+  defect here: the API says it, the strip does not yet.
+
+### Open after this iteration
+
+- **An adopted tab cannot be proved to be ours.** Accepted above; the log is the mitigation.
+- **`waitingDetectionLost` has no reader** until `m3/tab-strip`.
+- **Exited panes are retained indefinitely** once adopted.
+- **Same-uid**, unchanged, and this branch is the clearest illustration of it so far.

@@ -360,11 +360,11 @@ void describe("the reconnection ladder, against the real transport", () => {
     // a (epoch, seq) from a counter that no longer exists, and every signal except the pane looks
     // correct.
     //
-    // What actually happens here is worse than a stale position, and it is m0/supervisor-crash-test's
-    // finding rather than this one's: the registry's `#meta` is memory only and `Registry.list()`
-    // is gated on it, so after a restart the surviving session is not listed at all. The re-attach
-    // the ladder sends is answered "no session", and NOTHING the client can do about that repaints
-    // the tab. It is recorded here rather than worked around.
+    // This used to measure a gap rather than a behaviour: `#meta` was memory only and
+    // `Registry.list()` was gated on it, so after a restart the surviving session was not listed at
+    // all, the re-attach was answered "no session", and nothing the client could do repainted the
+    // tab. `m2/session-metadata-survives-restart` closed that by adopting survivors from what tmux
+    // reports, so the assertion is now the done-when itself: the tab repaints by itself.
     const driven = await drive(restartWork);
     try {
       driven.connection.input(driven.session.id, "echo before-the-restart\r");
@@ -392,18 +392,21 @@ void describe("the reconnection ladder, against the real transport", () => {
       await waitFor("the ladder to reconnect", () => driven.opens() > opensBefore, 30_000);
       await waitFor("the socket to come back", () => driven.connection.status === "open", 30_000);
 
-      // And this is the finding: the re-attach is refused, because the surviving session is not
-      // in `Registry.list()` after a restart. The tab is stranded, with a live agent behind it.
+      // The done-when: the tab repaints by itself. The client's stored seq is in the millions and
+      // in a counter that no longer exists, so the server cannot answer it with chunks - it sends
+      // an unconditional snapshot in a new epoch, and the pane comes back.
       await waitFor(
-        "the server's answer to the re-attach",
-        () => driven.errors.some((message) => /no session/.test(message)),
+        "the tab to repaint by itself after the restart",
+        () => driven.repaints() > repaintsBefore,
         30_000,
       );
       assert.equal(
-        driven.repaints(),
-        repaintsBefore,
-        "the tab repainted after a restart - if this now passes, the metadata gap is closed and this test should assert the repaint instead",
+        driven.errors.filter((message) => /no session/.test(message)).length,
+        0,
+        "the re-attach was refused: the survivor was not adopted",
       );
+      // And the pane holds what it held before the server died - the agent never stopped.
+      assert.match(driven.screen(), /before-the-restart/);
 
       // Recreating the session is what a person has to do today, and it is `new-session -A`, so it
       // reattaches to the SAME live process and hands the registry back its metadata. Once it has,

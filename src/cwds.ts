@@ -45,21 +45,20 @@ export class CwdAllowlist {
    *
    * A repository cloned since the server started is not on the list and cannot be until it is
    * restarted - so the sentence names the variable to edit and says what the restart actually
-   * costs. tmux keeps the processes, but the registry keeps their cwd, agent and per-session hook
-   * secret in memory only (src/registry.ts), and the allowlist is now matched on that cwd - so a
-   * session that survives the restart is no longer listed or attached at all. The agent is still
-   * running under tmux and can be reached with `tmux -L agentdeck attach -t <id>`; it is not a tab
-   * again until it is recreated. Understating that is how someone restarts casually and loses the
-   * one thing the phone is for.
+   * costs. Since m2/session-metadata-survives-restart that cost is smaller and sharper than it
+   * was: tmux keeps the processes and the restarted server adopts them back from tmux, cwd from
+   * `#{session_path}` and agent from the id, so they are listed and streamed again. The
+   * per-session hook secret is not recoverable and cannot be delivered to a process already
+   * running, so those sessions never report `waiting` again until their AGENT is restarted.
+   * Understating that is how someone restarts casually and stops being told they are needed.
    */
   refusal(cwd: string): string {
     return (
       `${resolve(cwd)} is not on the allowlist, so no session can start there. ` +
       `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running agents across ` +
-      `that restart, but their directory, agent and waiting detection do not survive it, and the ` +
-      `directory is what the allowlist matches on: sessions that were already running stop being ` +
-      `listed and stop being streamed until they are recreated. They are still under tmux ` +
-      `(\`tmux -L agentdeck attach -t <id>\`). Currently allowed: ` +
+      `that restart and they are listed and streamed again afterwards, but their per-session hook ` +
+      `secret does not survive it, so waiting detection stays dead for each of them until that ` +
+      `agent itself is restarted. Currently allowed: ` +
       `${this.paths.join(", ")}`
     );
   }

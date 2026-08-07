@@ -14,13 +14,33 @@ export const BACKOFF_BASE_MS = 250;
  */
 export const BACKOFF_CAP_MS = 4000;
 
-/** Delay before retry number `attempt`, counting the first retry as 0. */
-export const backoffDelay = (attempt: number): number => {
+/**
+ * How much of the delay is fixed; the rest is spread randomly.
+ *
+ * Every client's silence deadline is re-armed by the heartbeat, which comes off ONE `setInterval`
+ * on the server - so every deadline sits within a tick of every other. A server stall past two
+ * heartbeat intervals expires all of them at once, and without jitter they all walk the same
+ * ladder in lockstep and re-attach every open tab together. Each of those attaches is a snapshot
+ * once the ring buffer has rolled, which on a busy session a 30-second stall guarantees: a
+ * capture-pane, an alternate-screen probe and a refresh-client per session, arriving in a burst at
+ * the loop that was already stalled. Per-session coalescing keeps that from compounding, so the
+ * cost is oscillating recovery rather than a wedge - and nothing restarts this process, so nothing
+ * breaks the oscillation either.
+ */
+const JITTER_FLOOR = 0.5;
+
+/**
+ * Delay before retry number `attempt`, counting the first retry as 0.
+ *
+ * `random` is injected so the ladder is testable; production passes nothing.
+ */
+export const backoffDelay = (attempt: number, random: () => number = Math.random): number => {
   const bounded = Math.max(0, Math.floor(attempt));
   // Doubling in floating point past ~2^31 is a number nobody wants to reason about, and the cap
   // makes everything beyond the first few attempts identical anyway.
-  if (bounded > 30) return BACKOFF_CAP_MS;
-  return Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** bounded);
+  const full =
+    bounded > 30 ? BACKOFF_CAP_MS : Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** bounded);
+  return Math.round(full * (JITTER_FLOOR + (1 - JITTER_FLOOR) * random()));
 };
 
 /**
@@ -55,6 +75,11 @@ export interface RetryDecision {
  */
 export class ReconnectPolicy {
   #attempts = 0;
+  #random: () => number;
+
+  constructor(random: () => number = Math.random) {
+    this.#random = random;
+  }
 
   /** Retries since the last successful open. Zero while connected. */
   get attempts(): number {
@@ -81,7 +106,7 @@ export class ReconnectPolicy {
     }
     const decision: RetryDecision = {
       retry: true,
-      delayMs: backoffDelay(this.#attempts),
+      delayMs: backoffDelay(this.#attempts, this.#random),
       showReconnecting: this.#attempts >= 1,
     };
     this.#attempts += 1;

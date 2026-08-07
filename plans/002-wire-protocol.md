@@ -31,6 +31,8 @@ interface Session {
   state: SessionState;
   startedAt: number;   // unix ms. Not to be confused with the stream `epoch` below
   exitCode?: number;   // present only when state is "exited"
+  waitingDetectionLost?: true; // this session outlived the server and its hook secret did not, so
+                               // it can never report "waiting" again. See below.
 }
 
 type SessionState = "working" | "waiting" | "idle" | "exited";
@@ -156,6 +158,40 @@ matters, because the Linux one being absent reads like the hazard being absent:
 So the secret bounds what a *remote* caller can do with a stolen one; it bounds nothing between
 two agents on the same machine, and plan 005 is explicit about why no such boundary exists.
 
+### A session that outlives the server keeps its work and loses its hook path
+
+tmux holds the agents; the node process holds everything it knew about them. So a `kill -9` and a
+restart leave every session running with the same id — and, until 2026-08-08, invisible: the
+registry's memory of each session's `cwd` and `agent` went with the process, `GET /api/sessions`
+answered `[]`, and an `attach` was answered `no session <id>` while the work carried on behind a
+blank tab.
+
+The server now **adopts** those sessions from tmux instead. Nothing is written down to make that
+possible, and nothing may be: there is no database and no sidecar file (plan 001), and the tmux
+session environment is readable by any same-uid process (`show-environment -t`, above). Adoption is
+arithmetic on what tmux already reports — `#{session_path}` is the `cwd`, and the id is
+`sessionId(cwd, agent)`, so the `agent` is whichever configured profile reproduces the id from that
+path. It is a check rather than a parse: the hash has to match.
+
+**Adoption is bounded by the same allowlist as everything else, matched on `#{session_path}`.** A
+session anywhere else on the socket is not adopted, not listed, not attached and not streamed —
+the boundary `Hub.sync()` was given when it stopped attaching to whatever was on the socket. The
+residual is the allowlist's standing one rather than a new one: it is a filter on *where* a session
+is, so a same-uid process that creates a session inside a directory the operator already pointed
+this server at, under the derived name, gets a tab. Nothing on this machine distinguishes that from
+the real thing.
+
+**The hook secret is not recovered, and cannot be.** It was random, it lived only in memory and in
+the agent's own environment, and `new-session -A` injects no environment into a session that is
+already running — so a re-minted secret would never reach the agent, which still holds the old one.
+The consequence is stated rather than smoothed over: **an adopted session's hook POSTs stay
+unauthenticated, so it reports `working`, `idle` and `exited` but can never again report
+`waiting`** — not until that *agent* is restarted, which recreating the session does not do. The
+server therefore records no secret for an adopted session rather than a fresh one it could not
+deliver, and the session carries `waitingDetectionLost: true` so the client can say so. A tab that
+silently stops reporting `waiting` is a confidently wrong tab, which is the one output this design
+refuses; showing it is `m3/tab-strip`'s job.
+
 ## WebSocket
 
 One connection, multiplexed over all attached sessions. Not one socket per tab: phones
@@ -179,6 +215,7 @@ Server to client:
 { t: "state",    sessionId, state, exitCode? }
 { t: "sessions", sessions }               // list changed: created, exited, renamed
 { t: "error",    sessionId?, message }    // written for a person to read
+{ t: "ping",     intervalMs }             // the heartbeat, on a timer, whatever the agent is doing
 ```
 
 ### Rules
@@ -256,8 +293,44 @@ leaves a connection that is dead at both ends and closed at neither; nothing bel
 errors, and the strip shows a status frozen at whatever it last said. That is a confidently wrong
 status, which is the one output this design refuses — and the reconnection ladder below never runs,
 because from the client's side nothing has gone wrong. The server pings every 15 seconds and closes
-a connection that has not ponged within 30; a client that has seen no traffic for two intervals
-reconnects rather than waiting to be told.
+a connection that has not ponged within 30.
+
+**The client cannot use that ping, which is why there is a second one.** A WebSocket ping is a
+control frame; the browser answers it inside the socket implementation, below the JavaScript API,
+and no event of any kind reaches the page. So the original rule here — "a client that has seen no
+traffic for two intervals reconnects" — named a signal the client is structurally unable to
+observe, and was not implementable as written. The naive repair is worse than the hole: a blind
+silence timer cannot tell a dead socket from an idle agent, and an idle agent legitimately writes
+nothing for minutes, so every quiet tab would reconnect in a loop.
+
+The signal therefore has to be something the server sends **on a timer regardless of agent
+activity**, and it is an ordinary data frame:
+
+```ts
+{ t: "ping", intervalMs }
+```
+
+sent on the same timer as the WebSocket ping, to every open socket, whether or not that socket's
+sessions produced a byte. A client that has received no frame of any type for two intervals treats
+the socket as gone and runs the reconnection ladder below; a tab whose agent is merely quiet keeps
+receiving heartbeats and is never reported as dead. That is the whole distinction the client was
+previously missing: silence means *nothing is arriving*, not *the agent said nothing*.
+
+`state` on a timer was the other candidate and is rejected. `state` is per session, so an unattached
+socket gets no heartbeat at all; it is defined as pushed-on-change (below), and a client that has to
+ignore repeats of a value that did not change is a client re-deriving "did anything arrive" from a
+field that is not about arrival; and it would make the strip's status and the socket's liveness the
+same message, which is exactly the confusion — a status that stopped changing read as a dead
+socket — that this section exists to prevent.
+
+`intervalMs` is on the frame rather than compiled into the client so that the client's bound is the
+server's number. A constant duplicated on both sides is a second number free to drift.
+
+**The heartbeat is outside both frame budgets.** The per-socket budget on the server counts frames
+*received* from a client, so a server-sent heartbeat cannot consume it or be dropped by it. The
+client answers the heartbeat with nothing at all — the frame having arrived is the proof — so it
+never touches the client's per-window `input` allowance either, and an idle tab spends none of a
+user's typing budget on staying alive.
 
 **Resize is the smallest attached client's, not the newest.** One tmux client backs N browser
 clients, so an `attach` or `resize` from a phone that was just unlocked would otherwise reflow
