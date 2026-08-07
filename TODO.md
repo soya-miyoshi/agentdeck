@@ -257,7 +257,37 @@ Driven from `curl` only. No client.
       origin with every Vite project on the machine, and the flow failed silently and forever
       against a server with `AGENTDECK_ORIGIN` set.
 
-- [ ] **`m2/reconnect`** — exponential backoff capped low; a rejected token stops retrying,
+- [ ] **`m2/session-metadata-survives-restart`** — **blocks `m2/reconnect`.** A session's `cwd`,
+      `agent` and per-session hook secret live only in `Registry`'s memory (`#meta`), and
+      `Registry.list()` is gated on `#meta` as well as on the cwd allowlist. So a tmux session that
+      outlives the server is **not listed at all** afterwards: `GET /api/sessions` returns `[]`, a
+      client's re-attach is answered `no session <id>`, and the tab stays blank until something
+      recreates the session. **Verified by hand on 2026-08-08:** created a session, `kill -9` on the
+      server, tmux still held it with the same id and `dead=0`, and the restarted server listed
+      nothing. `m0/supervisor-crash-test` measured this and named it a known gap; nothing owns
+      fixing it, and `m2/reconnect`'s second done-when half — "the server is restarted under an open
+      client and the tab repaints rather than going permanently blank" — cannot be met until
+      something does.
+      Deliberately not decided here, because it is the whole design question: where that metadata
+      lives. The repo has **no database and does not want one** (README, plan 001), and the hook
+      secret must not be readable by an agent — which is what `m0/host-boundary` established and
+      what rules out simply writing it into the tmux session environment, since
+      `show-environment` prints that to any same-uid process. Recovering `cwd` and `agent` from
+      tmux alone is possible (`#{session_path}`, and the id encodes the agent) and would restore
+      the tab; the secret cannot be recovered and a re-minted one does not reach the running agent,
+      so `waiting` detection stays broken until that agent restarts. Whether that partial recovery
+      is the answer is a person's call.
+      **Done when:** a real server is killed and restarted under a live session and
+      `GET /api/sessions` lists it with the right `cwd` and `agent`; a client attached beforehand
+      repaints rather than going blank; and whatever happens to the hook secret is stated plainly in
+      plan 002 and demonstrated, including the case where it cannot be restored.
+
+- [ ] **`m2/reconnect`** (BLOCKED on `m2/session-metadata-survives-restart`, and the branch
+      `m2/reconnect` is left unmerged rather than ticked against the half it can do. The socket-drop
+      half and telling a refused origin from a lost network are done on that branch; the epoch half
+      is not reachable from the client at all, because after a restart there is no session to
+      re-attach to. Splitting this item is a person's call, not mine.)
+      ORIGINAL: — exponential backoff capped low; a rejected token stops retrying,
       drops stored state and shows the paste field.
       **Done when:** the socket is killed mid-output and the reconnect repaints instead of showing
       a hole; **and the server is restarted under an open client and the tab repaints rather than
