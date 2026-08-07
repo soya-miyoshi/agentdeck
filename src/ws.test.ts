@@ -273,6 +273,86 @@ void describe("refusals", () => {
 
 // ---------------------------------------------------------------------------------------------
 
+// The frame the client actually receives, for the two shapes of a cold snapshot that a test over
+// `buildSnapshot` alone cannot see: `history` has to be ABSENT from the JSON rather than present
+// and empty, and a repaint that fails has to cost one message rather than the process.
+void describe("the snapshot frame on the wire", () => {
+  const build = async (deps: {
+    isAlternateScreen: () => Promise<boolean>;
+    repaint: () => Promise<{ data: string; seq: number }>;
+  }) => {
+    const own = createServer();
+    const ownStream = new SessionStream({ sessionId: "s1" });
+    const close = attachWebSocketServer(own, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? ownStream : undefined),
+      captureHistory: async () => await Promise.resolve("what vim currently looks like\n"),
+      isAlternateScreen: deps.isAlternateScreen,
+      repaint: deps.repaint,
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    }).close;
+    await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+    const ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
+    const socket = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
+    const frames: Frame[] = [];
+    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    return {
+      socket,
+      frames,
+      stream: ownStream,
+      stop: () => {
+        socket.close();
+        close();
+        own.close();
+      },
+    };
+  };
+
+  void test("in alternate-screen mode the frame carries no history key at all", async () => {
+    // `"history" in frame` rather than a value comparison, because an empty string here is a
+    // blank line the client writes above the live screen - and what capture-pane returns on the
+    // alternate screen is worse than blank, it is the TUI's own frame.
+    const test1 = await build({
+      isAlternateScreen: async () => await Promise.resolve(true),
+      repaint: async () => await Promise.resolve({ data: "vim, repainted", seq: 7 }),
+    });
+    test1.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const snapshot = test1.frames.find((frame) => frame["t"] === "snapshot");
+    assert.ok(snapshot, "no snapshot was sent");
+    assert.equal("history" in snapshot, false, "the TUI's frame was sent as scrollback");
+    assert.equal(snapshot["data"], "vim, repainted");
+    test1.stop();
+  });
+
+  void test("a failing repaint costs one message, not the process", async () => {
+    // The same hazard as the failing capture below, on the second tmux command this path now
+    // makes: `Tmux.repaint` throws when no client is attached to the session, and the ws message
+    // handler is a fire-and-forget promise. An unhandled rejection exits Node, on a process
+    // nothing restarts.
+    const test2 = await build({
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => {
+        await Promise.resolve();
+        throw new Error("no tmux client is attached to s1, so it cannot repaint");
+      },
+    });
+    test2.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(test2.frames.at(-1)?.["t"], "error", "the client was never told");
+    assert.equal(test2.socket.readyState, test2.socket.OPEN, "the socket did not survive it");
+    test2.stop();
+  });
+});
+
 // The snapshot path reaches capture-pane, and `Tmux` rethrows anything that is not a missing
 // session or an empty server. `socket.on("message")` discarded the promise, so one failing capture
 // was an unhandled rejection - which exits Node, on a process nothing restarts (see
