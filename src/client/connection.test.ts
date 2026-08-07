@@ -1429,3 +1429,314 @@ void describe("the ladder left running while nobody is looking", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+// The ladder is a handful of flags - stopped, probing, carried, opened, handled, diagnosed - and
+// the ways they combine are not enumerable by reading the code that sets them. What matters is not
+// which combination is reached but that none of them reaches the ONE state the whole item exists to
+// prevent: no socket, nothing scheduled, and a banner the user cannot act on. That state fails no
+// assertion anywhere - the suite stays green and the tab simply says "connecting" until it is
+// reloaded - so it is asserted here as an invariant after every step of every path, rather than as
+// the outcome of the paths somebody thought of.
+void describe("no combination of the ladder's flags strands the connection", () => {
+  const live = (h: Harness): FakeSocket[] => h.sockets.filter((socket) => !socket.closed);
+
+  /** The three ways a tab can be all right: a socket, a retry coming, or a verdict to act on. */
+  const stillUsable = (h: Harness): boolean =>
+    live(h).length > 0 ||
+    h.timers.length > 0 ||
+    h.connection.status === "rejected" ||
+    h.connection.status === "forbidden" ||
+    h.connection.status === "closed";
+
+  const check = (h: Harness, where: string): void => {
+    assert.ok(
+      stillUsable(h),
+      `${where}: no socket, nothing scheduled, and a "${h.connection.status}" banner nobody can act on`,
+    );
+  };
+
+  // How the socket ends. The first three carry nothing, so each one goes through the token probe;
+  // the last carried a frame, which is the path that skips it.
+  const deaths: [string, (h: Harness) => void][] = [
+    [
+      "a socket that never opened",
+      (h) => {
+        h.last().handlers.closed();
+      },
+    ],
+    [
+      "a socket that opened and carried nothing",
+      (h) => {
+        h.last().handlers.opened();
+        h.last().handlers.closed();
+      },
+    ],
+    [
+      "a socket that opened and then went silent",
+      (h) => {
+        h.last().handlers.opened();
+        // The silence bound, which is the only thing that notices a half-open socket.
+        h.fire();
+      },
+    ],
+    [
+      "a socket that carried a frame and dropped",
+      (h) => {
+        h.last().handlers.opened();
+        h.last().deliver({ t: "ping", intervalMs: PING_INTERVAL_MS });
+        h.last().handlers.closed();
+      },
+    ],
+  ];
+
+  // What the browser does while the ladder is mid-decision. A phone coming out of a pocket fires
+  // `visibilitychange` and `online`, so two wakes inside one probe window is the ordinary case.
+  const wakes: [string, (h: Harness) => void][] = [
+    ["nothing", () => undefined],
+    [
+      "one wake",
+      (h) => {
+        h.connection.poke();
+      },
+    ],
+    [
+      "a phone unlocking, which wakes it twice",
+      (h) => {
+        h.connection.poke();
+        h.connection.poke();
+      },
+    ],
+  ];
+
+  // What the probe eventually says, including saying nothing at all - the case where the request
+  // is issued as the tab is backgrounded and never settles.
+  const answers: [string, (h: Harness) => void][] = [
+    ["ok", (h) => h.answer("ok")],
+    ["unreachable", (h) => h.answer("unreachable")],
+    ["rejected", (h) => h.answer("rejected")],
+    ["forbidden", (h) => h.answer("forbidden")],
+    [
+      "never",
+      (h) => {
+        // Its bound, which is the only reason there is anything to fire.
+        h.fire();
+      },
+    ],
+  ];
+
+  for (const [death, kill] of deaths) {
+    for (const [wake, poke] of wakes) {
+      for (const [answer, say] of answers) {
+        void test(`${death}, ${wake}, and the probe says ${answer}`, async () => {
+          const h = harness();
+          h.deferProbe = true;
+          h.connection.start();
+          check(h, "after start");
+
+          kill(h);
+          check(h, "the moment the socket died");
+          await settle();
+          check(h, "while the probe is out");
+
+          poke(h);
+          check(h, "after the wake");
+          await settle();
+          check(h, "after the wake settled");
+
+          // A socket that carried a frame is never probed, so there is nothing to answer.
+          if (h.probes > 0) {
+            say(h);
+            await settle();
+            check(h, "after the verdict");
+          }
+
+          // And whatever is scheduled next runs without stranding it either: either the retry
+          // opens a socket, or the ladder has already stopped with something to act on.
+          while (h.timers.length > 0 && live(h).length === 0) {
+            h.fire();
+            await settle();
+            check(h, "after the next scheduled step");
+          }
+          assert.ok(
+            live(h).length > 0 ||
+              h.connection.status === "rejected" ||
+              h.connection.status === "forbidden",
+            `ran out of scheduled work with status "${h.connection.status}" and no socket`,
+          );
+        });
+      }
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+
+void describe("dropping the previous socket from inside #open", () => {
+  // `#open` starts by dropping whatever socket is there, and that drop runs `#onClosed`. For a
+  // socket that carried frames `#onClosed` needs no probe, so it runs to the end synchronously and
+  // schedules a retry - and that retry calls `#open`. The cycle is only broken by the retry being
+  // cancelled immediately afterwards and by the dropped socket's `handled` flag; neither is
+  // obvious from the call site, and getting it wrong is a stack overflow in a browser tab or a
+  // socket per re-open.
+
+  void test("re-opening fifty times over a live socket costs fifty sockets, not more", () => {
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    for (let cycle = 0; cycle < 50; cycle++) {
+      h.last().handlers.opened();
+      h.last().deliver({ t: "ping", intervalMs: PING_INTERVAL_MS });
+      // The drop below therefore takes the synchronous path through the whole ladder.
+      h.connection.start();
+    }
+    assert.equal(h.sockets.length, 51, "a re-open opened more than the one socket it asked for");
+    assert.equal(
+      h.sockets.filter((socket) => !socket.closed).length,
+      1,
+      "a re-open left the socket it replaced connected",
+    );
+    assert.equal(h.probes, 0, "a socket the server had just spoken to was treated as suspect");
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+      "the retries the drops scheduled were left to fire beside the socket that is open now",
+    );
+  });
+
+  void test("the watchdog's own drop leaves exactly one retry, and it opens one socket", async () => {
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: PING_INTERVAL_MS });
+
+    h.fire();
+    await settle();
+    assert.equal(h.sockets.filter((socket) => !socket.closed).length, 0);
+    assert.equal(h.probes, 0, "a half-open socket was diagnosed as a token problem");
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the drop scheduled something other than one retry",
+    );
+
+    h.fire();
+    assert.equal(h.sockets.length, 2);
+    assert.equal(h.sockets.filter((socket) => !socket.closed).length, 1);
+    // The replacement is watched from the moment it exists, not from the moment it opens.
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+void describe("a phone unlocking fires visibilitychange and online together", () => {
+  // App.vue wires `poke()` to both, and both fire within a tick of each other when a phone comes
+  // out of a pocket. Two sockets for one connection is two ladders, each re-attaching every tab
+  // with its own cold snapshot, at the server that was already the reason for the reconnect.
+
+  void test("two wakes over a pending retry open one socket and cancel the retry", async () => {
+    const h = harness();
+    h.connection.start();
+    h.connection.attach("a", 80, 24);
+    h.last().handlers.closed();
+    await settle();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+    );
+
+    h.connection.poke();
+    h.connection.poke();
+    assert.equal(h.sockets.length, 2, "the second wake opened a socket beside the first wake's");
+    assert.equal(h.sockets.filter((socket) => !socket.closed).length, 1);
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+      "the superseded retry was left to fire and drop the socket the wake had just opened",
+    );
+
+    // One socket means one re-attach per tab, which is one snapshot per tab at the server.
+    h.last().handlers.opened();
+    assert.deepEqual(
+      sentMessages(h.last()).filter((frame) => frame["t"] === "attach"),
+      [{ t: "attach", sessionId: "a", cols: 80, rows: 24 }],
+    );
+  });
+
+  void test("two wakes into a stopped ladder present the token neither time", async () => {
+    const h = harness();
+    h.verdict = "rejected";
+    h.connection.start();
+    h.last().handlers.closed();
+    await settle();
+
+    h.connection.poke();
+    h.connection.poke();
+    assert.equal(h.sockets.length, 1, "a rejected token was re-presented on waking");
+    assert.equal(h.unauthorized, 1, "the sign-out was repeated by a wake");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// The three answers to one closed socket, side by side. Read separately each looks reasonable;
+// what the design actually requires is that they are told APART, because they have three different
+// remedies and two of them are things only the user can do.
+void describe("a refused origin, a rejected token and a dead network are three answers", () => {
+  interface Outcome {
+    status: ConnectionStatus;
+    retries: number;
+    signedOut: number;
+    errors: string[];
+  }
+
+  const closeOnce = async (verdict: TokenVerdict): Promise<Outcome> => {
+    const h = harness();
+    h.verdict = verdict;
+    h.connection.start();
+    h.last().handlers.opened();
+    h.last().handlers.closed();
+    await settle();
+    return {
+      status: h.connection.status,
+      retries: h.timers.length,
+      signedOut: h.unauthorized,
+      errors: h.errors,
+    };
+  };
+
+  void test("a 403 stops the ladder, keeps the token, and says what to change", async () => {
+    const outcome = await closeOnce("forbidden");
+    assert.equal(outcome.status, "forbidden");
+    assert.equal(outcome.retries, 0, "a configuration mistake was retried forever");
+    assert.equal(outcome.signedOut, 0, "a refused origin threw away a perfectly good token");
+    assert.ok(
+      outcome.errors.some((message) => /AGENTDECK_ORIGIN/.test(message)),
+      "the one thing that would fix it was never named",
+    );
+  });
+
+  void test("a 401 stops the ladder and asks for a new token instead", async () => {
+    const outcome = await closeOnce("rejected");
+    assert.equal(outcome.status, "rejected");
+    assert.equal(outcome.retries, 0);
+    assert.equal(outcome.signedOut, 1, "the paste field was never shown");
+    assert.deepEqual(outcome.errors, [], "a rejected token also blamed the configuration");
+  });
+
+  void test("a network that answers nothing keeps the token and keeps trying", async () => {
+    const outcome = await closeOnce("unreachable");
+    // Still "open": the FIRST retry is silent by design, so a half-second reconnect the user would
+    // never otherwise notice does not flash a banner at them. What matters is that it is neither
+    // of the two stopping verdicts.
+    assert.equal(outcome.status, "open", "a phone in a lift was announced as a failure");
+    assert.equal(outcome.retries, 1, "being out of range ended the ladder");
+    assert.equal(outcome.signedOut, 0, "being out of range signed the user out");
+    assert.deepEqual(outcome.errors, [], "being out of range was asserted to be something else");
+  });
+});
