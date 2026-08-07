@@ -82,7 +82,7 @@ GitHub Actions running typecheck, lint and test on the runner directly, with cor
 pnpm 9.15.9 to match the container. Does not build the arm64 image - nothing in CI would run it.
 
 Every finding this iteration is the same root cause seen from a new angle: **agentdeck is
-bind-mounted into the container that runs agents**, so anything in the tree that the *host* later
+bind-mounted into the container that runs agents**, so anything in the tree that the _host_ later
 executes is agent-writable. Iteration 1 found `node_modules` and `pnpm-lock.yaml`. This one found
 five more surfaces.
 
@@ -209,7 +209,7 @@ two are verified by hand, and three of the five ask for decisions the item put o
 
 - [high] README.md:195 - The documented replacement for the container-local `node_modules` volume
   cannot see what it claims to, and a test certifies it. `git status --ignored -- node_modules
-  .pnpm-store` emits one line naming the directory, never its contents, so a rewritten
+.pnpm-store` emits one line naming the directory, never its contents, so a rewritten
   `node_modules/.bin/eslint` produces byte-identical output. src/containment.test.ts:121 asserts
   the string is present in the README, turning an ineffective control into a green check. Status:
   FIXED in m0/host-boundary. Nothing that reads the tree can do this job, so the control is
@@ -224,7 +224,7 @@ two are verified by hand, and three of the five ask for decisions the item put o
   skill in `~/.claude/skills` "so the agent it constrains cannot write it" - true only because of
   the container, and the superseded header does not retract it. Status: FIXED in m0/host-boundary.
   The header names all four host paths with the commands that can see them (`git config --global
-  --list`, `ls -la ~/.claude/skills ~/Library/LaunchAgents`, a diff of `~/.claude/settings.json`)
+--list`, `ls -la ~/.claude/skills ~/Library/LaunchAgents`, a diff of `~/.claude/settings.json`)
   and explicitly retracts the `~/.claude/skills` recommendation: on the Mac that directory is as
   writable to the agent as the repository, and moving the skill there moves it out of review.
 
@@ -332,3 +332,105 @@ claim that was true of the mechanism it was written for and not of the residue b
   than asserted. Not closed, because it cannot be: a profile that starts a login shell, or an agent
   that reads rc files itself, re-establishes whatever those files export. The only real fix is the
   one already open - a distinct uid, with its own home.
+
+---
+
+## m0/host-boundary - final whole-codebase pass - 2026-08-07
+
+The item that took the twelve findings of `m0/de-containerise` and the two decisions it deferred.
+All twelve are marked FIXED or ACCEPTED WITH A REASON in the section above. The token now defaults
+to `~/.agentdeck/token` created 0600, and the server refuses to start if that path resolves inside
+an allowlist entry; the `cwd` allowlist became a boundary rather than a check on
+`POST /api/sessions`. Both were the user's call, taken on 2026-08-07.
+
+The audit below runs after the last fix round and so has no fix round of its own. Two of its
+findings were nevertheless fixed on this branch before the merge - the `high`, because the branch
+must not ship a claim it does not keep, and one `medium`, because the branch introduced it. The
+rest are recorded and open.
+
+### Findings
+
+- [high] src/tmux.ts:262 - "A session's environment is built, not inherited" failed open, silently,
+  on any tmux server agentdeck did not start, and the comment saying it could not be fixed was
+  wrong. `start-server` is a no-op against a socket that already holds a live server, so only the
+  CLIENT half of the environment was ours; the pane inherits the server's global environment, which
+  is whatever shell started it. The trigger is prescribed by our own text: `CwdAllowlist.refusal()`
+  and the README both tell the operator to `tmux -L agentdeck attach` to reach an orphaned session,
+  and attaching starts a server. `exit-empty off` then keeps it alive indefinitely. Failure:
+  every session created afterwards gets the forwarded ssh-agent, which plan 005 prices as
+  `git push --force` to every repository that key reaches. **Verified by hand on tmux 3.7b, and
+  worse than the branch assumed: emptying `update-environment` makes it worse rather than better,
+  because tmux's own default list names `SSH_AUTH_SOCK` and was overwriting it from our clean
+  client by accident.** With the list emptied and a dirty pre-existing server, a pane created
+  exactly as `createOrAttach` builds it saw both a marker variable and the agent socket.
+  Status: FIXED in 6500400. `ensureServer` sweeps every global not on `BASE_ENV_NAMES` with
+  `set-environment -g -u` and logs what it cleared; `PWD` is skipped because tmux sets it on a
+  server we started ourselves. Covered by a real-tmux test that fails without the fix.
+
+- [medium] src/registry.ts:166 - `reap()` became unreachable at boot, so a dead session left by a
+  previous run stayed on the socket forever and the next create reported it as live. Second-order
+  effect of gating `list()` on the allowlist and on `#meta`, which is memory only: after a restart
+  `list()` cannot see a session this process created before, and `reap()` filters through `list()`.
+  `remain-on-exit on` keeps the corpse. Failure: `sessionId(cwd, agent)` is pure, so the next
+  `POST /api/sessions` for that repo hits it, tmux reports `attached`, and the phone gets a 201
+  carrying "a claude session was already running in <cwd>; you are attached to it rather than to a
+  new one" - false - plus a tab pinned at `exited` with no agent started, which the user must close
+  before the agent will start. Status: FIXED in b7cdbca. `create()` kills a dead session under its
+  own id first, scoped to a cwd already allowlisted and a pane tmux reports dead. Reaping against
+  the unfiltered list was the other option and was not taken: it would widen what this process
+  kills to sessions it never started.
+
+- [medium] src/server.ts:71 - The bearer token moved to a user-writable, guessable path and
+  `loadToken` adopts whatever it finds there. `readFileSync` returns any non-empty content as the
+  token, with no ownership, mode or symlink check; the 0600 is applied only on the write path.
+  Failure: an agent session - which plan 005 treats as capable of running a poisoned `curl | sh` -
+  knows the exact path and can pre-create `~/.agentdeck/token` with a value it chose, or symlink it
+  somewhere, and the next boot adopts it. Status: OPEN. Same-uid is the standing residual this
+  whole file keeps returning to, and the honest fix is the distinct uid recorded in plan 005, not a
+  mode check that the same uid can undo. Revisit with M1.
+
+- [medium] src/server.ts:41 - The token's default sits in the PARENT of the directory agents are
+  pointed at (`~/.agentdeck/token` beside `~/.agentdeck/agent-state`), and nothing checks that
+  relationship. Status: OPEN. The refusal covers allowlist entries, which is the case the rule was
+  written for; this is a second one it does not name.
+
+- [medium] src/server.ts:57 - `tokenInsideAllowlist` is symlink-blind and fails open. Failure: an
+  allowlist entry reachable by a symlinked path defeats the containment check that is the item's
+  own done-when. Status: OPEN.
+
+- [medium] src/server.ts:236 - The agent-state directory receives a hooks file, the same class of
+  execution surface the profiles file was just guarded for, and gets no containment check at all.
+  Status: OPEN.
+
+- [low] src/tmux.ts:180 - The momentary global `update-environment` is a server-wide window, and
+  its cleanup on the failure path is best-effort. Status: OPEN, and narrower than what it replaced.
+
+- [low] src/registry.ts:128 - The session boundary is (remembered name + tmux-reported path) and
+  both halves are computable by any process running as this user. Stated as such in the code.
+  Status: ACCEPTED. It is a filter on where a session is, not a claim that agentdeck started it.
+
+- [low] src/http.ts:211 - The 500 handler logs the whole error object, which for a `capture-pane`
+  failure carries scrollback - the one thing this design says is never written down. Status: OPEN.
+
+- [low] src/server.ts:105 - `probeTmux` is the one tmux invocation that bypasses `Tmux` and its
+  built environment. Status: OPEN; it starts no session.
+
+- [low] src/registry.ts:45 - `#meta` retains per-session hook secrets for sessions that left the
+  socket by any route other than `close()`. Status: OPEN.
+
+- [low] src/tmux.ts:368 - `Tmux.refresh` and `Tmux.resize` have no non-test callers and were
+  carried through the target hardening. Status: OPEN; M2 is their caller.
+
+- [low] README.md:133 - Recorded, not introduced: `AGENTDECK_ORIGIN` is unset by default, so the
+  Origin check is off and `/api/health` answers unauthenticated to the tailnet behind
+  `tailscale serve`. This branch is the one that finally wrote it into the README and a boot
+  warning. Status: ACCEPTED for now. The boot warning goes to stderr on a process with no decided
+  log destination, so on a launchd run nobody sees it - `m4/launchd-watchdog` is where that lands.
+
+### Open after this iteration
+
+- **Same-uid**, again and unchanged. Three of the mediums above (`src/server.ts:71`, `:41`, `:57`)
+  are the same fact wearing different hats: the token is a file, and every agent runs as the user
+  who owns it. Plan 005 records a distinct uid for agent sessions as the only real fix. Not taken.
+- **The allowlist is a filter on where a session is**, not proof agentdeck started it. A same-uid
+  process still owns the socket.

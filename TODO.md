@@ -63,7 +63,7 @@ Mark an item `[x]` when its branch is merged.
       the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
       observed against it.
 
-- [ ] **`m0/host-boundary`** — what the container was doing that nothing does now. Filed from
+- [x] **`m0/host-boundary`** — what the container was doing that nothing does now. Filed from
       `m0/de-containerise`'s audit; the twelve findings are in `audit.md` under that heading and are
       the specification. Five are `high` and two were verified by hand on the machine:
       **the `env` name allowlist in plan 004 is not a boundary** — the tmux server inherits whatever
@@ -86,6 +86,21 @@ Mark an item `[x]` when its branch is merged.
       and refuses to start if the token path resolves inside an allowlist entry; plan 002's
       `/proc/<pid>/environ` paragraph names the mechanism this host actually has; and every finding
       in `audit.md`'s `m0/de-containerise` section is marked fixed or accepted-with-a-reason.
+      **Settled here, by a person, on 2026-08-07:** the token lives at `~/.agentdeck/token`, created
+      0600 on first run, and the server refuses to start if that path resolves inside an allowlist
+      entry — the rule made executable rather than written down three times. The `cwd` allowlist
+      **is** a boundary: agentdeck lists, attaches to, streams and kills only sessions whose
+      directory is on it, and ignores everything else on the tmux socket. The accepted cost is that
+      a session started by hand under the agentdeck socket is not a tab. The container's cpu and
+      memory bounds and its `~/Library/LaunchAgents` persistence bound were **not** rebuilt; they
+      are named as unbounded in plan 005's superseded header, and the resource half belongs to
+      `m4/launchd-watchdog`.
+      **Found by the audit and fixed before merge, not in the original twelve:** the built
+      environment failed open on any tmux server agentdeck did not start — `start-server` is a no-op
+      against a live one, and emptying `update-environment` made it worse rather than better because
+      tmux's default list names `SSH_AUTH_SOCK` and was overwriting it by accident. `ensureServer`
+      now sweeps the server's globals. Six `medium` findings remain open in `audit.md`; three are
+      the same-uid residual in different clothes.
 
 > Not a branch: **the retained deployment files.** `Dockerfile`, `docker-compose.yml` and
 > `docker/` stay on disk, unbuilt and unreferenced by anything that runs. How agentdeck is
@@ -166,7 +181,7 @@ Driven from `curl` only. No client.
       currently the ring buffer's contents rather than a `refresh-client -R` repaint, so a first
       attach to a long-idle session shows recent output rather than the live screen. The seq
       arithmetic is already correct for the repaint; only the source is wrong.)
-  ORIGINAL: — cold snapshot as `capture-pane` scrollback in `history` plus a
+      ORIGINAL: — cold snapshot as `capture-pane` scrollback in `history` plus a
       `refresh-client -R` repaint in `data`, carrying the `seq` the repaint reflects.
       **Done when:** a client attaching to a long-running session sees scrollback then a correct
       live screen; and in alternate-screen mode `history` is absent rather than wrong.
@@ -174,12 +189,12 @@ Driven from `curl` only. No client.
 - [ ] **`m2/resync-ping`** (PARTIAL: `resync` is implemented and demonstrated end to end,
       including the stale-epoch case. Ping/pong is implemented on a 15s interval but has NOT been
       verified against a real half-open connection, which is the only failure it exists for.)
-  ORIGINAL: — gap detection driving `resync`; server pings every 15s and closes at
+      ORIGINAL: — gap detection driving `resync`; server pings every 15s and closes at
       30s without a pong; client reconnects after two silent intervals.
       **Done when:** pulling the network is noticed by the ping before it is noticed by a status
       that stopped changing.
 
-- [x] **`m2/resize-min`** — pane sized to the minimum over *currently attached* clients; detach
+- [x] **`m2/resize-min`** — pane sized to the minimum over _currently attached_ clients; detach
       releases the constraint; an empty set resizes nothing.
       **Done when:** two clients of different sizes attach and the pane matches the smaller; the
       small one detaches and the pane grows.
