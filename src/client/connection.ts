@@ -52,6 +52,24 @@ export type Cancel = () => void;
  */
 export const MAX_INPUT_FRAME_BYTES = 60 * 1024;
 
+/**
+ * How long an input window lasts here, and how many `input` frames may be released in one.
+ *
+ * The server drops the rest of a window once a socket goes past MAX_FRAMES_PER_WINDOW (100) in
+ * RATE_WINDOW_MS (1 s) - it does not close the socket and it does not refuse the message, so an
+ * unpaced multi-megabyte paste is applied to the pty with a hole in the middle of it. A hole is
+ * worse than a refusal: the shell then runs the concatenation of two fragments nobody typed, and
+ * a bracketed paste can lose its closing ESC[201~ and leave the receiving application in paste
+ * mode. So the pieces are queued here and released a window at a time, in order.
+ *
+ * The number is well under the server's because our window and the server's start at different
+ * moments: a burst that straddles the boundary spends its budget against two of our windows but
+ * one of theirs. Half the server's budget is the value that cannot straddle into a drop.
+ * src/client/connection.test.ts asserts the two agree.
+ */
+export const INPUT_WINDOW_MS = 1000;
+export const MAX_INPUT_FRAMES_PER_WINDOW = 40;
+
 const encoder = new TextEncoder();
 
 export interface ConnectionDeps {
@@ -108,6 +126,10 @@ export class Connection {
   #cancelRetry: Cancel | undefined;
   #attachments = new Map<string, Attachment>();
   #status: ConnectionStatus = "closed";
+  /** Serialised `input` frames waiting for room in the window, oldest first. */
+  #pendingInput: string[] = [];
+  #framesThisWindow = 0;
+  #cancelWindow: Cancel | undefined;
 
   constructor(deps: ConnectionDeps, events: ConnectionEvents) {
     this.#deps = deps;
@@ -135,6 +157,7 @@ export class Connection {
     this.#cancelRetry = undefined;
     this.#socket?.close();
     this.#socket = undefined;
+    this.#resetInputWindow();
     this.#setStatus("closed");
   }
 
@@ -168,29 +191,71 @@ export class Connection {
    * does, and the agent may be in a mode that transforms or refuses it - so optimistically
    * painting the character would be the client asserting something only the agent knows.
    *
-   * Halving rather than a fixed character count: a fixed count has to assume the worst escaping
-   * every character could have (six bytes, for a control character) and would then cut an ordinary
-   * ASCII paste into six times as many frames as it needs - and the socket has a frame budget per
-   * second too, so needless frames are not free. Measuring the frame that will actually be sent
-   * costs a serialisation per split and gets the real answer. The split point steps back off a
-   * lone high surrogate, because half a code point is not the same bytes at the other end.
+   * Each cut is as late as the cap allows, found by measuring the frame that will actually be
+   * sent rather than by assuming the worst escaping every character could have (six bytes, for a
+   * control character), which would cut an ordinary ASCII paste into six times as many frames as
+   * it needs. Halving instead of cutting greedily was the other way to be wrong: it rounds up to
+   * the next power of two, so the pieces average half the cap and the paste costs twice the
+   * frames. The cut steps back off a lone high surrogate, because half a code point is not the
+   * same bytes at the other end.
    *
-   * The pieces stay in order and are sent immediately: a PTY has no notion of message boundaries,
-   * so N frames written back to back are the same byte stream as one.
+   * The pieces stay in order and are released against a frame budget - see INPUT_WINDOW_MS. A PTY
+   * has no notion of message boundaries, so N frames written back to back are the same byte stream
+   * as one; what it does not survive is a frame going missing from the middle.
    */
   input(sessionId: string, data: string): void {
-    const message: ClientMessage = { t: "input", sessionId, data };
-    if (encoder.encode(JSON.stringify(message)).length <= MAX_INPUT_FRAME_BYTES) {
-      this.#send(message);
+    let rest = data;
+    while (rest.length > 0) {
+      const cut = this.#cut(sessionId, rest);
+      this.#queueInput({ t: "input", sessionId, data: rest.slice(0, cut) });
+      rest = rest.slice(cut);
+    }
+  }
+
+  /** How many characters of `data` fit in one frame: the largest prefix under the cap. */
+  #cut(sessionId: string, data: string): number {
+    const fits = (n: number): boolean =>
+      encoder.encode(JSON.stringify({ t: "input", sessionId, data: data.slice(0, n) })).length <=
+      MAX_INPUT_FRAME_BYTES;
+    // No character serialises to less than one byte, so a piece can never be longer than the cap.
+    let hi = Math.min(data.length, MAX_INPUT_FRAME_BYTES);
+    if (fits(hi)) return hi;
+    let lo = 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (fits(mid)) lo = mid;
+      else hi = mid - 1;
+    }
+    // A single code point that does not fit cannot be split further, and there is no such code
+    // point: the cap is kilobytes and the largest code point is four bytes.
+    const code = data.charCodeAt(lo - 1);
+    if (code >= 0xd800 && code <= 0xdbff && lo > 1) lo -= 1;
+    return lo;
+  }
+
+  #queueInput(message: ClientMessage): void {
+    this.#pendingInput.push(JSON.stringify(message));
+    this.#flushInput();
+  }
+
+  #flushInput(): void {
+    if (this.#socket === undefined) {
+      // The same rule as #send: nothing is held across a disconnect, because a keystroke arriving
+      // seconds later lands in whatever the agent is doing by then.
+      this.#pendingInput.length = 0;
       return;
     }
-    let cut = data.length >> 1;
-    const code = data.charCodeAt(cut - 1);
-    if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
-    // A single code point that still does not fit cannot be split further, and there is no such
-    // code point: the cap is kilobytes and the largest code point is four bytes.
-    this.input(sessionId, data.slice(0, cut));
-    this.input(sessionId, data.slice(cut));
+    while (this.#pendingInput.length > 0 && this.#framesThisWindow < MAX_INPUT_FRAMES_PER_WINDOW) {
+      if (this.#framesThisWindow === 0) {
+        this.#cancelWindow = this.#schedule(() => {
+          this.#cancelWindow = undefined;
+          this.#framesThisWindow = 0;
+          this.#flushInput();
+        }, INPUT_WINDOW_MS);
+      }
+      this.#framesThisWindow += 1;
+      this.#socket.send(this.#pendingInput.shift() as string);
+    }
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
@@ -243,8 +308,17 @@ export class Connection {
     });
   }
 
+  /** A new socket starts a new budget, and nothing queued for the old one is still wanted. */
+  #resetInputWindow(): void {
+    this.#pendingInput.length = 0;
+    this.#framesThisWindow = 0;
+    this.#cancelWindow?.();
+    this.#cancelWindow = undefined;
+  }
+
   async #onClosed(): Promise<void> {
     this.#socket = undefined;
+    this.#resetInputWindow();
     if (this.#stopped) return;
 
     // A socket that never opened may be a rejected token wearing a network failure's clothes.

@@ -6,6 +6,7 @@ import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW } from "../ws.ts";
 import {
   Connection,
   MAX_INPUT_FRAME_BYTES,
+  MAX_INPUT_FRAMES_PER_WINDOW,
   type ConnectionEvents,
   type ConnectionStatus,
   type SocketHandlers,
@@ -250,6 +251,71 @@ void describe("a paste is one onData event and may be larger than a frame", () =
       frames.length < MAX_FRAMES_PER_WINDOW / 2,
       `a 500 KB paste became ${String(frames.length)} frames against a budget of ${String(MAX_FRAMES_PER_WINDOW)} per second`,
     );
+  });
+
+  void test("the release budget stays under what the server drops at", () => {
+    // Our window and the server's start at different moments, so a burst that straddles the
+    // boundary spends against two of ours and one of theirs. Half is the value that cannot.
+    assert.ok(MAX_INPUT_FRAMES_PER_WINDOW <= MAX_FRAMES_PER_WINDOW / 2);
+  });
+
+  void test("a multi-megabyte paste is paced rather than spliced", () => {
+    // The frames past MAX_FRAMES_PER_WINDOW are DROPPED by the receiver mid-stream, not refused,
+    // so an unpaced 4 MiB paste reaches the pty with a hole in the middle of it and the shell
+    // runs the concatenation of two fragments nobody typed.
+    const h = harness();
+    const pasted = "a line of a pasted build log, about sixty bytes long\n".repeat(80_000);
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    h.connection.input("a", pasted);
+
+    const released = (): Record<string, unknown>[] =>
+      sentMessages(h.last()).filter((message) => message["t"] === "input");
+    assert.ok(
+      released().length <= MAX_INPUT_FRAMES_PER_WINDOW,
+      `${String(released().length)} frames went out in one window`,
+    );
+
+    let windows = 0;
+    while (h.timers.length > 0) {
+      const before = released().length;
+      h.fire();
+      windows += 1;
+      assert.ok(
+        released().length - before <= MAX_INPUT_FRAMES_PER_WINDOW,
+        "a window released more than the budget",
+      );
+      assert.ok(windows < 100, "the queue never drained");
+    }
+    assert.equal(joined(released()), pasted, "the pty would have seen a hole");
+  });
+
+  void test("a megabyte of control bytes is paced too", () => {
+    // Worst-case escaping: six bytes on the wire for one character, so the same megabyte costs
+    // many more frames than its length suggests.
+    const h = harness();
+    const pasted = "\u0001".repeat(1_000_000);
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    h.connection.input("a", pasted);
+
+    const released = (): Record<string, unknown>[] =>
+      sentMessages(h.last()).filter((message) => message["t"] === "input");
+    assert.ok(released().length <= MAX_INPUT_FRAMES_PER_WINDOW);
+    let windows = 0;
+    while (h.timers.length > 0) {
+      const before = released().length;
+      h.fire();
+      windows += 1;
+      assert.ok(released().length - before <= MAX_INPUT_FRAMES_PER_WINDOW);
+      assert.ok(windows < 200, "the queue never drained");
+    }
+    for (const frame of released()) {
+      assert.ok(frameBytes(frame) <= MAX_INPUT_FRAME_BYTES);
+    }
+    assert.equal(joined(released()), pasted);
   });
 });
 
