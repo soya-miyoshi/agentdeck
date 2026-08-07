@@ -55,6 +55,12 @@ export type ServerMessage =
   | { t: "chunk"; sessionId: string; epoch: string; seq: number; data: string }
   | { t: "state"; sessionId: string; state: SessionState; exitCode?: number }
   | { t: "sessions"; sessions: Session[] }
+  // The client-visible heartbeat. A WebSocket ping frame is invisible to JavaScript in a browser,
+  // so the client cannot use the server's keepalive to tell "the agent is quiet" from "nothing is
+  // arriving". This one is an ordinary data frame, sent on the ping timer regardless of agent
+  // activity, and it carries the interval so the client's silence bound is the server's number
+  // rather than a second constant that can drift out of step with it.
+  | { t: "ping"; intervalMs: number }
   | { t: "error"; sessionId?: string; message: string };
 
 // A terminal that is 1x1 or 100000 wide is not a viewport, it is a bug or an attack. The bounds

@@ -7,6 +7,7 @@ import {
   Connection,
   MAX_INPUT_FRAME_BYTES,
   MAX_INPUT_FRAMES_PER_WINDOW,
+  INPUT_WINDOW_MS,
   type ConnectionEvents,
   type ConnectionStatus,
   type SocketHandlers,
@@ -22,6 +23,14 @@ interface Harness {
   /** Pending reconnects, newest last. Each is [delayMs, run]. */
   timers: { delayMs: number; run: () => void }[];
   fire: () => void;
+  /**
+   * Whether an INPUT WINDOW is still pending, which is what a drain loop is waiting on.
+   *
+   * Not "any timer": an open connection always has the heartbeat-silence watchdog outstanding, so
+   * a loop that drained until the timer list emptied would go on to fire the watchdog, drop the
+   * socket, and then read its assertions off a fresh socket that had sent nothing.
+   */
+  pendingWindow: () => boolean;
   statuses: ConnectionStatus[];
   rendered: { sessionId: string; data: string; cleared: boolean }[];
   errors: string[];
@@ -47,11 +56,26 @@ const harness = (): Harness => {
       return socket;
     },
     timers: [],
+    // The SOONEST timer, not the first one scheduled. Since the client watches for heartbeat
+    // silence, an open connection always has a long timer outstanding, and popping the queue in
+    // order fired that 30-second watchdog ahead of the 1-second input window sitting behind it -
+    // which is not an ordering any clock produces.
     fire: () => {
-      const timer = state.timers.shift();
-      assert.ok(timer, "expected a scheduled reconnect");
+      let soonest = 0;
+      for (let i = 1; i < state.timers.length; i++) {
+        if (
+          (state.timers[i] as { delayMs: number }).delayMs <
+          (state.timers[soonest] as { delayMs: number }).delayMs
+        ) {
+          soonest = i;
+        }
+      }
+      const timer = state.timers[soonest];
+      assert.ok(timer, "expected a scheduled timer");
+      state.timers.splice(soonest, 1);
       timer.run();
     },
+    pendingWindow: () => state.timers.some((timer) => timer.delayMs === INPUT_WINDOW_MS),
     statuses: [],
     rendered: [],
     errors: [],
@@ -278,7 +302,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     );
 
     let windows = 0;
-    while (h.timers.length > 0) {
+    while (h.pendingWindow()) {
       const before = released().length;
       h.fire();
       windows += 1;
@@ -305,7 +329,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
       sentMessages(h.last()).filter((message) => message["t"] === "input");
     assert.ok(released().length <= MAX_INPUT_FRAMES_PER_WINDOW);
     let windows = 0;
-    while (h.timers.length > 0) {
+    while (h.pendingWindow()) {
       const before = released().length;
       h.fire();
       windows += 1;
@@ -333,7 +357,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     const released = (): Record<string, unknown>[] =>
       sentMessages(h.last()).filter((message) => message["t"] === "input");
     let windows = 0;
-    while (h.timers.length > 0 && !joined(released()).endsWith("\u0003")) {
+    while (h.pendingWindow() && !joined(released()).endsWith("\u0003")) {
       h.fire();
       windows += 1;
       assert.ok(windows < 40, "the interrupt was still queued a second later");
@@ -582,7 +606,7 @@ void describe("what is typed while disconnected", () => {
     // Drain the queue the way the window timer does, then overflow again. Each fired window
     // schedules the next while anything is still queued, so this runs until nothing is pending
     // rather than a fixed number of times.
-    for (let i = 0; i < 2000 && h.timers.length > 0; i++) h.fire();
+    for (let i = 0; i < 2000 && h.pendingWindow(); i++) h.fire();
     flood();
     const second = h.errors.filter((m) => /dropped/.test(m)).length;
     assert.ok(second > first, "a later overflow dropped input silently");

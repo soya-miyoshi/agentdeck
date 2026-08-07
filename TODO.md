@@ -343,7 +343,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       the token or profiles file resolves inside it — and the unbuilt-client 503 was naming the
       absolute build path to unauthenticated callers.
 
-- [ ] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
+- [x] **`m2/client-visible-heartbeat`** — plan 002 says a client that has seen no traffic for two
       ping intervals should reconnect, and that is not implementable as written: the server's
       keepalive is WebSocket ping frames, which JavaScript cannot observe. A blind 30-second
       silence timer is worse than nothing, because an idle agent legitimately sends nothing for

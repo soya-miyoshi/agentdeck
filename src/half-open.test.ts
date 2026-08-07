@@ -5,6 +5,11 @@ import { after, before, describe, test } from "node:test";
 
 import { WebSocket } from "ws";
 
+import {
+  Connection,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  type SocketFactory,
+} from "./client/connection.ts";
 import { SessionStream } from "./stream.ts";
 import {
   attachWebSocketServer,
@@ -135,6 +140,86 @@ const attach = async (wsPort: number, sessionId: string): Promise<Attached> => {
   return attached;
 };
 
+interface ClientUnderTest {
+  connection: Connection;
+  /** Statuses the client reported after it was open. Empty means it still believes it is fine. */
+  statuses: string[];
+  /** Raw frames this client put on the wire, so an idle tab's cost can be counted. */
+  sent: string[];
+  lastStateAt: number;
+}
+
+/**
+ * The real client module against the real server, over a socket that may be proxied.
+ *
+ * `browserSocket` is the one file that names the browser's WebSocket, and it is the only piece not
+ * reachable from node:test; everything the heartbeat lives in - Connection's silence bound, its
+ * ladder, its status - is exercised unmodified.
+ */
+const connectClient = async (wsPort: number, sessionId: string): Promise<ClientUnderTest> => {
+  const sent: string[] = [];
+  let pings = 0;
+  const connect: SocketFactory = (token, handlers) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${String(wsPort)}`, token);
+    socket.on("open", () => handlers.opened());
+    socket.on("message", (raw: Buffer) => {
+      const text = raw.toString("utf8");
+      if ((JSON.parse(text) as { t?: string }).t === "ping") pings += 1;
+      handlers.message(text);
+    });
+    socket.on("close", () => handlers.closed());
+    socket.on("error", () => undefined);
+    return {
+      send: (raw) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        sent.push(raw);
+        socket.send(raw);
+      },
+      close: () => {
+        socket.close();
+      },
+    };
+  };
+
+  const client: ClientUnderTest = {
+    connection: undefined as unknown as Connection,
+    statuses: [],
+    sent,
+    lastStateAt: 0,
+  };
+  let opened = false;
+  client.connection = new Connection(
+    { token: TOKEN, connect, verifyToken: async () => await Promise.resolve(true) },
+    {
+      render: () => undefined,
+      state: () => {
+        // The only status the client ever hears about, and nothing pushes it on a timer - which is
+        // exactly why a status that stopped changing cannot be read as a dead socket.
+        client.lastStateAt = Date.now();
+      },
+      sessions: () => undefined,
+      error: () => undefined,
+      status: (status) => {
+        if (status === "open") opened = true;
+        else if (opened) client.statuses.push(status);
+      },
+      unauthorized: () => undefined,
+    },
+  );
+  client.connection.start();
+  assert.ok(await waitFor(() => opened, 2000), `client for ${sessionId} never opened`);
+  client.connection.attach(sessionId, 80, 24);
+  assert.ok(await waitFor(() => client.lastStateAt > 0, 2000), `attach to ${sessionId} failed`);
+  // The client's silence bound is the SERVER's interval, carried on the heartbeat itself, and until
+  // the first one lands it is still the production-sized default. Freezing the network before then
+  // would be timing a bound this suite never scaled.
+  assert.ok(
+    await waitFor(() => pings > 0, 2000),
+    `no heartbeat reached the client for ${sessionId}`,
+  );
+  return client;
+};
+
 /** Errors the server sent this client, read out of the frames the harness already collects. */
 const errorsOf = (attached: Attached): string[] =>
   attached.frames
@@ -203,6 +288,72 @@ void describe("a half-open connection", () => {
     } finally {
       deadClient.socket.terminate();
       liveClient.socket.close();
+      proxy.close();
+    }
+  });
+
+  // THE CLIENT HALF, over the same proxy. The server's ping is a WebSocket control frame, which a
+  // browser answers below the JavaScript API - the page never sees it - so nothing above proves the
+  // CLIENT can notice anything. What the client measures instead is the `{ t: "ping" }` data frame
+  // the server sends on the same timer regardless of agent activity, and the tab that must survive
+  // it untouched is the one whose agent has simply gone quiet.
+  void test("the client's heartbeat default agrees with the server's interval", () => {
+    assert.equal(DEFAULT_HEARTBEAT_INTERVAL_MS, PING_INTERVAL_MS);
+  });
+
+  void test("the client notices a pulled network, sooner than a status that stopped changing, and never calls a quiet agent dead", async () => {
+    const proxy = await startProxy(port);
+    const dropped = await connectClient(proxy.port, "dead");
+    const quiet = await connectClient(port, "live");
+    try {
+      assert.equal(dead.attachedCount, 1);
+      assert.equal(live.attachedCount, 1);
+      assert.equal(dropped.connection.status, "open");
+
+      const sentWhileIdle = quiet.sent.length;
+      const frozenAt = Date.now();
+      proxy.freeze();
+
+      // The client's own verdict: the first status it reports after the network is pulled. Not the
+      // server's terminate(), and not a socket event - through a frozen proxy there is none.
+      const noticed = await waitFor(() => dropped.statuses.length > 0, TEST_PONG_TIMEOUT_MS * 6);
+      const clientNoticedMs = Date.now() - frozenAt;
+      assert.ok(noticed, "the client never noticed the pulled network");
+      // The silence bound plus one backoff delay before the ladder's first visible step.
+      assert.ok(
+        clientNoticedMs <= TEST_PONG_TIMEOUT_MS * 3,
+        `the client noticed after ${String(clientNoticedMs)}ms`,
+      );
+
+      // BOTH CLOCKS, in the assertion. Neither session's status has changed since its attach - an
+      // idle agent legitimately says nothing for minutes - so a status-staleness threshold low
+      // enough to have called the dead socket by now would have called the LIVE one at the same
+      // moment. The heartbeat clock beats the status clock without being wrong about a healthy tab.
+      const deadStatusUnchangedMs = Date.now() - dropped.lastStateAt;
+      const quietStatusUnchangedMs = Date.now() - quiet.lastStateAt;
+      assert.ok(
+        clientNoticedMs <= deadStatusUnchangedMs && quietStatusUnchangedMs >= clientNoticedMs,
+        `the client noticed at ${String(clientNoticedMs)}ms; the dead tab's status had been unchanged for ` +
+          `${String(deadStatusUnchangedMs)}ms and a LIVE tab's for ${String(quietStatusUnchangedMs)}ms`,
+      );
+
+      // THE FAILURE MODE THIS DESIGN REFUSES. The quiet tab's agent has produced nothing for the
+      // whole run - several heartbeat intervals - and it is still open, never reconnected, never
+      // reported dead. A blind silence timer would have dropped it at the same moment as the other.
+      await new Promise((resolve) => setTimeout(resolve, TEST_PONG_TIMEOUT_MS * 2));
+      assert.equal(quiet.connection.status, "open");
+      assert.deepEqual(quiet.statuses, []);
+      assert.equal(live.attachedCount, 1);
+
+      // And the heartbeat is outside both budgets: the quiet client answered none of those frames,
+      // so it spent nothing of the per-window input allowance, and its typing still goes through.
+      assert.equal(quiet.sent.length, sentWhileIdle, "an idle tab sent frames it did not need to");
+      input.length = 0;
+      quiet.connection.input("live", "x");
+      assert.ok(await waitFor(() => input.length === 1, 2000), "the quiet tab could not type");
+    } finally {
+      dropped.connection.stop();
+      quiet.connection.stop();
       proxy.close();
     }
   });

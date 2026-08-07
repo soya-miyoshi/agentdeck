@@ -82,6 +82,23 @@ export const MAX_INPUT_FRAMES_PER_WINDOW = 40;
  */
 export const MAX_PENDING_INPUT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * The heartbeat interval assumed until the server has stated its own, and how many of them of
+ * complete silence mean the socket is gone.
+ *
+ * The silence bound CANNOT be "no traffic for 30 seconds": an idle agent legitimately produces
+ * nothing for minutes, so a blind timer reconnects every idle tab in a loop. What is being timed
+ * is the server's `{ t: "ping" }`, which arrives on a timer whether or not the agent said anything
+ * - so silence past two of them means nothing is arriving, not that the agent is quiet.
+ *
+ * The interval is the server's, taken from the frame itself, because a constant duplicated here
+ * would be a second number free to drift out of step with `PING_INTERVAL_MS`. This default only
+ * covers the window before the first heartbeat lands; src/client/connection.test.ts asserts it
+ * agrees with the server's.
+ */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+export const HEARTBEAT_GRACE_INTERVALS = 2;
+
 const encoder = new TextEncoder();
 
 /**
@@ -162,6 +179,10 @@ export class Connection {
   #overflowed = false;
   #framesThisWindow = 0;
   #cancelWindow: Cancel | undefined;
+  #heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+  #cancelSilence: Cancel | undefined;
+  /** Drop the current socket as if it had closed. Undefined when there is no socket to drop. */
+  #dropSocket: (() => void) | undefined;
 
   constructor(deps: ConnectionDeps, events: ConnectionEvents) {
     this.#deps = deps;
@@ -187,6 +208,8 @@ export class Connection {
     this.#stopped = true;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
+    this.#stopWatchingSilence();
+    this.#dropSocket = undefined;
     this.#socket?.close();
     this.#socket = undefined;
     this.#resetInputWindow(false);
@@ -404,14 +427,46 @@ export class Connection {
     this.#events.status(status);
   }
 
+  /**
+   * Restart the silence bound. Called for every frame that arrives, of any type.
+   *
+   * A half-open socket is silent and closed at neither end, so nothing here will ever be told it
+   * went away - this timer is the only thing that can notice, and it is the client's half of the
+   * mechanism the server's ping is the other half of.
+   */
+  #noteTraffic(): void {
+    this.#cancelSilence?.();
+    this.#cancelSilence = this.#schedule(() => {
+      this.#cancelSilence = undefined;
+      this.#dropSocket?.();
+    }, this.#heartbeatIntervalMs * HEARTBEAT_GRACE_INTERVALS);
+  }
+
+  #stopWatchingSilence(): void {
+    this.#cancelSilence?.();
+    this.#cancelSilence = undefined;
+  }
+
   #open(status: ConnectionStatus): void {
     this.#opened = false;
     this.#setStatus(status);
-    this.#socket = this.#deps.connect(this.#deps.token, {
+    // One socket's close is handled once. The watchdog and the socket's own `closed` callback can
+    // both fire - a half-open socket that finally gets an RST minutes later is the ordinary case -
+    // and running the ladder twice schedules two reconnects racing for one connection.
+    let handled = false;
+    const finish = (): void => {
+      if (handled) return;
+      handled = true;
+      this.#stopWatchingSilence();
+      this.#dropSocket = undefined;
+      void this.#onClosed();
+    };
+    const socket = this.#deps.connect(this.#deps.token, {
       opened: () => {
         this.#opened = true;
         this.#policy.opened();
         this.#setStatus("open");
+        this.#noteTraffic();
         // Re-attach every tab with where it got to. The server answers with chunks if the epoch
         // matches and its buffer still covers that point, and a snapshot otherwise - and the
         // snapshot case is the common one after the phone has been asleep.
@@ -420,12 +475,16 @@ export class Connection {
         this.#flushInput();
       },
       message: (raw) => {
+        this.#noteTraffic();
         this.#receive(raw);
       },
-      closed: () => {
-        void this.#onClosed();
-      },
+      closed: finish,
     });
+    this.#socket = socket;
+    this.#dropSocket = () => {
+      socket.close();
+      finish();
+    };
   }
 
   /** A new socket starts a new budget, and nothing queued for the old one is still wanted. */
@@ -529,6 +588,14 @@ export class Connection {
         return;
       case "error":
         this.#events.error(message.sessionId, message.message);
+        return;
+      case "ping":
+        // Nothing is sent back. The proof of life is that the frame arrived at all, and a reply
+        // would put periodic traffic through the same window a user's typing is budgeted against -
+        // an idle tab would spend part of its input allowance on saying nothing.
+        this.#heartbeatIntervalMs = message.intervalMs;
+        // Re-armed, because the bound set moments ago was measured against the previous interval.
+        this.#noteTraffic();
         return;
     }
   }
