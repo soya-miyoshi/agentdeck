@@ -456,6 +456,37 @@ export class Tmux {
       });
   }
 
+  /**
+   * One session's path and creation time, asked for by exact target.
+   *
+   * Deliberately not `list()`: the caller is `Registry.#undoCreate`, which runs precisely when
+   * `list()` has just thrown or come back wrong, so verifying with the call that failed would
+   * refuse the one kill that is definitely ours. `display-message -p` is a different code path and
+   * answers about one target.
+   *
+   * `undefined` when tmux cannot answer at all - a caller that cannot confirm must not act.
+   */
+  async describe(id: string): Promise<{ path: string; startedAt: number } | undefined> {
+    try {
+      const stdout = await this.#tmux([
+        "display-message",
+        "-p",
+        // A WINDOW target, not a session one. `-t =name` answers with empty fields rather than an
+        // error - verified on tmux 3.7b, `display-message -p -t =probe` printed `|` while
+        // `-t =probe:` printed the path and the timestamp. An empty answer here reads as "cannot
+        // confirm", so the wrong target form silently disables the check it exists to make.
+        "-t",
+        exactWindowTarget(id),
+        ["#{session_path}", "#{session_created}"].join(SEP),
+      ]);
+      const [path = "", created = ""] = stdout.trim().split(SEP);
+      if (path === "" || created === "") return undefined;
+      return { path, startedAt: Number(created) * 1000 };
+    } catch {
+      return undefined;
+    }
+  }
+
   async kill(id: string): Promise<void> {
     try {
       await this.#tmux(["kill-session", "-t", exactTarget(id)]);

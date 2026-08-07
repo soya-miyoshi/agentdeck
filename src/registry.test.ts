@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { CwdNotAllowedError, Registry, UnknownAgentError } from "./registry.ts";
+import { sessionId } from "./session-id.ts";
 import { Tmux } from "./tmux.ts";
 
 const SEP = "\u001f";
@@ -31,8 +32,22 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
       // a create is preceded by the `set-option -g update-environment <names>` that carries the
       // session's secrets in the client environment rather than in argv.
       const verbAt = (name: string) => args.indexOf(name);
-      const verb = ["list-sessions", "new-session", "kill-session"].find((n) => verbAt(n) !== -1);
+      const verb = ["list-sessions", "new-session", "kill-session", "display-message"].find(
+        (n) => verbAt(n) !== -1,
+      );
       const rest = verb === undefined ? args : args.slice(verbAt(verb) + 1);
+      // `#undoCreate` confirms with display-message rather than with `list()`, because it runs
+      // exactly when `list()` has failed. `list-omits` is about what the LIST reports, so this
+      // still answers - the session is on the socket either way, which is the point of the check.
+      if (verb === "display-message") {
+        const target = (rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, "").replace(/:$/, "");
+        const found = sessions.get(target);
+        if (found === undefined) throw Object.assign(new Error("x"), { stderr: "can't find pane" });
+        return await Promise.resolve({
+          stdout: `${found.path}\u001f${String(found.created)}\n`,
+          stderr: "",
+        });
+      }
       if (verb === "list-sessions") {
         if (mode === "list-throws") throw new Error("tmux is not answering this call");
         const shown = mode === "list-omits" ? NO_SESSIONS : sessions;
@@ -45,7 +60,20 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
       if (verb === "new-session") {
         const id = rest[rest.indexOf("-s") + 1] ?? "";
         const path = rest[rest.indexOf("-c") + 1] ?? "";
-        sessions.set(id, { dead: false, status: "", created: 1_700_000_000, path });
+        // `-A` is attach-if-exists, so a name already on the socket keeps its session and its
+        // creation time rather than being replaced. Modelling that is what lets a test put a
+        // session under our name and check the undo does not kill it.
+        //
+        // A genuinely new one is stamped now, not at a fixed past instant: `#undoCreate` refuses
+        // to kill a session tmux reports as older than the create it is undoing.
+        if (!sessions.has(id)) {
+          sessions.set(id, {
+            dead: false,
+            status: "",
+            created: Math.floor(Date.now() / 1000),
+            path,
+          });
+        }
       }
       if (verb === "kill-session") {
         // The real tmux resolves `=name` as an exact match and anything else by prefix or
@@ -337,6 +365,26 @@ void describe("a create that cannot finish leaves no orphan", () => {
     assert.equal(result.warning, undefined);
     assert.equal(result.session.state, "idle");
     assert.deepEqual([...sessions.keys()], [result.session.id]);
+  });
+
+  void test("a session under our name that we did not just create is not killed", async () => {
+    // `attached === false` is not a warrant on its own: it comes from a `has()` that ran BEFORE
+    // `new-session -A`, and the name is `sessionId(cwd, agent)` - computable offline by anything
+    // running as this user, and readable from GET /api/cwds and GET /api/agents by any client.
+    // Something that puts that name on the socket inside the window makes `-A` attach to ITS
+    // session while `attached` still reports false, and the undo would then kill it.
+    const { registry, sessions, plant, fail } = build();
+    const id = sessionId("/workspace/agentdeck", "claude");
+    plant(id, "/workspace/agentdeck");
+    // Older than any create this call could have made.
+    const planted = sessions.get(id);
+    if (planted !== undefined) sessions.set(id, { ...planted, created: 1_700_000_000 });
+
+    // The list omits it, so `has()` reports no session and `-A` attaches to the planted one while
+    // `attached` still comes back false - which is exactly the window the warrant was too wide for.
+    fail("list-omits");
+    await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
+    assert.ok(sessions.has(id), "a session this call did not create was killed by its undo");
   });
 
   void test("an ATTACH that cannot finish leaves the running agent alone", async () => {

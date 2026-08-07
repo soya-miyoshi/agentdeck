@@ -83,6 +83,10 @@ export class Registry {
     const neighbours = (await this.list()).filter((s) => s.cwd === cwd && s.id !== id);
 
     const secret = this.#meta.get(id)?.secret ?? newSecret();
+    // tmux reports session_created in whole seconds, so the window opens at the last second
+    // boundary before the create rather than at this millisecond - otherwise a session created in
+    // the same second reads as older than the call that made it and is never cleaned up.
+    const startedAfter = Math.floor(Date.now() / 1000) * 1000;
     const { attached } = await this.#tmux.createOrAttach(
       id,
       cwd,
@@ -106,13 +110,13 @@ export class Registry {
     try {
       session = (await this.list()).find((s) => s.id === id);
     } catch (error) {
-      if (!attached) await this.#undoCreate(id);
+      if (!attached) await this.#undoCreate(id, cwd, startedAfter);
       throw error;
     }
     if (session === undefined) {
       // tmux accepted the create and the session is not there. Better to say so than to
       // synthesise a Session object that claims something we did not observe.
-      if (!attached) await this.#undoCreate(id);
+      if (!attached) await this.#undoCreate(id, cwd, startedAfter);
       throw new Error(`session ${id} was created but tmux does not list it`);
     }
 
@@ -145,10 +149,33 @@ export class Registry {
    * Best-effort: a kill that fails leaves the orphan, and the original failure is still the one
    * worth reporting.
    */
-  async #undoCreate(id: string): Promise<void> {
-    await this.#tmux.kill(id).catch(() => undefined);
+  /**
+   * Kill the session this call started, and refuse to kill anything else.
+   *
+   * `attached === false` is not on its own a warrant. It comes from a `has()` that ran BEFORE
+   * `new-session -A`, and the name is `sessionId(cwd, agent)` - a pure function of two values any
+   * client reads from `GET /api/cwds` and `GET /api/agents`, and any same-uid process can compute
+   * offline. Something that creates that name inside the window makes `-A` attach to ITS session
+   * while `attached` still reports false.
+   *
+   * The non-adversarial half is worse because it needs no attacker: when the post-create `list()`
+   * fails transiently, the agent that was just started would be killed. Before this branch it
+   * survived and a retry adopted it with the "already running" warning, so a transient failure was
+   * self-healing. Undoing on any thrown error made it destructive - and what it destroys is a
+   * running agent's work, which is the one thing this design says survives.
+   *
+   * So the kill is conditional on something observed AFTER the create: tmux must still report the
+   * session at the cwd this call passed, and report it as started within the window this call has
+   * been running. Anything else is left alone and reported.
+   */
+  async #undoCreate(id: string, cwd: string, startedAfter: number): Promise<void> {
+    const ours = await this.#tmux.describe(id);
     this.#meta.delete(id);
     this.#states.delete(id);
+    // Cannot confirm, so do not act. An orphan is visible on the socket and adoptable; a killed
+    // agent's work is not recoverable, so the two failures are not equally bad.
+    if (ours === undefined || ours.path !== cwd || ours.startedAt < startedAfter) return;
+    await this.#tmux.kill(id).catch(() => undefined);
   }
 
   /**
