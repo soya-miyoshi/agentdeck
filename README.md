@@ -162,6 +162,37 @@ logs the names it cleared. Without that the client half bounds nothing, and empt
 `update-environment` would make it worse rather than better: tmux's own default list names
 `SSH_AUTH_SOCK`, so the default was overwriting it from our clean client by accident.
 
+## Driving it from a browser
+
+The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. Nothing serves the built bundle yet
+— that is `m2/serve-client` — so today the page comes from Vite's dev server, which proxies `/api`
+and `/ws` to the server on 7777.
+
+```
+# one terminal: the server
+AGENTDECK_MOUNTS=/absolute/path/to/a/repo AGENTDECK_PROFILES=~/agentdeck-agents.json pnpm start
+
+# another: the page
+pnpm dev
+```
+
+Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
+your session appears. Type in it: the keystrokes go out as `input` frames, and what paints back is
+the agent's own output arriving as `chunk`s — nothing is echoed locally, because the agent may be
+in a mode that transforms or refuses what you typed.
+
+Two things worth doing by hand, because they are what the design is for. Paste a few hundred
+kilobytes of log into the pane — it arrives whole and the socket stays up, the client having cut it
+into frames under the receiver's limit. And lock the phone, or pull the network for a while, then
+come back: the tab repaints rather than showing a hole.
+
+`AGENTDECK_MOUNTS` and `AGENTDECK_PROFILES` are not optional in practice — with neither set there
+is no directory to start a session in and no agent to start. See the Environment table above.
+
+Automated, the same path is `src/client/end-to-end.test.ts`: the real client modules against a real
+server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
+the two pieces that need a DOM.
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of

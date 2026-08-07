@@ -34,6 +34,26 @@ export type SocketFactory = (token: string, handlers: SocketHandlers) => SocketL
 /** Cancel a scheduled reconnect. */
 export type Cancel = () => void;
 
+/**
+ * The largest `input` frame this client will put on the wire, in bytes of serialised JSON.
+ *
+ * The server's receiver caps a frame at 64 KiB (`MAX_FRAME_BYTES` in src/ws.ts) and `ws` enforces
+ * that BEFORE the `message` event, so an over-size frame cannot be answered with an `error` frame -
+ * the socket is closed with 1009 instead. From here that close is indistinguishable from a phone
+ * in a lift: the ladder runs, every tab re-attaches, each re-attach a cold snapshot with a real
+ * capture-pane, and the paste is gone with no explanation. xterm delivers a paste as ONE onData
+ * event, and 15-30 KB of log or diff is enough once JSON escaping inflates it, so this is an
+ * ordinary paste rather than an abuse.
+ *
+ * So the chunking is here, on the sending side, where the size is known before the frame exists.
+ * The number is below the server's cap rather than equal to it because the value that matters is
+ * the frame the server measures, and leaving the last kilobyte unclaimed costs nothing.
+ * src/client/connection.test.ts asserts the two agree.
+ */
+export const MAX_INPUT_FRAME_BYTES = 60 * 1024;
+
+const encoder = new TextEncoder();
+
 export interface ConnectionDeps {
   token: string;
   connect: SocketFactory;
@@ -148,7 +168,35 @@ export class Connection {
    * painting the character would be the client asserting something only the agent knows.
    */
   input(sessionId: string, data: string): void {
-    this.#send({ t: "input", sessionId, data });
+    this.#sendInput(sessionId, data);
+  }
+
+  /**
+   * One `input` frame, or as many as it takes to stay under the receiver's cap.
+   *
+   * Halving rather than a fixed character count: a fixed count has to assume the worst escaping
+   * every character could have (six bytes, for a control character) and would then cut an ordinary
+   * ASCII paste into six times as many frames as it needs - and the socket has a frame budget per
+   * second too, so needless frames are not free. Measuring the frame that will actually be sent
+   * costs a serialisation per split and gets the real answer. The split point steps back off a
+   * lone high surrogate, because half a code point is not the same bytes at the other end.
+   *
+   * The pieces stay in order and are sent immediately: a PTY has no notion of message boundaries,
+   * so N frames written back to back are the same byte stream as one.
+   */
+  #sendInput(sessionId: string, data: string): void {
+    const message: ClientMessage = { t: "input", sessionId, data };
+    if (encoder.encode(JSON.stringify(message)).length <= MAX_INPUT_FRAME_BYTES) {
+      this.#send(message);
+      return;
+    }
+    let cut = data.length >> 1;
+    const code = data.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+    // A single code point that still does not fit cannot be split further, and there is no such
+    // code point: the cap is kilobytes and the largest code point is four bytes.
+    this.#sendInput(sessionId, data.slice(0, cut));
+    this.#sendInput(sessionId, data.slice(cut));
   }
 
   resize(sessionId: string, cols: number, rows: number): void {

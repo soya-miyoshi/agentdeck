@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { ServerMessage } from "../protocol.ts";
+import { MAX_FRAME_BYTES } from "../ws.ts";
 import {
   Connection,
+  MAX_INPUT_FRAME_BYTES,
   type ConnectionEvents,
   type ConnectionStatus,
   type SocketHandlers,
@@ -137,6 +139,72 @@ void describe("one socket, multiplexed", () => {
     h.connection.input("a", "ls\r");
     assert.deepEqual(sentMessages(h.last()).at(-1), { t: "input", sessionId: "a", data: "ls\r" });
     assert.deepEqual(h.rendered, []);
+  });
+});
+
+void describe("a paste is one onData event and may be larger than a frame", () => {
+  const paste = (h: Harness, data: string): Record<string, unknown>[] => {
+    h.connection.start();
+    h.last().handlers.opened();
+    h.connection.attach("a", 80, 24);
+    h.connection.input("a", data);
+    return sentMessages(h.last()).filter((message) => message["t"] === "input");
+  };
+
+  void test("the client never sends a frame the server's receiver would refuse", () => {
+    // `ws` enforces maxPayload BEFORE the message event, so an over-size frame is not answerable
+    // with an error frame - the socket closes with 1009, which from the client looks exactly like
+    // a phone in a lift. It runs the ladder, re-attaches every tab with a real capture-pane each,
+    // and the paste is gone with no explanation, so the user pastes again and it repeats.
+    const h = harness();
+    // 400 KB of a pasted diff, which is a large paste but an ordinary one.
+    const pasted =
+      `${"diff --git a/src/x.ts b/src/x.ts +one changed line here".repeat(1)}\n`.repeat(6000);
+    const frames = paste(h, pasted);
+    assert.ok(frames.length > 1, "expected the paste to be split");
+    for (const frame of frames) {
+      assert.ok(
+        new TextEncoder().encode(JSON.stringify(frame)).length <= MAX_INPUT_FRAME_BYTES,
+        "a frame was over the cap the receiver enforces before anything can answer it",
+      );
+    }
+    assert.equal(frames.map((frame) => frame["data"] as string).join(""), pasted);
+    assert.equal(h.last().closed, false, "the transport must survive an ordinary paste");
+  });
+
+  void test("the budget stays under what the server will accept", () => {
+    // Two files, one number. The client cannot import the server's module - it pulls `ws` into the
+    // browser bundle - so the agreement is asserted here instead of assumed.
+    assert.ok(MAX_INPUT_FRAME_BYTES < MAX_FRAME_BYTES);
+  });
+
+  void test("escaping is measured, not assumed, so a frame of control bytes still fits", () => {
+    // Every character here serialises as \u00XX: six bytes for one, the worst case JSON has. A
+    // chunker that counted characters and hoped would send a frame six times its own budget.
+    const h = harness();
+    const frames = paste(h, "\u0001".repeat(200_000));
+    for (const frame of frames) {
+      assert.ok(
+        new TextEncoder().encode(JSON.stringify(frame)).length <= MAX_INPUT_FRAME_BYTES,
+        "a frame of worst-case-escaping bytes was over the cap",
+      );
+    }
+    assert.equal(frames.map((frame) => frame["data"] as string).join(""), "\u0001".repeat(200_000));
+  });
+
+  void test("a code point is never split across two frames", () => {
+    // Half a surrogate pair is not the same bytes at the other end; it is U+FFFD, twice.
+    const h = harness();
+    const frames = paste(h, "\u{1f600}".repeat(60_000));
+    for (const frame of frames) {
+      const data = frame["data"] as string;
+      assert.doesNotMatch(data, /^[\udc00-\udfff]/, "a frame began with a lone low surrogate");
+      assert.doesNotMatch(data, /[\ud800-\udbff]$/, "a frame ended with a lone high surrogate");
+    }
+    assert.equal(
+      frames.map((frame) => frame["data"] as string).join(""),
+      "\u{1f600}".repeat(60_000),
+    );
   });
 });
 
