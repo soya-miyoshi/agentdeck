@@ -36,7 +36,9 @@ What it pins down beyond "the sessions survive":
   `Registry.list()` is gated on that memory as well as on the cwd allowlist, so a survivor is
   **not listed at all** rather than listed under its raw id. `GET /api/sessions` comes back empty
   and `GET /api/cwds` reports no sessions in the directory, while the agent is still running.
-  Nothing kills or reaps it either; it is left alone.
+  Nothing kills or reaps it either; it is left alone. The two-agents-in-one-tree warning is
+  computed from that same list, so starting a second agent in the directory the survivor is
+  working in is answered with no warning at all.
 - every hook POST from the surviving agent is 401, so that tab never reports `waiting` again — and
   recreating the session does not fix it. `new-session -A` attaches to the live session and
   injects no environment, so the process keeps the old secret while the registry mints a new one

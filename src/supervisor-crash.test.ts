@@ -56,6 +56,9 @@ writeFileSync(
       command: "/bin/sh",
       args: ["-c", `printenv AGENTDECK_SECRET > ${secretFile}; exec sleep 100000`],
     },
+    // A second agent, so the two-agents-in-one-tree warning can be asked for by name. The
+    // warning is computed from `list()`, and `list()` is what a survivor drops out of.
+    neighbour: { command: "/bin/sh", args: ["-c", "exec sleep 100000"] },
   }),
 );
 
@@ -267,6 +270,41 @@ void describe("the node process is killed and nothing brings it back", () => {
       },
     );
     assert.equal(hook.status, 401, "a secret the new process never generated was accepted");
+  });
+
+  void test("a second agent in the same tree gets NO warning, because the survivor is invisible", async () => {
+    // The named failure mode, and the one that costs a working tree rather than a notification.
+    // Before the crash, starting a second agent in `work` would have been answered with "shell is
+    // already running in <cwd>. Two processes editing one working tree produce conflicts neither
+    // understands." After it, `Registry.create` reads its neighbours from `list()`, the survivor
+    // is not in `list()`, and the phone is told nothing at all - while the first agent is still
+    // running in that directory and still editing those files.
+    const created = await api("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cwd: work, agent: "neighbour" }),
+    });
+    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
+    const body = (await created.json()) as { session: { id: string }; warning?: string };
+    assert.equal(body.warning, undefined, "the survivor was named in a warning it cannot be in");
+    assert.ok(panes().includes(paneLine), "the second agent disturbed the surviving session");
+
+    // And `GET /api/cwds` reports the directory as holding one session when it holds two.
+    const cwds = (await (await api("/api/cwds")).json()) as {
+      cwds: { path: string; sessions: string[] }[];
+    };
+    assert.deepEqual(cwds.cwds.find((c) => c.path === work)?.sessions, [body.session.id]);
+
+    // Cleared away so the assertions below are about the survivor alone. This one the server does
+    // own - it has `#meta` for it - so DELETE reaches it, which is itself the contrast.
+    const deleted = await api(`/api/sessions/${encodeURIComponent(body.session.id)}`, {
+      method: "DELETE",
+    });
+    assert.equal(deleted.status, 200);
+    assert.ok(
+      !panes().some((line) => line.startsWith(`${body.session.id} `)),
+      "DELETE left the session it does own",
+    );
   });
 
   void test("recreating reattaches to the same process - and does not restore the hook path", async () => {
