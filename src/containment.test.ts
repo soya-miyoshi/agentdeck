@@ -261,14 +261,22 @@ void describe("the user's bearer token is not at the root of a working tree", ()
     // and loadToken's docstring is the only one a reader of the code meets. Both used to say the
     // path was outside every bind mount, in a container that no longer exists - a protection a
     // reader would credit, and so never look at the placement again.
+    //
+    // The server.ts half is scoped to the token functions by NAME, not by a byte count. It was a
+    // 3000-character slice, and the file had grown past it: the window ended above `loadToken`
+    // entirely, so this stopped reading the docstring it is named for while still passing. The
+    // boundary is `main`, above which live defaultTokenFile, tokenInsideAllowlist and loadToken;
+    // below it is the AGENTDECK_MOUNTS comment, which explains where that variable's NAME came
+    // from rather than crediting a mount with protecting anything.
+    const server = await readDoc("src/server.ts");
+    const ignored = await readDoc(".gitignore");
     for (const [path, text] of [
-      [".gitignore", await readDoc(".gitignore")],
-      ["src/server.ts", (await readDoc("src/server.ts")).slice(0, 3000)],
+      [".gitignore", ignored],
+      ["src/server.ts", server.slice(0, server.indexOf("export const main"))],
     ] as const) {
       assert.doesNotMatch(text, /bind mount/i, `${path} still credits a bind mount`);
       assert.doesNotMatch(text, /container-local volume/i, `${path} still credits a volume`);
     }
-    const ignored = await readDoc(".gitignore");
     assert.match(ignored, /AGENTDECK_TOKEN_FILE/);
     assert.match(ignored, /~\/\.agentdeck\/token/, ".gitignore must name where the token now is");
     assert.match(ignored, /inside a tree a session is\s*#?\s*pointed at/);

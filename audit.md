@@ -586,3 +586,63 @@ this branch introduced.
 - **`/api/health` cannot see this class of failure** (`probeTmux` bypasses `baseEnv`). The one
   probe `m4/launchd-watchdog` will restart on is blind to the bug that broke every create.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/snapshot - final whole-codebase pass - 2026-08-08
+
+`data` is now a `refresh-client -R` repaint rather than the ring buffer's contents, so a first
+attach to a long-idle session paints the live screen instead of whatever output happened to be in
+the buffer. Demonstrated by hand against a real session idle since before the attach, and with
+`#{alternate_on}` at 1 the `history` key is absent from the frame.
+
+Three of the audit's findings were introduced by this branch and are fixed here. The audit's own
+question - what this change makes reachable in combination with code it did not touch - is what
+found them, and two are only dangerous because of properties this branch added.
+
+### Findings
+
+- [medium] src/ws.ts:152 - The attach handler raced its own snapshot. The forwarding listener was
+  registered before the snapshot was built, and the repaint's bytes come back through that same
+  stream, so chunks reached a client that had no position yet. That client answers a chunk with
+  `resync`, and for any session past the buffer's capacity `covers()` is false, so the server ran a
+  SECOND full snapshot - another capture-pane, another refresh-client, another collection window -
+  on every cold attach, the most common path in the product. With a persistently failing repaint it
+  is worse: the position never becomes defined, so every chunk the agent emits produces another
+  resync and another failing snapshot. **Verified by hand against the real server: three chunk
+  frames arrived ahead of the snapshot; after the fix, none do.** Status: FIXED in b24a8e4. The
+  listener queues until the snapshot is away, then flushes only what the snapshot does not already
+  reflect.
+
+- [medium] src/tmux.ts:557 - `repaint` resolves the session to EVERY attached client tty and awaits
+  one `refresh-client` per tty, sequentially, while `Hub.repaint` started its 1000ms cap before
+  those spawns. The agent in a pane owns a shell on the same uid as `/tmp/tmux-<uid>/agentdeck`, so
+  it can attach as many clients as it likes; every snapshot then blew the cap before a byte was
+  collected and threw, and the tab showed NOTHING - permanently, for that session, for every phone,
+  while the session list and the state field still looked correct. Status: PARTLY FIXED in b24a8e4.
+  The cap now starts after the tmux calls, so it measures collection rather than spawn, and an
+  empty collection degrades to the buffer's contents - a stale screen rather than no screen - with
+  a log line. **The root of it is still OPEN:** repaint should refresh only the client this server
+  owns, whose tty is knowable, rather than every client tmux lists. Refreshing foreign clients buys
+  nothing and is what makes the amplification possible.
+
+- [medium] src/hub.ts:158 - The cold-snapshot path became a 4x fork amplifier with no bound on
+  concurrent repaints: every ws frame is handled fire-and-forget with no rate limit, no per-client
+  in-flight cap and no per-session serialisation, and `resync` reaches the snapshot path without
+  the client being attached. One repeating client held thousands of listeners and hundreds of MB
+  and forked tmux as fast as the event loop allowed, on a process nothing restarts. Status: PARTLY
+  FIXED in b24a8e4 - repaints for one session share one in-flight promise, which removes the
+  multiplication per session. **OPEN:** there is still no per-socket rate limit, and `input` and
+  `resize` have the same fire-and-forget shape.
+
+- [low] src/hub.ts:134 - `isAlternateScreen` reaches tmux without the `#ptys` gate its sibling
+  `repaint` has, so it answers about a session this server holds no pty for. It leaks only a
+  boolean. Status: OPEN.
+
+### Open after this iteration
+
+- **The repaint targets every client, not ours.** Named above; it is the cause the partial fixes
+  work around rather than remove.
+- **No rate limit on the ws message path.** `m2/reconnect` is the item that will make clients
+  retry automatically, so the bound wants to exist before that lands rather than after.
+- **Same-uid**, unchanged.

@@ -27,6 +27,10 @@ export interface WsDeps {
   streamFor: (sessionId: string) => SessionStream | undefined;
   /** Scrollback for a cold snapshot. The depth belongs to whoever implements this. */
   captureHistory: (sessionId: string) => Promise<string>;
+  /** Whether the pane is on the alternate screen, where there is no scrollback to show. */
+  isAlternateScreen: (sessionId: string) => Promise<boolean>;
+  /** The live screen for a cold snapshot, and the seq the bytes of it end at. */
+  repaint: (sessionId: string) => Promise<{ data: string; seq: number }>;
   /** Raw bytes the user typed, straight to the PTY. */
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
@@ -149,8 +153,23 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       case "attach": {
         stream.attach(client.id, message.cols, message.rows);
         applySize(message.sessionId);
+        // The forwarding listener has to exist before the snapshot is built - the repaint's own
+        // bytes come back through this stream, and a listener registered afterwards would miss
+        // whatever arrived while `capture-pane` and `refresh-client` were running. But it must not
+        // SEND before the snapshot: a client with no position yet answers a chunk with `resync`
+        // (src/client/stream-position.ts), so every cold attach cost a second full snapshot -
+        // another capture-pane, another refresh-client, another collection window. Observed on a
+        // real attach: three chunk frames arrived ahead of the snapshot.
+        //
+        // So it queues until the snapshot is away, then flushes only what the snapshot does not
+        // already reflect.
+        let queued: { epoch: string; seq: number; data: Buffer }[] | undefined = [];
         if (!client.attached.has(message.sessionId)) {
           const off = stream.onChunk((chunk) => {
+            if (queued !== undefined) {
+              queued.push(chunk);
+              return;
+            }
             send(client.socket, {
               t: "chunk",
               sessionId: message.sessionId,
@@ -161,7 +180,26 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
           });
           client.attached.set(message.sessionId, off);
         }
-        await sendPosition(client, message.sessionId, stream, message.haveEpoch, message.haveSeq);
+        const at = await sendPosition(
+          client,
+          message.sessionId,
+          stream,
+          message.haveEpoch,
+          message.haveSeq,
+        );
+        const held = queued ?? [];
+        queued = undefined;
+        for (const chunk of held) {
+          // Anything the snapshot already contains would be painted twice.
+          if (at !== undefined && chunk.seq <= at) continue;
+          send(client.socket, {
+            t: "chunk",
+            sessionId: message.sessionId,
+            epoch: chunk.epoch,
+            seq: chunk.seq,
+            data: chunk.data.toString("utf8"),
+          });
+        }
         send(client.socket, {
           t: "state",
           sessionId: message.sessionId,
@@ -202,7 +240,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     stream: SessionStream,
     haveEpoch: string | undefined,
     haveSeq: number | undefined,
-  ): Promise<void> => {
+  ): Promise<number | undefined> => {
     const plan = planAttach(stream.buffer, haveEpoch, haveSeq);
     if (plan.kind === "chunks") {
       const data = stream.buffer.since(plan.from);
@@ -215,13 +253,16 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
           data: data.toString("utf8"),
         });
       }
-      return;
+      return stream.buffer.headSeq;
     }
     const snapshot = await buildSnapshot({
       buffer: stream.buffer,
       captureHistory: async () => await deps.captureHistory(sessionId),
+      alternateScreen: async () => await deps.isAlternateScreen(sessionId),
+      repaint: async () => await deps.repaint(sessionId),
     });
     send(client.socket, { t: "snapshot", sessionId, ...snapshot });
+    return snapshot.seq;
   };
 
   const heartbeat = setInterval(() => {

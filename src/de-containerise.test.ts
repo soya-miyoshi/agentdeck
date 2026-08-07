@@ -50,6 +50,14 @@ const healthcheck = `${repoRoot}scripts/healthcheck.mjs`;
 const readDoc = async (name: string): Promise<string> =>
   await readFile(`${repoRoot}${name}`, "utf8");
 
+// This file, named once. Every scan below has to exclude it, for the same reason each time: its
+// search patterns are the literals it searches for, so scanning itself reports the scanner and the
+// failure looks exactly like the thing it exists to catch. It was spelled three ways - two exact
+// comparisons and a suffix match that would also have exempted somebody else's
+// `their-de-containerise.test.ts` - and a scanner that is unsure which file it is is a scanner with
+// a hole in it.
+const SELF = "src/de-containerise.test.ts";
+
 // The documents that described a container. Plan 005 is absent on purpose: it is the record of
 // the one that is gone. Plan 002 was absent too, with the comment "002 never described one" - it
 // described one six times, in load-bearing places: `Session.cwd`, `Cwd.path`, the allowlist
@@ -93,7 +101,7 @@ const allowedToSayDocker = (path: string): boolean =>
   path === "audit.md" ||
   // This file. It names the retained set in order to assert it, which is the one use that
   // cannot be removed without removing the check.
-  path === "src/de-containerise.test.ts";
+  path === SELF;
 
 const retainedDeploymentFiles = ["Dockerfile", "docker-compose.yml", "docker/entrypoint.sh"];
 
@@ -161,7 +169,7 @@ void describe("the container is gone from everything that says how this runs", (
     // a container they do not have is the most expensive place to be wrong.
     for (const path of trackedFiles()) {
       if (!path.startsWith("src/") && !path.startsWith("scripts/")) continue;
-      if (path === "src/de-containerise.test.ts") continue;
+      if (path === SELF) continue;
       const text = await readFile(`${repoRoot}${path}`, "utf8");
       assert.doesNotMatch(text, /docker/i, `${path} still describes Docker`);
       // `docker` was the only word this scanned, while the thing that is gone is the container:
@@ -243,13 +251,8 @@ void describe("each plan states the post-container claim, not merely the absence
 // -----------------------------------------------------------------------------------------
 
 void describe("the suite has nothing left that skips itself", () => {
-  // This file is excluded from its own scan. It is the one test file that must contain the
-  // markers as literals - they are its search patterns - so scanning itself reports the scanner
-  // rather than a skipped suite, and the failure looks exactly like the thing it exists to catch.
   const testFiles = (): readonly string[] =>
-    trackedFiles().filter(
-      (path) => path.endsWith(".test.ts") && !path.endsWith("de-containerise.test.ts"),
-    );
+    trackedFiles().filter((path) => path.endsWith(".test.ts") && path !== SELF);
 
   void test("no suite marks itself skipped or todo", async () => {
     // The in-image toolchain assertions were removed rather than left to notice they were not in

@@ -53,27 +53,46 @@ export interface SnapshotSources {
    * from the pane and every subsequent chunk renders against the wrong state.
    */
   captureHistory: () => Promise<string>;
+  /**
+   * Whether the pane is on the alternate screen.
+   *
+   * Asked BEFORE the capture rather than filtered after it, because `capture-pane` in alternate
+   * -screen mode does not return nothing - it returns the alternate screen's contents, which is
+   * the TUI's current frame and not history at all. Sent as `history` the client would write a
+   * stale copy of vim above the live one.
+   */
+  alternateScreen: () => Promise<boolean>;
+  /**
+   * `refresh-client -R`: the live screen, as bytes that ARE the stream.
+   *
+   * Returns what tmux repainted and the stream's byte count after the repaint's last byte, which
+   * is the only `seq` a snapshot's `data` can honestly carry.
+   */
+  repaint: () => Promise<{ data: string; seq: number }>;
 }
 
 /**
- * Build a cold snapshot: scrollback first, then whatever the buffer holds.
+ * Build a cold snapshot: scrollback first, then a repaint of the live screen.
  *
- * The live screen is deliberately NOT `capture-pane`. In the running server it comes from
- * `refresh-client -R`, which makes tmux repaint into the stream we are already reading - same
- * bytes, same format, same counter, so `seq` is simply the count after the repaint's last byte.
- * A capture is *ahead* of headSeq rather than behind it, so the seq it should carry is
- * unanswerable.
+ * The live screen is deliberately NOT `capture-pane`, and it is not the ring buffer either. The
+ * buffer holds whatever output happens to be recent, so a session that has been sitting at a
+ * prompt for an hour paints as blank or as a fragment - the live screen is not in it. The repaint
+ * makes tmux draw the screen into the stream we are already reading: same bytes, same format,
+ * same counter, so `seq` is simply the count after the repaint's last byte. A capture is *ahead*
+ * of headSeq rather than behind it, so the seq it should carry is unanswerable.
  */
 export const buildSnapshot = async (sources: SnapshotSources): Promise<Snapshot> => {
-  const history = await sources.captureHistory();
+  const history = (await sources.alternateScreen()) ? "" : await sources.captureHistory();
+  // Last, so nothing between the repaint and the seq it is stamped with can move the counter.
+  const live = await sources.repaint();
   const snapshot: Snapshot = {
     epoch: sources.buffer.epoch,
-    seq: sources.buffer.headSeq,
-    data: sources.buffer.snapshot().toString("utf8"),
+    seq: live.seq,
+    data: live.data,
   };
   // Absent rather than empty when there is nothing: in alternate-screen mode there is no
-  // scrollback to capture at all, and that is correct rather than degraded - a full-screen TUI
-  // has no history to show.
+  // scrollback to show at all, and that is correct rather than degraded - a full-screen TUI has
+  // no history.
   if (history !== "") snapshot.history = history;
   return snapshot;
 };

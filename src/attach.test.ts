@@ -67,39 +67,89 @@ void describe("the epoch branch, which is the one that fails silently", () => {
 });
 
 void describe("building a cold snapshot", () => {
-  void test("carries scrollback, the live bytes, and the seq they end at", () => {
-    const buffer = filled("e1", "live screen");
-    return buildSnapshot({
+  // A repaint IS the stream: tmux writes it into the PTY the server is already reading, so it
+  // lands in the ring buffer like any other output and the seq it carries is the buffer's head
+  // afterwards. The fake does exactly that, because a fake that returned bytes without moving the
+  // counter would make the one property this frame rests on untestable.
+  const repainting = (buffer: RingBuffer, text: string) => async () => {
+    const seq = buffer.append(Buffer.from(text, "utf8"));
+    return await Promise.resolve({ data: text, seq });
+  };
+
+  void test("carries scrollback, the live bytes, and the seq they end at", async () => {
+    const buffer = filled("e1", "output from an hour ago");
+    const snapshot = await buildSnapshot({
       buffer,
       captureHistory: async () => await Promise.resolve("older lines\n"),
-    }).then((snapshot) => {
-      assert.equal(snapshot.epoch, "e1");
-      assert.equal(snapshot.seq, buffer.headSeq);
-      assert.equal(snapshot.history, "older lines\n");
-      assert.equal(snapshot.data, "live screen");
+      alternateScreen: async () => await Promise.resolve(false),
+      repaint: repainting(buffer, "live screen"),
     });
+    assert.equal(snapshot.epoch, "e1");
+    assert.equal(snapshot.seq, buffer.headSeq);
+    assert.equal(snapshot.history, "older lines\n");
+    assert.equal(snapshot.data, "live screen");
+  });
+
+  void test("data is the repaint, not whatever the ring buffer happens to hold", async () => {
+    // The defect this item exists for. A session that has been sitting at a prompt for an hour
+    // has a live screen that is nowhere in the buffer - the buffer holds the output from when it
+    // was last busy, or a fragment of it, or nothing. Sending that paints a stale screen and then
+    // renders every subsequent chunk against it.
+    const buffer = filled("e1", "a fragment of an hour-old build log");
+    const snapshot = await buildSnapshot({
+      buffer,
+      captureHistory: async () => await Promise.resolve(""),
+      alternateScreen: async () => await Promise.resolve(false),
+      repaint: repainting(buffer, "[H[2Jprompt$ "),
+    });
+    assert.equal(snapshot.data, "[H[2Jprompt$ ");
+    assert.equal(snapshot.data.includes("build log"), false);
+  });
+
+  void test("in alternate-screen mode history is absent, not captured", async () => {
+    // `capture-pane` there does not return nothing - it returns the alternate screen's contents,
+    // which is the TUI's current frame and not history at all. So the capture must not happen,
+    // rather than happen and be discarded.
+    const buffer = filled("e1", "");
+    let captured = false;
+    const snapshot = await buildSnapshot({
+      buffer,
+      captureHistory: async () => {
+        captured = true;
+        return await Promise.resolve("what vim currently looks like\n");
+      },
+      alternateScreen: async () => await Promise.resolve(true),
+      repaint: repainting(buffer, "vim, repainted"),
+    });
+    assert.equal("history" in snapshot, false);
+    assert.equal(captured, false);
+    assert.equal(snapshot.data, "vim, repainted");
   });
 
   void test("history is absent rather than empty when there is none", async () => {
-    // In alternate-screen mode there is no scrollback to capture at all. Absent is correct rather
-    // than degraded: a full-screen TUI has no history to show, and an empty string would make the
-    // client render a blank line it was never sent.
+    // An empty string would make the client render a blank line it was never sent.
+    const buffer = filled("e1", "");
     const snapshot = await buildSnapshot({
-      buffer: filled("e1", "tui"),
+      buffer,
       captureHistory: async () => await Promise.resolve(""),
+      alternateScreen: async () => await Promise.resolve(false),
+      repaint: repainting(buffer, "screen"),
     });
     assert.equal("history" in snapshot, false);
   });
 
-  void test("the seq is the buffer's head, so chunks at or below it can be discarded", async () => {
+  void test("the seq is the one the repaint reflects, so chunks at or below it are stale", async () => {
     const buffer = filled("e1", "abcdef");
     const snapshot = await buildSnapshot({
       buffer,
       captureHistory: async () => await Promise.resolve(""),
+      alternateScreen: async () => await Promise.resolve(false),
+      repaint: repainting(buffer, "0123"),
     });
-    assert.equal(snapshot.seq, 6);
+    assert.equal(snapshot.seq, 10);
+    assert.equal(snapshot.seq, buffer.headSeq);
     // Everything the snapshot already contains is at or below its seq; a client that discards
-    // those cannot double-render the tail.
+    // those cannot double-render the repaint.
     assert.ok(buffer.covers("e1", snapshot.seq));
     assert.equal(buffer.since(snapshot.seq).length, 0);
   });
