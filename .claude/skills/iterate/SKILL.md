@@ -65,8 +65,12 @@ first. Repo guardrails that are not negotiable: no emojis anywhere (code, commen
 messages, UI); six runtime dependencies or fewer, and the budget is already spent, so any new
 runtime dependency is a stop-and-ask rather than a judgement call; the status module and the wire
 protocol get tests from the day they are written; nothing is vendored from an upstream we do not
-maintain. Everything is developed and tested INSIDE the container - use
-\`docker compose exec -T app ...\`, never the host toolchain.
+maintain. Everything is developed and tested on the HOST toolchain - \`pnpm typecheck\`,
+\`pnpm lint\`, \`pnpm test\` directly. There is no container (plan 005 is superseded), so there is
+also nothing between what you run and the machine: the files the host executes - eslint.config.mjs,
+package.json scripts, pnpm-lock.yaml, src/**/*.test.ts, mise.toml, .claude/ - are yours to write
+and are executed by a person's Mac. Treat a change to any of them as a stop-and-ask, not a
+judgement call.
 
 Commit on the branch you are already on. Do NOT run \`git switch\`, \`git checkout -b\` or
 \`git branch\` - creating your own branch strands your work where the merge cannot see it, and
@@ -149,7 +153,7 @@ name, not just the happy path: those are the cases the design exists to prevent,
 where being wrong is invisible from the outside. Where a plan says a behaviour was observed
 rather than assumed, capture a fixture rather than hand-writing the expected payload.
 
-Run the suite in the container. If a test fails because the implementation is wrong, do NOT
+Run the suite with \`pnpm test\`. If a test fails because the implementation is wrong, do NOT
 change the implementation to match your test - report it as a blocker. Commit the tests.`,
   { label: 'qa', effort: 'low', schema: VERDICT },
 )
@@ -169,7 +173,7 @@ names that do not match what the plans call the same concept, and comments that 
 below them. Match the surrounding code's idiom and comment density rather than imposing a style.
 Do not add abstractions to remove duplication that appears twice - two is a coincidence.
 
-Run typecheck, lint and the full suite in the container. Commit.`,
+Run typecheck, lint and the full suite on the host. Commit.`,
   { label: 'refactorer', effort: 'low', schema: VERDICT },
 )
 
@@ -274,7 +278,7 @@ return {
    created `security/...` and committed there; the iteration then merged a branch missing every
    fix, printed success, and passed its tests because they ran before the switch. Merge or
    cherry-pick any stray branch back before going further.
-3. **Verify independently.** Run typecheck, lint and the suite yourself in the container, on the
+3. **Verify independently.** Run typecheck, lint and the suite yourself on the host, on the
    branch you are about to merge. A subagent reporting `ok: true` is a claim, not evidence, and a
    suite that passed on a different branch is not evidence either.
 4. **Demonstrate the "done when".** Actually run it. If the item says a session survives a server

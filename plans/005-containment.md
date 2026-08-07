@@ -1,5 +1,32 @@
 # 005 — Running in a container
 
+> **SUPERSEDED, 2026-08-07.** agentdeck runs directly on the Mac. There is no container, no bind
+> mounts, and no mount list. The deployment question is deliberately left open — this plan is kept
+> because its reasoning is still the best account of what the boundary was for, not because it
+> describes what runs.
+>
+> **What this removes.** Everything the section below calls *protected* is no longer protected:
+> the home directory, SSH keys, browser profiles, other repositories, keychain, system files. An
+> agent that runs `rm -rf ~` or a poisoned `curl | sh` now reaches the Mac. The blast radius was
+> "the union of the mount list"; it is now the user's account.
+>
+> **What this does not change.** Every hazard this plan describes as *inside* the boundary
+> survives unchanged, because it never depended on the container: same-uid between the server and
+> every session, so file mode buys nothing; one agent reaching another's `/proc/<pid>/environ` and
+> therefore its hook secret; `cwd` being where a session was pointed rather than a wall it is held
+> behind. The self-mount consequence generalises rather than lifts — the files the host executes
+> (`eslint.config.mjs`, `.prettierrc*`, `package.json` scripts, `pnpm-lock.yaml`,
+> `src/**/*.test.ts`, `mise.toml`, `.claude/`) are agent-writable as before, and there is no
+> longer a container between that and the machine. `src/containment.test.ts` tests that this stays
+> written down, and still applies.
+>
+> **What is now undecided.** The token file's home. The decision below — `AGENTDECK_TOKEN_FILE` on
+> a container-local volume, outside every bind mount — was reasoned from a boundary that no longer
+> exists. The requirement it served does survive: not at the root of a working tree an agent is
+> pointed at, where `grep -rn token .` ends with the token in a transcript on its way to a model
+> API. And with no container, the cwd allowlist in `src/cwds.ts` is the only boundary left rather
+> than the second of two. Neither has been re-decided; both are open.
+
 agentdeck runs in a container on the Mac (OrbStack, arm64). Repositories are bind-mounted in, so
 an agent that misbehaves damages the container rather than the machine.
 

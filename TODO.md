@@ -32,6 +32,24 @@ Mark an item `[x]` when its branch is merged.
       reports healthy; and blocking the event loop with a busy loop makes it report unhealthy
       within the configured window.
 
+- [ ] **`m0/de-containerise`** — agentdeck runs on the Mac directly; the container is gone and the
+      documents have to say so. Plan 005 already carries its superseded header. This item makes the
+      rest true: the Docker references in plans 001/003/004/006 and README, the healthcheck's
+      container half, and the three M0 items below — `m0/dockerfile-multistage` and
+      `m0/tmux-version` are struck as moot (no image to build; the host's tmux 3.7b is the one
+      plans 001/002 already cite as verified), while `m0/supervisor-crash-test` is **not** moot and
+      must be restated rather than struck: PID 1 was what brought node back, and on the host
+      nothing does yet. Out of scope, deliberately: where the token file lives and whether the cwd
+      allowlist is now the only boundary. Both are named as open in plan 005 and are a person's
+      call.
+      **Done when:** `grep -ril docker .` over tracked files returns only the retained Dockerfile,
+      docker-compose.yml and docker/, plus plan 005 and the deleted-items note that explain why
+      they are retained; `pnpm typecheck && pnpm lint && pnpm test` pass on the host with **no**
+      skipped tests, the in-image toolchain test having been removed rather than left to self-skip;
+      `scripts/healthcheck.mjs` runs on the host and fails when the server is down; and
+      `m0/supervisor-crash-test` names what supervises node on a Mac, or says plainly that nothing
+      does until `m4/launchd-watchdog`.
+
 - [ ] **`m0/dockerfile-multistage`** — builder stage with `python3`/`make`/`g++`, absent from the
       runtime stage. `node-pty` installs as `prebuild || node-gyp rebuild` and the fallback must
       be able to succeed.
