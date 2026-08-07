@@ -39,6 +39,14 @@ export const MAX_FRAMES_PER_WINDOW = 100;
 // socket carries the same kinds of message, so it gets the same number.
 export const MAX_FRAME_BYTES = 64 * 1024;
 
+/**
+ * How long a coalesced snapshot build may run before it is abandoned and evicted.
+ *
+ * Generous: a real capture-pane over deep scrollback is slow, and cutting a working build short
+ * costs the tab its history. What it exists to bound is the build that never settles at all.
+ */
+export const SNAPSHOT_TIMEOUT_MS = 15_000;
+
 export interface WsDeps {
   token: string;
   origin: string | undefined;
@@ -61,6 +69,13 @@ export interface WsDeps {
    * out; nothing in the server sets it.
    */
   pingIntervalMs?: number;
+  /**
+   * How long a coalesced snapshot build may run. Defaults to SNAPSHOT_TIMEOUT_MS.
+   *
+   * Present so the hung-capture test can run the same mechanism on a scale a test suite can wait
+   * out; nothing in the server sets it.
+   */
+  snapshotTimeoutMs?: number;
 }
 
 interface Client {
@@ -245,15 +260,32 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
           });
           client.attached.set(message.sessionId, off);
         }
-        const at = await sendPosition(
-          client,
-          message.sessionId,
-          stream,
-          message.haveEpoch,
-          message.haveSeq,
-        );
-        const held = queued ?? [];
-        queued = undefined;
+        // The flush and the listener's fate are unconditional. A snapshot that fails - a
+        // capture-pane past its 16 MB buffer is the ordinary way - used to leave `queued` an
+        // array forever: the listener stayed registered, every later byte was pushed into a list
+        // nothing drains, and `client.attached.has(sessionId)` meant a retry found the poisoned
+        // listener rather than registering a working one. The tab was silently blind for the life
+        // of the process, and the retained bytes were bounded by nothing.
+        let at: number | undefined;
+        let held: { epoch: string; seq: number; data: Buffer }[] = [];
+        try {
+          at = await sendPosition(
+            client,
+            message.sessionId,
+            stream,
+            message.haveEpoch,
+            message.haveSeq,
+          );
+        } catch (error) {
+          client.attached.get(message.sessionId)?.();
+          client.attached.delete(message.sessionId);
+          stream.detach(client.id);
+          applySize(message.sessionId);
+          throw error;
+        } finally {
+          held = queued ?? [];
+          queued = undefined;
+        }
         for (const chunk of held) {
           // Anything the snapshot already contains would be painted twice.
           if (at !== undefined && chunk.seq <= at) continue;
@@ -305,24 +337,55 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
   // meant a hundred concurrent snapshot builds - the loop the budget is supposed to stop, running
   // at full speed inside it. Callers that arrive while one build is in flight share its result;
   // each still sends its own frame.
-  const snapshots = new Map<string, Promise<Awaited<ReturnType<typeof buildSnapshot>>>>();
+  //
+  // Coalescing is only safe if every entry is guaranteed to leave the map. `Tmux.#exec` passes no
+  // execFile `timeout`, so a tmux server that stops answering is a capture-pane that never
+  // returns - the condition probeTmux already sets a timeout for. An entry evicted only by
+  // `.finally()` would then be pinned forever, and every later caller for that session, on every
+  // socket, would join the dead build and wait forever too: a permanently blank tab that reports
+  // itself attached. So the build is raced against a bound, and the bound evicts.
+  const snapshots = new Map<
+    string,
+    { generation: number; promise: Promise<Awaited<ReturnType<typeof buildSnapshot>>> }
+  >();
+  let nextGeneration = 0;
 
   const buildCoalescedSnapshot = async (
     sessionId: string,
     stream: SessionStream,
   ): Promise<Awaited<ReturnType<typeof buildSnapshot>>> => {
     const inFlight = snapshots.get(sessionId);
-    if (inFlight !== undefined) return await inFlight;
+    if (inFlight !== undefined) return await inFlight.promise;
+    const generation = nextGeneration++;
+    // A late settle from a build that already timed out must not delete a newer entry.
+    const evict = (): void => {
+      if (snapshots.get(sessionId)?.generation === generation) snapshots.delete(sessionId);
+    };
     const started = buildSnapshot({
       buffer: stream.buffer,
       captureHistory: async () => await deps.captureHistory(sessionId),
       alternateScreen: async () => await deps.isAlternateScreen(sessionId),
       repaint: async () => await deps.repaint(sessionId),
-    }).finally(() => {
-      snapshots.delete(sessionId);
     });
-    snapshots.set(sessionId, started);
-    return await started;
+    const limit = deps.snapshotTimeoutMs ?? SNAPSHOT_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const bounded = Promise.race([
+      started,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          evict();
+          reject(
+            new Error(`the snapshot for ${sessionId} did not finish within ${String(limit)}ms`),
+          );
+        }, limit);
+        timer.unref();
+      }),
+    ]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      evict();
+    });
+    snapshots.set(sessionId, { generation, promise: bounded });
+    return await bounded;
   };
 
   const sendPosition = async (

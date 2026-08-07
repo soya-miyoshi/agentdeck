@@ -279,7 +279,7 @@ void describe("refusals", () => {
 // they replace, and a second copy of the listen/open/collect dance is where the two halves drift.
 type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "repaint">;
 
-const ownServer = async (overrides: Partial<SnapshotDeps>) => {
+const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapshotTimeoutMs">>) => {
   const own = createServer();
   const ownStream = new SessionStream({ sessionId: "s1" });
   const close = attachWebSocketServer(own, {
@@ -302,12 +302,36 @@ const ownServer = async (overrides: Partial<SnapshotDeps>) => {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
+  // A second phone on the SAME server: a per-session cache that wedges is a defect other clients
+  // inherit, so a test for it needs a client that arrives after the first one broke.
+  const extras: WebSocket[] = [];
+  const connect = async () => {
+    const other = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
+    const otherFrames: Frame[] = [];
+    other.on("message", (raw: Buffer) =>
+      otherFrames.push(JSON.parse(raw.toString("utf8")) as Frame),
+    );
+    await new Promise<void>((resolve, reject) => {
+      other.once("open", resolve);
+      other.once("error", reject);
+    });
+    extras.push(other);
+    return {
+      socket: other,
+      frames: otherFrames,
+      attach: () =>
+        other.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 })),
+    };
+  };
+
   return {
     socket,
     frames,
     stream: ownStream,
+    connect,
     attach: () => socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 })),
     stop: () => {
+      for (const extra of extras) extra.close();
       socket.close();
       close();
       own.close();
@@ -384,6 +408,78 @@ void describe("a failing capture costs one message, not the process", () => {
       failing.socket.readyState,
       failing.socket.OPEN,
       "the socket did not survive the failure",
+    );
+    failing.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// Coalescing snapshots per session means one build's fate is every caller's fate, so both ways a
+// build can end badly - never settling, and failing - have to leave the session usable for the
+// next phone that attaches.
+void describe("a bad snapshot build is not inherited by the next client", () => {
+  void test("a capture that never returns is abandoned, and the next attach builds its own", async () => {
+    // A tmux server that stops answering is a capture-pane that never returns: Tmux.#exec passes
+    // no execFile timeout, and any process on this uid can stop the tmux server. Evicting the map
+    // entry only in `.finally()` pinned it forever, and every later attach joined the dead build.
+    let calls = 0;
+    const wedged = await ownServer({
+      snapshotTimeoutMs: 150,
+      captureHistory: async () => {
+        calls += 1;
+        if (calls === 1) return await new Promise<string>(() => undefined);
+        return await Promise.resolve("healthy scrollback\n");
+      },
+    });
+    wedged.attach();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(wedged.frames.at(-1)?.["t"], "error", "the hung build was never bounded");
+
+    const second = await wedged.connect();
+    second.attach();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const snapshot = second.frames.find((frame) => frame["t"] === "snapshot");
+    assert.ok(snapshot, "a fresh client inherited the wedged build instead of making its own");
+    assert.equal(snapshot["history"], "healthy scrollback\n");
+    wedged.stop();
+  });
+
+  void test("a failed snapshot detaches, so a retry gets a listener that forwards", async () => {
+    // The forwarding listener queues until the snapshot is away. When the snapshot failed, the
+    // queue was never released and the listener stayed registered - so the tab saw nothing ever
+    // again, every byte was retained in memory, and a retry found `client.attached` already set
+    // and registered nothing.
+    let calls = 0;
+    const failing = await ownServer({
+      captureHistory: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await Promise.resolve();
+          throw new Error("stdout maxBuffer length exceeded");
+        }
+        return await Promise.resolve("healthy scrollback\n");
+      },
+    });
+    failing.attach();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(failing.frames.at(-1)?.["t"], "error");
+
+    failing.frames.length = 0;
+    failing.attach();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(
+      failing.frames.some((frame) => frame["t"] === "snapshot"),
+      "the retry got no snapshot",
+    );
+
+    failing.stream.write(Buffer.from("after the retry"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const chunks = failing.frames.filter((frame) => frame["t"] === "chunk");
+    assert.equal(
+      chunks.filter((frame) => String(frame["data"]).includes("after the retry")).length,
+      1,
+      "the client is silently blind: the poisoned listener swallowed the bytes",
     );
     failing.stop();
   });
