@@ -114,9 +114,11 @@ tmux socket. That socket is `/tmp/tmux-<uid>/agentdeck` and every process runnin
 it, so without this a `tmux -L agentdeck new-session -d -c / -- /bin/sh` typed by anything at all
 becomes a tab your phone can type into.
 
-Two consequences worth knowing, both deliberate. A session you start by hand under the agentdeck
-tmux socket does **not** appear as a tab — agentdeck only knows a session's directory for the
-sessions it started. And adding a newly cloned repo means adding it to the allowlist and
+Two consequences worth knowing, both deliberate. A session on the agentdeck tmux socket becomes a
+tab iff its directory (the one tmux reports) is allowlisted **and** its name is exactly the one
+agentdeck would derive for that directory and a configured agent. What is excluded is a session
+whose name does not match — not a session agentdeck did not start, so a hand-started session
+under a matching name **is** listed and typed into. And adding a newly cloned repo means adding it to the allowlist and
 restarting the server. Sessions running at that moment survive it in most of the ways that matter:
 tmux keeps the processes alive, and the restarted server adopts them back — their directory comes
 from tmux and their agent from the session id, so they are listed, attachable and streamed again,

@@ -74,8 +74,10 @@ export class Hub {
    * typed input, having asked nobody. It is a filter on WHERE a session is, not a claim that
    * agentdeck started it - a same-uid process owns the socket either way.
    *
-   * The cost, accepted deliberately and written into plan 005 rather than left implicit: a
-   * session started by hand in tmux does not appear as a tab.
+   * The cost, accepted deliberately and written into plan 005 rather than left implicit: what is
+   * kept out is a session whose NAME is not `sessionId(its allowlisted path, a configured agent)`
+   * - not a session this server did not start. A hand-started session under a matching name is
+   * listed, streamed and typed into; plan 002 records that residual.
    *
    * A session this server created BEFORE a restart does appear again, because `Registry.list`
    * adopts it from tmux (see `Registry.#adopt`) - allowlist-checked against `#{session_path}` like

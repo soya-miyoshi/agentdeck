@@ -62,6 +62,33 @@ void describe("the cwd allowlist", () => {
   });
 });
 
+void describe("the prose states the exclusion by name, not by provenance", () => {
+  // `Registry.#adopt` lists any session whose `#{session_path}` is allowlisted AND whose name is
+  // `sessionId(that path, a configured agent)`. Provenance stopped being the criterion there, so a
+  // document that still says a hand-started session cannot be a tab reads the risk as covered.
+  const claims = [
+    /agentdeck only knows a session's directory for the\s+sessions it started/,
+    /start by hand[^.]*does \*\*not\*\* appear as a tab/,
+    /session started by\s+hand under that socket does not appear as a tab/,
+    /session started by hand in tmux does not appear as a tab/,
+  ];
+
+  const states: Record<string, RegExp> = {
+    "../README.md": /its name is exactly the one\nagentdeck would derive/,
+    "../plans/005-containment.md":
+      /its name equals\n> `sessionId\(that path, a configured agent\)`/,
+    "./hub.ts": /whose NAME is not `sessionId\(its allowlisted path, a configured agent\)`/,
+  };
+
+  for (const [file, states_] of Object.entries(states)) {
+    void test(`${file} does not claim a hand-started session can never be listed`, async () => {
+      const text = await readFile(new URL(file, import.meta.url), "utf8");
+      for (const claim of claims) assert.doesNotMatch(text, claim);
+      assert.match(text, states_, "it should state the exclusion by name instead");
+    });
+  }
+});
+
 void describe("the allowlist is a boundary, not only a check on POST /api/sessions", () => {
   void test("a session whose directory is unknown is never allowed", () => {
     // What a session started by hand on the tmux socket reports, and what one that outlived the
