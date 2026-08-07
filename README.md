@@ -177,7 +177,16 @@ pnpm dev
 ```
 
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
-your session appears. Type in it: the keystrokes go out as `input` frames, and what paints back is
+your session appears.
+
+Two things about the dev flow specifically, neither of which applies once `m2/serve-client` makes
+the app and the API one origin. **`AGENTDECK_ORIGIN` must be unset for this**, or set to the Vite
+origin: the proxy leaves the browser's `Origin` header alone, so a server configured with the
+`https://<host>.ts.net` origin answers 403 to the upgrade and to every `/api` call — and the client
+cannot tell that from a network failure, so it reconnects forever instead of saying so. And the
+token you paste is stored in `localStorage`, which is keyed by origin, so the dev server is pinned
+to port 7778 rather than Vite's shared default — on 5173 every other Vite project on the machine
+would share an origin with the credential that starts sessions in every allowed repository. Type in it: the keystrokes go out as `input` frames, and what paints back is
 the agent's own output arriving as `chunk`s — nothing is echoed locally, because the agent may be
 in a mode that transforms or refuses what you typed.
 

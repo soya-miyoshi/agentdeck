@@ -13,6 +13,13 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    // Not Vite's default 5173, and that is a credential decision rather than a preference. The
+    // token is kept in `localStorage`, which is keyed by ORIGIN - so on the default port every
+    // other Vite project on this machine shares an origin with agentdeck, and anything running in
+    // one of those pages can read a token that starts sessions in every allowed repository, kills
+    // live ones, and attaches to every other agent's terminal.
+    port: 7778,
+    strictPort: true,
     // Dev only. In production the app and the API are the same origin, which is what the server's
     // Origin check assumes.
     proxy: {
