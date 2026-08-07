@@ -41,16 +41,15 @@ void describe("the cwd allowlist", () => {
   });
 
   void test("the refusal does not price the restart at a reconnect", () => {
-    // The registry keeps cwd, agent and the per-session hook secret in memory only, and the
-    // allowlist is now matched on that cwd - so a session that survives the restart is not listed
-    // and not streamed at all. A refusal that says the restart costs "a reconnect" is what makes
-    // the losing action sound routine.
+    // The restart no longer costs the session: it is adopted back from tmux. What it does cost is
+    // the per-session hook secret, which is unrecoverable and cannot be handed to a process
+    // already running - so that session never says it needs you again until its agent restarts.
+    // A refusal that says the restart costs "a reconnect" makes the losing action sound routine.
     const message = list.refusal("/workspace/newly-cloned");
     assert.doesNotMatch(message, /costs a reconnect/);
-    assert.match(message, /waiting detection do not survive/);
-    assert.match(message, /stop being listed and stop being streamed/);
-    // And where the agent still is, because it is still running and reachable by hand.
-    assert.match(message, /tmux -L agentdeck attach/);
+    assert.match(message, /hook\s+secret does not survive/);
+    assert.match(message, /waiting detection stays dead/);
+    assert.match(message, /until that agent itself is restarted/);
   });
 
   void test("the README does not price the restart at a reconnect either", async () => {
@@ -58,9 +57,36 @@ void describe("the cwd allowlist", () => {
     // restart sounds routine. Prose is where this regressed once already.
     const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
     assert.doesNotMatch(readme, /costs a\s+reconnect/);
-    assert.match(readme, /waiting detection do not survive/);
-    assert.match(readme, /stops being listed and stops being streamed/);
+    assert.match(readme, /hook secret lives in memory/);
+    assert.match(readme, /never `waiting` again/);
   });
+});
+
+void describe("the prose states the exclusion by name, not by provenance", () => {
+  // `Registry.#adopt` lists any session whose `#{session_path}` is allowlisted AND whose name is
+  // `sessionId(that path, a configured agent)`. Provenance stopped being the criterion there, so a
+  // document that still says a hand-started session cannot be a tab reads the risk as covered.
+  const claims = [
+    /agentdeck only knows a session's directory for the\s+sessions it started/,
+    /start by hand[^.]*does \*\*not\*\* appear as a tab/,
+    /session started by\s+hand under that socket does not appear as a tab/,
+    /session started by hand in tmux does not appear as a tab/,
+  ];
+
+  const states: Record<string, RegExp> = {
+    "../README.md": /its name is exactly the one\nagentdeck would derive/,
+    "../plans/005-containment.md":
+      /its name equals\n> `sessionId\(that path, a configured agent\)`/,
+    "./hub.ts": /whose NAME is not `sessionId\(its allowlisted path, a configured agent\)`/,
+  };
+
+  for (const [file, states_] of Object.entries(states)) {
+    void test(`${file} does not claim a hand-started session can never be listed`, async () => {
+      const text = await readFile(new URL(file, import.meta.url), "utf8");
+      for (const claim of claims) assert.doesNotMatch(text, claim);
+      assert.match(text, states_, "it should state the exclusion by name instead");
+    });
+  }
 });
 
 void describe("the allowlist is a boundary, not only a check on POST /api/sessions", () => {

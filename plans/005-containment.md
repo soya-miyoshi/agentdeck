@@ -50,12 +50,20 @@
 > knowable things, so anything running as this user could kill a session and recreate it under the
 > same name with `-c /`. `DELETE /api/sessions/:id` goes through the same filtered list, so a
 > session that is not listed is not killable either, and every tmux `-t` target is `=<id>` so that
-> a stale or mistyped id misses instead of matching by prefix or fnmatch. **The accepted cost, written here rather than left implicit:** a session started by
-> hand under that socket does not appear as a tab, because agentdeck only knows the directory of
-> the sessions it started; and a session that outlives a server restart stops being listed and
-> streamed for the same reason, one step worse than the metadata loss `CwdAllowlist.refusal`
-> already prices. The agent keeps running either way and is reachable with
-> `tmux -L agentdeck attach -t <id>`; recreating the session makes it a tab again.
+> a stale or mistyped id misses instead of matching by prefix or fnmatch. **What is excluded, stated by NAME rather than by provenance:** a session
+> on that socket becomes a tab iff its `#{session_path}` is allowlisted AND its name equals
+> `sessionId(that path, a configured agent)`. So what is kept out is a session whose name is not
+> one this server would derive - NOT a session this server did not start. A session started by
+> hand under a name that does match is listed, streamed and typed into, and `sessionId` is a pure
+> function of two values anything can read from `GET /api/cwds` and `GET /api/agents`; plan 002
+> records that residual. A hand-started session under any other name keeps running and is
+> reachable with `tmux -L agentdeck attach -t <id>`.
+> **Narrowed 2026-08-08 (`m2/session-metadata-survives-restart`):** a session that outlives a
+> server restart IS listed and streamed again — the restarted server adopts it, taking its cwd
+> from `#{session_path}` and its agent from the id, both checked against this same allowlist, so
+> adoption widens what may be listed and not where. What it cannot recover is the per-session hook
+> secret, so an adopted session never reports `waiting` again until its agent is restarted, and it
+> says so on the wire (plan 002).
 >
 > **A session's environment is built, not inherited, decided 2026-08-07 (m0/host-boundary).** The
 > tmux server used to be a child of whichever shell ran `pnpm start`, and every pane inherited

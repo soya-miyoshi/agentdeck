@@ -877,3 +877,57 @@ alternative, a blind silence timer, would make every idle tab reconnect in a loo
   captive portal both read as "token still good" and retry forever. Two audits have now landed on
   it. `m2/reconnect` owns it and is blocked on `m2/session-metadata-survives-restart`.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/session-metadata-survives-restart - final whole-codebase pass - 2026-08-08
+
+A session that outlives the server is adopted again rather than left invisible: `#{session_path}`
+is the cwd, and the id is `sessionId(cwd, agent)`, so the agent is whichever configured profile
+reproduces the id from that path. Nothing is written down - no database, no sidecar - and the hook
+secret is deliberately NOT recovered, because it cannot be: the running agent still holds the old
+one, and a re-minted secret would never reach it. `waitingDetectionLost: true` says so on the wire.
+
+**Verified by hand against a real server and real tmux:** created a session, `kill -9`, restarted -
+`GET /api/sessions` lists it with the right cwd and agent and the lost-detection flag; a session
+planted OUTSIDE the allowlist while the server was down is NOT adopted, so `m0/host-boundary`'s
+boundary holds.
+
+### Findings
+
+- [medium] src/registry.ts:291 - **Adoption promotes a forged session name to a fully streamed,
+  typed-into tab.** Before this branch `list()` required a `#meta` entry and only `create()` wrote
+  one, so a session planted on the socket was dropped. Now the metadata is earned from (path, id)
+  alone, and the id is a pure function of two values any client reads from `GET /api/cwds` and
+  `GET /api/agents`. **Verified by hand:** with the real session killed, a session planted under
+  the derived name at an allowlisted path became a tab, and the pane the phone would have streamed
+  read `I_AM_NOT_YOUR_AGENT`. The operator's keystrokes would go to it. Marginal over what a
+  same-uid attacker already has - `send-keys` into the real session, `capture-pane` off it - but a
+  DIFFERENT primitive: impersonation of a trusted tab rather than interference with a real one.
+  Status: **ACCEPTED WITH A REASON, and it is the most consequential judgement on this branch.**
+  Provenance needs something written down and plan 001 forecloses it; the code already stated the
+  weaker claim - "a filter on where a session is, not a claim that agentdeck started it". The
+  alternative is leaving the tab blank after every restart, which is the gap this item exists to
+  close. Mitigated by visibility rather than prevention: every adoption is logged, so an adoption
+  outside the seconds after a restart is visible somewhere other than in a tab.
+
+- [medium] src/registry.ts:328 - `reap()` cannot reach an adopted corpse, so an exited pane and its
+  full scrollback stay in the tmux server's memory indefinitely, readable by any same-uid process
+  via `capture-pane`. Status: OPEN, and it is a real tradeoff rather than an oversight - 501917e
+  made it deliberate, because the corpse is what holds the exit report the tab shows. Bounding it
+  by age is the obvious answer and the bound is a number nobody has chosen. Worth an item.
+
+- [medium] src/registry.ts:249 - `waitingDetectionLost` is set on the wire and no client reads it.
+  `m3/tab-strip` owns showing it and has not landed. Until then an adopted session comes back
+  looking like a healthy tab that will never report `waiting` again - so after any restart,
+  including the one `CwdAllowlist.refusal()` instructs the operator to perform to add a repo, an
+  agent blocking on a permission prompt sits there with nothing on screen saying its prompt
+  detection is dead. Status: OPEN, and it is a dependency `m3/tab-strip` must honour rather than a
+  defect here: the API says it, the strip does not yet.
+
+### Open after this iteration
+
+- **An adopted tab cannot be proved to be ours.** Accepted above; the log is the mitigation.
+- **`waitingDetectionLost` has no reader** until `m3/tab-strip`.
+- **Exited panes are retained indefinitely** once adopted.
+- **Same-uid**, unchanged, and this branch is the clearest illustration of it so far.
