@@ -708,3 +708,75 @@ of them breaks an ordinary user action.
 - **No execFile timeout on the tmux path**, so a wedged tmux accumulates children.
 - **The repaint still targets every client**, carried from `m2/snapshot`.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/client-minimal - final whole-codebase pass - 2026-08-08
+
+The client existed; the gap was evidence and a shipped defect. `src/client/end-to-end.test.ts`
+drives the real client modules - `browserSocket`, `Connection`, `stream-position` - against a
+spawned `src/server.ts`, the real tmux binary, a real pty and a real `/bin/sh` over a real
+WebSocket, and names the two pieces it cannot cover without a DOM. The README carries the manual
+recipe beside it.
+
+The paste defect carried over from `m2/resync-ping` is fixed by chunking client-side: the client
+never sends a frame the receiver would refuse, so an ordinary paste no longer closes the transport.
+
+Six of the audit's findings were introduced by this branch. Five are fixed here; the sixth is a
+property of a path this branch made reachable rather than of code it wrote.
+
+### Findings
+
+- [medium] src/client/connection.ts:236 - `input()` stopped going through `#send` and lost the rule
+  `#send` documents: input typed while disconnected is DROPPED. The queue survived from the socket
+  close to the next open - a token check with no timeout plus a backoff delay, unbounded on a
+  backgrounded tab where timers are throttled - and was then written to the pty at once. A "y"
+  answering a question no longer on screen; two fragments of a command line concatenated into one
+  nobody typed. README.md tells the user to exercise exactly this path. Status: FIXED. Holding
+  across the CONNECTING window is what `#canSend` was written for and still happens; holding across
+  a reconnect does not, and the user is told what was dropped. Test fails without the fix.
+
+- [medium] src/client/connection.ts:313 - `#releasedGroups` only emptied when the queue fully
+  drained, and the producer is not the keyboard: xterm emits `onData` for the replies it owes to
+  escape sequences the AGENT wrote, which is the case `MAX_PENDING_INPUT_BYTES` exists for. A loop
+  on `printf '\e[6n'` added ~300k ids a second that were never removed, so the byte bound held at
+  8 MiB while the Set ate the tab - the outcome the bound was added to prevent, reached by the same
+  input. Status: FIXED. It is a set of session ids now, which is all the warning ever read, and the
+  per-call group bookkeeping is gone rather than left written-but-unread.
+
+- [medium] src/client/connection.ts:280 - `#overflowed` was cleared only on close, so it was once
+  per SOCKET rather than the once per overflow its message claims. A queue that overflowed, drained
+  and overflowed again dropped input in silence, and what is dropped is the tail of what is in
+  flight while everything queued after it is still sent - so the pty receives a hole and then
+  resumes. Status: FIXED, cleared when the queue drains. Test fails without the fix.
+
+- [medium] README.md:179 - The documented dev flow stored the bearer token in `localStorage` under
+  Vite's default `http://localhost:5173`, an origin shared with every other Vite project on the
+  machine - and that token starts sessions in every allowed repository, kills live ones and
+  attaches to every other agent's terminal. Status: FIXED. The dev server is pinned to 7778 with
+  `strictPort`, and the README says why.
+
+- [medium] README.md:173 - The documented dev flow cannot work with `AGENTDECK_ORIGIN` set. The
+  proxy leaves the browser's `Origin` intact, so a server configured with the tailnet origin
+  answers 403 to the upgrade and to every `/api` call; `verifyToken` treats anything that is not a
+  401 as a good token, so the client reads it as a network failure and reconnects forever. Status:
+  FIXED in the README. **The client half is OPEN:** `api.ts` should raise 403 as its own condition
+  rather than folding it into "token still good".
+
+- [medium] src/pty.ts:74 - An ordinary supported paste now sustains ~2.4 MB/s into a write path
+  with no backpressure at any layer. Status: OPEN. This is not code this branch wrote - it is the
+  path chunking made reachable at that rate, because before it the socket simply closed. It wants
+  measuring before it is designed for.
+
+- [low] src/client/connection.ts:332, :71, :83 and src/client/end-to-end.test.ts:121 - a
+  pathological session id makes the frame `room` negative; the window budget counts only input
+  frames, so attach/resize/resync can still exceed the server's; `MAX_PENDING_INPUT_BYTES`
+  undercounts retention because queued pieces are substrings that keep the whole paste alive; the
+  e2e cleanup is SIGKILL plus a best-effort kill-server. All Status: OPEN.
+
+### Open after this iteration
+
+- **No backpressure on the pty write path**, now reachable at paste speed.
+- **`api.ts` cannot see a 403**, so an origin misconfiguration is indistinguishable from a bad
+  network. `m2/reconnect` owns the ladder and is the natural home for it.
+- **Same-uid**, unchanged.
