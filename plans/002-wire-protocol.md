@@ -179,6 +179,7 @@ Server to client:
 { t: "state",    sessionId, state, exitCode? }
 { t: "sessions", sessions }               // list changed: created, exited, renamed
 { t: "error",    sessionId?, message }    // written for a person to read
+{ t: "ping",     intervalMs }             // the heartbeat, on a timer, whatever the agent is doing
 ```
 
 ### Rules
@@ -256,8 +257,44 @@ leaves a connection that is dead at both ends and closed at neither; nothing bel
 errors, and the strip shows a status frozen at whatever it last said. That is a confidently wrong
 status, which is the one output this design refuses — and the reconnection ladder below never runs,
 because from the client's side nothing has gone wrong. The server pings every 15 seconds and closes
-a connection that has not ponged within 30; a client that has seen no traffic for two intervals
-reconnects rather than waiting to be told.
+a connection that has not ponged within 30.
+
+**The client cannot use that ping, which is why there is a second one.** A WebSocket ping is a
+control frame; the browser answers it inside the socket implementation, below the JavaScript API,
+and no event of any kind reaches the page. So the original rule here — "a client that has seen no
+traffic for two intervals reconnects" — named a signal the client is structurally unable to
+observe, and was not implementable as written. The naive repair is worse than the hole: a blind
+silence timer cannot tell a dead socket from an idle agent, and an idle agent legitimately writes
+nothing for minutes, so every quiet tab would reconnect in a loop.
+
+The signal therefore has to be something the server sends **on a timer regardless of agent
+activity**, and it is an ordinary data frame:
+
+```ts
+{ t: "ping", intervalMs }
+```
+
+sent on the same timer as the WebSocket ping, to every open socket, whether or not that socket's
+sessions produced a byte. A client that has received no frame of any type for two intervals treats
+the socket as gone and runs the reconnection ladder below; a tab whose agent is merely quiet keeps
+receiving heartbeats and is never reported as dead. That is the whole distinction the client was
+previously missing: silence means *nothing is arriving*, not *the agent said nothing*.
+
+`state` on a timer was the other candidate and is rejected. `state` is per session, so an unattached
+socket gets no heartbeat at all; it is defined as pushed-on-change (below), and a client that has to
+ignore repeats of a value that did not change is a client re-deriving "did anything arrive" from a
+field that is not about arrival; and it would make the strip's status and the socket's liveness the
+same message, which is exactly the confusion — a status that stopped changing read as a dead
+socket — that this section exists to prevent.
+
+`intervalMs` is on the frame rather than compiled into the client so that the client's bound is the
+server's number. A constant duplicated on both sides is a second number free to drift.
+
+**The heartbeat is outside both frame budgets.** The per-socket budget on the server counts frames
+*received* from a client, so a server-sent heartbeat cannot consume it or be dropped by it. The
+client answers the heartbeat with nothing at all — the frame having arrived is the proof — so it
+never touches the client's per-window `input` allowance either, and an idle tab spends none of a
+user's typing budget on staying alive.
 
 **Resize is the smallest attached client's, not the newest.** One tmux client backs N browser
 clients, so an `attach` or `resize` from a phone that was just unlocked would otherwise reflow

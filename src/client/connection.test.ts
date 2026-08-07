@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { ServerMessage } from "../protocol.ts";
-import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW } from "../ws.ts";
+import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW, PING_INTERVAL_MS } from "../ws.ts";
 import {
   Connection,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_GRACE_INTERVALS,
+  INPUT_WINDOW_MS,
   MAX_INPUT_FRAME_BYTES,
   MAX_INPUT_FRAMES_PER_WINDOW,
   type ConnectionEvents,
@@ -19,9 +22,17 @@ interface Harness {
   connection: Connection;
   sockets: FakeSocket[];
   last: () => FakeSocket;
-  /** Pending reconnects, newest last. Each is [delayMs, run]. */
+  /** Every timer the connection has outstanding: reconnects, input windows, silence watchdogs. */
   timers: { delayMs: number; run: () => void }[];
   fire: () => void;
+  /**
+   * Whether an INPUT WINDOW is still pending, which is what a drain loop is waiting on.
+   *
+   * Not "any timer": an open connection always has the heartbeat-silence watchdog outstanding, so
+   * a loop that drained until the timer list emptied would go on to fire the watchdog, drop the
+   * socket, and then read its assertions off a fresh socket that had sent nothing.
+   */
+  pendingWindow: () => boolean;
   statuses: ConnectionStatus[];
   rendered: { sessionId: string; data: string; cleared: boolean }[];
   errors: string[];
@@ -47,11 +58,20 @@ const harness = (): Harness => {
       return socket;
     },
     timers: [],
+    // The SOONEST timer, not the first one scheduled. Since the client watches for heartbeat
+    // silence, an open connection always has a long timer outstanding, and popping the queue in
+    // order fired that 30-second watchdog ahead of the 1-second input window sitting behind it -
+    // which is not an ordering any clock produces.
     fire: () => {
-      const timer = state.timers.shift();
-      assert.ok(timer, "expected a scheduled reconnect");
+      const soonest = Math.min(...state.timers.map((timer) => timer.delayMs));
+      const [timer] = state.timers.splice(
+        state.timers.findIndex((candidate) => candidate.delayMs === soonest),
+        1,
+      );
+      assert.ok(timer, "expected a scheduled timer");
       timer.run();
     },
+    pendingWindow: () => state.timers.some((timer) => timer.delayMs === INPUT_WINDOW_MS),
     statuses: [],
     rendered: [],
     errors: [],
@@ -91,6 +111,9 @@ const harness = (): Harness => {
         };
       },
       verifyToken: () => Promise.resolve(state.tokenAccepted),
+      // The ladder's jitter pinned to its top, so these tests still assert the delays the ladder
+      // is designed around rather than a draw. The spread itself is tested in backoff.test.ts.
+      random: () => 1,
       schedule: (run, delayMs) => {
         const timer = { delayMs, run };
         state.timers.push(timer);
@@ -278,7 +301,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     );
 
     let windows = 0;
-    while (h.timers.length > 0) {
+    while (h.pendingWindow()) {
       const before = released().length;
       h.fire();
       windows += 1;
@@ -305,7 +328,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
       sentMessages(h.last()).filter((message) => message["t"] === "input");
     assert.ok(released().length <= MAX_INPUT_FRAMES_PER_WINDOW);
     let windows = 0;
-    while (h.timers.length > 0) {
+    while (h.pendingWindow()) {
       const before = released().length;
       h.fire();
       windows += 1;
@@ -333,7 +356,7 @@ void describe("a paste is one onData event and may be larger than a frame", () =
     const released = (): Record<string, unknown>[] =>
       sentMessages(h.last()).filter((message) => message["t"] === "input");
     let windows = 0;
-    while (h.timers.length > 0 && !joined(released()).endsWith("\u0003")) {
+    while (h.pendingWindow() && !joined(released()).endsWith("\u0003")) {
       h.fire();
       windows += 1;
       assert.ok(windows < 40, "the interrupt was still queued a second later");
@@ -582,9 +605,293 @@ void describe("what is typed while disconnected", () => {
     // Drain the queue the way the window timer does, then overflow again. Each fired window
     // schedules the next while anything is still queued, so this runs until nothing is pending
     // rather than a fixed number of times.
-    for (let i = 0; i < 2000 && h.timers.length > 0; i++) h.fire();
+    for (let i = 0; i < 2000 && h.pendingWindow(); i++) h.fire();
     flood();
     const second = h.errors.filter((m) => /dropped/.test(m)).length;
     assert.ok(second > first, "a later overflow dropped input silently");
+  });
+});
+
+// THE CLIENT-VISIBLE HEARTBEAT, at the level where the clock is fake.
+//
+// src/half-open.test.ts proves the real thing end to end, over a genuinely half-open socket, and
+// that is the acceptance test. It cannot reach these cases: a real run only ever fires the
+// watchdog at the one deadline the server's interval sets, so nothing there distinguishes "the
+// bound came from the frame" from "the bound was compiled in and happened to match", and nothing
+// there can hold a socket at exactly the moment before the deadline to show it is the ping that
+// pushed the deadline out. The failure this design refuses - a confidently wrong tab - lives in
+// that distinction.
+
+/** The pending silence watchdogs, told apart from the input window by their delay. */
+const watchdogs = (h: Harness): { delayMs: number; run: () => void }[] =>
+  h.timers.filter(
+    (timer) => timer.delayMs === DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS,
+  );
+
+const openHarness = (): Harness => {
+  const h = harness();
+  h.connection.start();
+  h.last().handlers.opened();
+  return h;
+};
+
+void describe("the client-visible heartbeat", () => {
+  void test("the pre-first-frame default is the server's interval, not a second number", () => {
+    // The window before the first heartbeat lands is timed against a constant on this side, and a
+    // constant duplicated across the wire is a number free to drift. Plan 002 puts `intervalMs` on
+    // the frame for everything after; this asserts the one value the frame cannot cover.
+    assert.equal(DEFAULT_HEARTBEAT_INTERVAL_MS, PING_INTERVAL_MS);
+    assert.equal(HEARTBEAT_GRACE_INTERVALS, 2);
+  });
+
+  void test("an open socket is watched from the moment it opens", () => {
+    // Not from the first heartbeat: a socket that opens and goes silent immediately - the proxy
+    // froze during the handshake - would otherwise be watched by nothing at all.
+    const h = openHarness();
+    assert.equal(watchdogs(h).length, 1);
+  });
+
+  void test("two intervals of silence drop the socket and run the ladder", () => {
+    // The half-open case, in miniature. Nothing closes, nothing errors; this timer is the only
+    // thing that can notice, and what it must produce is a reconnect rather than a status change.
+    const h = openHarness();
+    assert.equal(watchdogs(h).length, 1);
+    h.fire();
+    assert.equal(h.last().closed, true, "the dead socket was left open");
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the silence bound fired without starting the reconnection ladder",
+    );
+  });
+
+  void test("the bound is the interval the server stated, not the one compiled in", () => {
+    const h = openHarness();
+    h.last().deliver({ t: "ping", intervalMs: 4000 });
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [8000],
+      "the client kept timing against its own constant after the server named its interval",
+    );
+
+    // And it follows a server that changes its mind, rather than holding the first value it saw.
+    h.last().deliver({ t: "ping", intervalMs: 1000 });
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [2000],
+    );
+  });
+
+  void test("a tab whose agent says nothing for hours is never reported as dead", () => {
+    // THE FAILURE MODE THIS DESIGN EXISTS TO PREVENT, and the one a blind silence timer causes.
+    // This connection receives no snapshot, no chunk and no state for the whole test - the agent
+    // is simply idle - and every heartbeat must retire the outstanding deadline rather than
+    // letting it stand. One watchdog at a time, replaced each beat, never reached.
+    const h = openHarness();
+    let previous = watchdogs(h)[0];
+    for (let beat = 0; beat < 200; beat++) {
+      h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+      const pending = watchdogs(h);
+      assert.equal(pending.length, 1, `beat ${String(beat)} left ${String(pending.length)} bounds`);
+      assert.notEqual(pending[0], previous, "the heartbeat did not push the deadline out");
+      previous = pending[0];
+    }
+    assert.equal(h.sockets.length, 1, "an idle tab reconnected");
+    assert.equal(h.last().closed, false);
+    assert.deepEqual(
+      h.statuses,
+      ["connecting", "open"],
+      "an idle tab was reported as anything else",
+    );
+    assert.deepEqual(h.rendered, [], "the tab was not idle, so this proves nothing");
+  });
+
+  void test("a nonsense stated interval falls back to the default rather than bricking the tab", () => {
+    // `#receive` runs no parser over a server frame, so `intervalMs` is a wire value used as a
+    // control parameter. Absent, zero, negative, NaN or overflowing, an unchecked value arms a
+    // bound that expires on the next tick - and because the interval is Connection state rather
+    // than socket state, the same instantly-expiring bound is re-armed on every replacement
+    // socket, so one bad frame reconnects forever against a healthy server.
+    const bad: unknown[] = [undefined, 0, -1, NaN, Infinity, 1e308, "15000", null, 1, 1e9];
+    for (const intervalMs of bad) {
+      const h = openHarness();
+      h.last().deliver({ t: "ping", intervalMs } as unknown as ServerMessage);
+      assert.deepEqual(
+        h.timers.map((timer) => timer.delayMs),
+        [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+        `intervalMs ${String(intervalMs)} armed a bound the default does not cover`,
+      );
+
+      // And the socket survives the next tick of the clock the ping was supposed to reset: the
+      // pending bound is the default one, so firing it is the first thing that touches the socket.
+      assert.equal(h.sockets.length, 1, `intervalMs ${String(intervalMs)} dropped a live socket`);
+      assert.equal(h.last().closed, false);
+      assert.deepEqual(h.statuses, ["connecting", "open"]);
+    }
+  });
+
+  void test("a poisoned interval does not survive into the next socket", () => {
+    // The permanent half of the failure: a replacement socket arms its bound from Connection
+    // state, so a value that was never clamped would outlive the socket that carried it. Only a
+    // page reload clears that, and the tab shows "Reconnecting..." the whole time.
+    const h = openHarness();
+    h.last().deliver({ t: "ping", intervalMs: 0 } as unknown as ServerMessage);
+    h.last().handlers.closed();
+    h.fire(); // the reconnection backoff
+    h.last().handlers.opened();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_GRACE_INTERVALS],
+      "the replacement socket inherited an instantly-expiring bound",
+    );
+  });
+
+  void test("the heartbeat costs the tab nothing to answer", () => {
+    // It is answered with nothing at all - the frame having arrived is the whole proof - so an
+    // idle tab spends none of a user's typing allowance on staying alive.
+    const h = openHarness();
+    h.connection.attach("a", 80, 24);
+    const before = h.last().sent.length;
+    for (let i = 0; i < 100; i++) h.last().deliver({ t: "ping", intervalMs: 15_000 });
+    assert.equal(h.last().sent.length, before, "the client replied to a heartbeat");
+  });
+
+  void test("heartbeats do not spend the per-window input allowance", () => {
+    // The client's budget counts input frames only. Were the heartbeat inside it, an idle tab
+    // would arrive at the keyboard with its allowance already gone - the starvation direction.
+    const h = openHarness();
+    for (let i = 0; i < 100; i++) h.last().deliver({ t: "ping", intervalMs: 15_000 });
+    for (let i = 0; i < MAX_INPUT_FRAMES_PER_WINDOW; i++) h.connection.input("a", "x");
+    const released = sentMessages(h.last()).filter((message) => message["t"] === "input");
+    assert.equal(
+      released.length,
+      MAX_INPUT_FRAMES_PER_WINDOW,
+      "heartbeats ate part of a window the user had not typed into",
+    );
+  });
+
+  void test("a socket dropped by the bound and later closed for real reconnects once", () => {
+    // A half-open socket does eventually get an RST, minutes after the watchdog gave up on it.
+    // Two runs of the ladder for one connection is two sockets racing, and the loser's frames
+    // arrive on a connection nothing is reading.
+    const h = openHarness();
+    const first = h.last();
+    h.fire();
+    assert.equal(h.timers.length, 1);
+    first.handlers.closed();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the late close ran the ladder a second time",
+    );
+  });
+
+  void test("stopping stops the watching, so a closed tab does not resurrect itself", () => {
+    const h = openHarness();
+    h.connection.stop();
+    assert.deepEqual(h.timers, [], "a stopped connection was still being timed");
+  });
+
+  void test("a socket the bound gave up on can no longer speak for the connection", () => {
+    // `close()` only STARTS the closing handshake, so the browser goes on dispatching frames it had
+    // already buffered for the abandoned socket. Its handlers are wired to this same Connection, and
+    // a snapshot repaints unconditionally by design - so a 30-second-old screen would land on top of
+    // the live one and rewind the tracked position, costing a resync and a second cold snapshot.
+    const h = openHarness();
+    const dead = h.last();
+    h.connection.attach("a", 80, 24);
+    dead.deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 100, data: "OLD" });
+    h.fire();
+    h.fire();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 500, data: "CURRENT" });
+
+    const watched = watchdogs(h)[0];
+    dead.deliver({ t: "snapshot", sessionId: "a", epoch: "e1", seq: 120, data: "STALE" });
+    assert.deepEqual(
+      h.rendered.map((entry) => entry.data),
+      ["OLD", "CURRENT"],
+      "a socket the watchdog abandoned repainted the live pane",
+    );
+    assert.deepEqual(h.connection.positionOf("a"), { epoch: "e1", seq: 500 });
+    assert.equal(
+      watchdogs(h)[0],
+      watched,
+      "the abandoned socket re-armed the deadline belonging to the live one",
+    );
+
+    // And its late `opened` is inert too, rather than reporting the connection open.
+    dead.handlers.opened();
+    assert.deepEqual(h.statuses, ["connecting", "open", "connecting", "open"]);
+  });
+
+  void test("a socket that never opens is watched too", async () => {
+    // The network freezing between the TCP connect and the 101: no close, no error the client sees,
+    // no open. Armed only on open, nothing times this at all, and `poke()` returns while a socket
+    // exists - so the tab sits at "connecting" until the browser's own handshake timeout, which
+    // Chrome and Safari leave to the TCP stack.
+    const h = harness();
+    h.connection.start();
+    assert.equal(watchdogs(h).length, 1, "an un-opened socket was watched by nothing");
+    h.fire();
+    assert.equal(h.last().closed, true, "the stuck socket was left open");
+    // The token probe runs first, because a socket that never opened may be a rejected token.
+    await settle();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+      "the stuck socket was dropped without running the ladder",
+    );
+  });
+
+  void test("sockets that open and then say nothing back off and become visible", async () => {
+    // A path that completes the handshake and then forwards nothing server->client. Resetting the
+    // ladder on the handshake alone makes this a permanent 250 ms loop - re-attaching every tab,
+    // a cold capture-pane each - that the user is never shown, because the reconnecting banner
+    // waits for a second failed attempt.
+    const h = harness();
+    h.connection.start();
+    const delays: number[] = [];
+    for (let cycle = 0; cycle < 5; cycle++) {
+      h.last().handlers.opened();
+      h.fire(); // the silence bound
+      await settle();
+      const [retry] = h.timers;
+      assert.ok(retry, "the ladder stopped");
+      delays.push(retry.delayMs);
+      h.fire(); // the reconnect
+    }
+    assert.deepEqual(
+      delays,
+      [250, 500, 1000, 2000, 4000],
+      "an opened-but-silent socket never backed off",
+    );
+    assert.ok(h.statuses.includes("reconnecting"), "the loop was invisible to the user");
+  });
+
+  void test("a socket that carries a frame resets the ladder", () => {
+    // The other half of the rule: evidence of traffic, not merely a handshake, starts the ladder
+    // from the bottom again - so an ordinary outage still reconnects fast.
+    const h = harness();
+    h.connection.start();
+    h.last().handlers.opened();
+    h.fire();
+    h.fire();
+    h.last().handlers.opened();
+    h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
+    h.last().handlers.closed();
+    assert.deepEqual(
+      h.timers.map((timer) => timer.delayMs),
+      [250],
+    );
+  });
+
+  void test("a reconnected socket is watched again", () => {
+    // The bound is per socket. Re-arming it on open is what keeps the second outage noticeable.
+    const h = openHarness();
+    h.fire();
+    h.fire();
+    h.last().handlers.opened();
+    assert.equal(watchdogs(h).length, 1);
   });
 });

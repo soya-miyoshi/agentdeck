@@ -432,6 +432,8 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     return snapshot.seq;
   };
 
+  const pingIntervalMs = deps.pingIntervalMs ?? PING_INTERVAL_MS;
+
   const heartbeat = setInterval(() => {
     for (const client of clients) {
       if (!client.alive) {
@@ -440,8 +442,15 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
       }
       client.alive = false;
       client.socket.ping();
+      // AND the client-visible half, on the same timer and regardless of agent activity. The ping
+      // frame above is a control frame the browser answers below the JavaScript API, so a page can
+      // neither see it nor be told the socket went quiet; this data frame is what the client's own
+      // silence bound is measured against. It costs the sender's budget nothing - `withinRate`
+      // counts inbound frames only - and the client never answers it, so it cannot spend a user's
+      // input allowance either.
+      send(client.socket, { t: "ping", intervalMs: pingIntervalMs });
     }
-  }, deps.pingIntervalMs ?? PING_INTERVAL_MS);
+  }, pingIntervalMs);
   // Not a reason to keep the process alive.
   heartbeat.unref();
 
