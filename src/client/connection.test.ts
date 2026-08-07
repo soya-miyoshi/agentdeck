@@ -120,6 +120,15 @@ const harness = (): Harness => {
           closed: false,
           deliver: (message) => handlers.message(JSON.stringify(message)),
         };
+        // A peer close closes the socket. Tests drive one by calling `handlers.closed()` directly,
+        // and the fake used to leave `closed` false for that - so a socket the SERVER dropped still
+        // counted as live, and "how many sockets are still live" could not be asked. Wrapping the
+        // handler here rather than at 29 call sites keeps that question answerable.
+        const peerClosed = handlers.closed;
+        handlers.closed = () => {
+          socket.closed = true;
+          peerClosed();
+        };
         sockets.push(socket);
         return {
           send: (raw) => socket.sent.push(raw),

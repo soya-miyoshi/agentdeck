@@ -261,6 +261,8 @@ export class Connection {
   // nothing about the next socket, and it governs the window BEFORE that socket's first frame - so
   // carrying it meant one frame could stretch every later socket's blind window too.
   #heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+  /** True while `#onClosed` is waiting on the token probe, when there is no socket but a ladder. */
+  #probing = false;
   #cancelSilence: Cancel | undefined;
   /** Drop the current socket as if it had closed. Undefined when there is no socket to drop. */
   #dropSocket: (() => void) | undefined;
@@ -497,7 +499,12 @@ export class Connection {
    * is latency for no information.
    */
   poke(): void {
-    if (this.#stopped || this.#socket !== undefined) return;
+    // `#probing` and not just `#socket`: `#onClosed` clears the socket BEFORE awaiting the token
+    // probe, so between those two points the guard was open and a wake opened a second socket
+    // beside a ladder that was still deciding what to do. `online` fires at exactly the moment a
+    // probe started on a dead network is waiting for, so this was the common case rather than a
+    // race worth shrugging at.
+    if (this.#stopped || this.#socket !== undefined || this.#probing) return;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
     this.#open(this.#status === "reconnecting" ? "reconnecting" : "connecting");
@@ -535,6 +542,12 @@ export class Connection {
   }
 
   #open(status: ConnectionStatus): void {
+    // Never leave a live socket behind. Assigning over `#socket` used to orphan whatever was there:
+    // still connected, still delivering frames, still holding a `closed` handler that would run the
+    // whole ladder a second time. One drop plus one wake produced three sockets and two ladders,
+    // each re-attaching every tab with its own cold snapshot - against the server that was already
+    // the reason for the reconnect.
+    this.#dropSocket?.();
     this.#opened = false;
     this.#carried = false;
     this.#heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -638,7 +651,19 @@ export class Connection {
     // and left the opened-but-silent socket, the one case that is neither the network nor the
     // token, with nothing to diagnose it from.
     if (!this.#carried) {
-      const verdict = await this.#deps.verifyToken();
+      this.#probing = true;
+      let verdict;
+      try {
+        verdict = await this.#deps.verifyToken();
+      } finally {
+        this.#probing = false;
+      }
+      // The verdict describes a connection that may no longer exist. `stop()` between the request
+      // and its answer is ordinary - the user pastes a new token, which replaces this Connection -
+      // and `unauthorized()` is not a notification: it signs the user out and clears the stored
+      // token, so a dead connection's late 401 wipes what they just typed. The method already
+      // checks `#stopped` on either side of this block; the branches below were jumping both.
+      if (this.#stopped) return;
       if (verdict === "rejected") {
         this.#policy.closed("token-rejected");
         this.#stopped = true;
