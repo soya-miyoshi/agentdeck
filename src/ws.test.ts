@@ -388,3 +388,75 @@ void describe("a failing capture costs one message, not the process", () => {
     failing.stop();
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+// The repaint's bytes come back through the same stream the forwarding listener is on, so a
+// listener that SENDS before the snapshot delivers chunks to a client that has no position yet.
+// The client answers those with `resync` (src/client/stream-position.ts), and for any session past
+// the buffer's capacity that means a SECOND full snapshot - another capture-pane, another
+// refresh-client - on every cold attach, which is the most common path in the product. Observed
+// against the real server before the fix: three chunk frames arrived ahead of the snapshot.
+void describe("a cold attach is told where it is before it is told what changed", () => {
+  let ordServer: ReturnType<typeof createServer>;
+  let ordClose: () => void;
+  let ordUrl: string;
+  let ordStream: SessionStream;
+
+  before(async () => {
+    ordStream = new SessionStream({ sessionId: "s1" });
+    ordServer = createServer();
+    ordClose = attachWebSocketServer(ordServer, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? ordStream : undefined),
+      captureHistory: async () => await Promise.resolve("scrollback\n"),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      // What a real repaint does: write into the stream the client is attached to, then report
+      // the seq those bytes ended at.
+      repaint: async () => {
+        ordStream.write(Buffer.from("REPAINT-BYTES"));
+        await Promise.resolve();
+        return { data: "REPAINT-BYTES", seq: ordStream.buffer.headSeq };
+      },
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    }).close;
+    await new Promise<void>((done) => ordServer.listen(0, "127.0.0.1", done));
+    ordUrl = `ws://127.0.0.1:${String((ordServer.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    ordClose();
+    ordServer.close();
+  });
+
+  void test("no chunk arrives before the snapshot", async () => {
+    const socket = new WebSocket(ordUrl, TOKEN, { origin: ORIGIN });
+    const frames: Frame[] = [];
+    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+
+    socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const firstSnapshot = frames.findIndex((frame) => frame["t"] === "snapshot");
+    assert.notEqual(firstSnapshot, -1, "no snapshot arrived at all");
+    assert.equal(
+      frames.slice(0, firstSnapshot).filter((frame) => frame["t"] === "chunk").length,
+      0,
+      "a chunk was sent to a client that had no position yet, which makes it resync",
+    );
+    // And the repaint's own bytes are not then replayed on top of the snapshot that contains them.
+    const after = frames.slice(firstSnapshot + 1).filter((frame) => frame["t"] === "chunk");
+    assert.equal(
+      after.filter((frame) => String(frame["data"]).includes("REPAINT-BYTES")).length,
+      0,
+      "the repaint's bytes were painted twice",
+    );
+    socket.close();
+  });
+});
