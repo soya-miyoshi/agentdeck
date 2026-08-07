@@ -1007,3 +1007,56 @@ session, not one per tab.
   one retry has failed), so for up to 250 ms a disconnected tab reads as connected. Deliberate, and
   the alternative is a banner that flashes for every ordinary drop.
 - **Same-uid**, unchanged.
+
+---
+
+## m2/reconnect - final whole-codebase pass - 2026-08-08
+
+The item that stopped twice. First because its epoch half was unreachable - after a restart there
+was no session to re-attach to, which `m2/session-metadata-survives-restart` then fixed; the epoch
+test now ASSERTS the repaint against a real server SIGKILLed under a live client rather than
+measuring the gap. Then at QA, which found three real defects in the ladder and wrote failing tests
+for them rather than bending them to fit. Those three are fixed in 99f1855 and each test is red
+without its fix.
+
+### Findings
+
+- [medium] src/client/api.ts:38 - **Any 403 anywhere in the request path permanently killed the
+  client, and blamed the wrong thing.** `POST /api/probe` traverses `tailscale serve`, whatever is
+  on the phone's path, and in development the Vite proxy; any of them answering 403 once - a
+  Tailscale ACL change, a funnel that is off, a captive portal, a proxy refusing an unknown POST
+  target - set `#stopped`, and `poke()` returns early while stopped, so neither `visibilitychange`
+  nor `online` could revive it. The same shape bit the honest case: an operator who fixed
+  `AGENTDECK_ORIGIN` and restarted got a client that stayed dead, because nothing in the app can
+  restart a stopped Connection. Status: FIXED in 828404b. A 403 is terminal only when it carries
+  the sentence this server writes (`origin not allowed`); anything else is `unreachable` and keeps
+  retrying. And a wake now clears that one stop, so a fixed server does not need the user to know
+  to reload.
+
+- [low] src/client/connection.ts:716 - The probe gate widened from `!#opened` to `!#carried`, so
+  the client now probes after any socket that completed the 101 and then said nothing - the common
+  shape behind a proxy that passes upgrades but not frames, and during a restart. A 401 on that
+  probe reaches `signOut()` and clears the stored token, which a phone cannot regenerate: recovery
+  means reading `~/.agentdeck/token` on the Mac. Status: FIXED in the same commit and by the same
+  rule - a 401 is a rejected token only when it carries `missing or invalid bearer token`.
+
+- [low] src/ws.ts:435 - The inherited-failure cap re-opens the snapshot storm it bounds. Once the
+  cap is hit a caller starts its own build, and `resync` reaches `buildCoalescedSnapshot` from a
+  socket attached to nothing with a client-chosen epoch, so a bogus epoch forces the snapshot
+  branch every time. One authenticated socket can drive up to `MAX_FRAMES_PER_WINDOW` builds per
+  second while builds are failing, each two `execFile` spawns with a 16 MB buffer aimed at the tmux
+  server that is already the failure. The frame budget is per socket and nothing caps sockets.
+  Status: OPEN. The branch narrows this rather than creating it; the real fix is a per-session
+  build token with a cooldown after failure, and rate-limiting `resync` separately from the general
+  frame budget, since it is the one client frame that costs process spawns.
+
+- [low] src/http.ts:136 - `/api/probe` never reads its body, so `MAX_BODY_BYTES` is not in force on
+  it - the one POST route that does not consume its body, while the file states that bound as
+  universal. Node dumps the unread body so heap is bounded, but the stated rule is not true.
+  Status: OPEN.
+
+### Open after this iteration
+
+- **`resync` costs process spawns and is bounded only by the general frame budget.** This is the
+  third audit to land near it. It wants its own item.
+- **Same-uid**, unchanged.

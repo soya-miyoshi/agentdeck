@@ -296,35 +296,28 @@ Driven from `curl` only. No client.
       told apart from both a network failure and a bad token and named to the user
       (`AGENTDECK_ORIGIN`) instead of being retried forever.
       **What the QA pass added on top of the coder's work**, all of it in the reconnect ladder,
-      which is the part of this product most likely to be wrong and least likely to be noticed:
-      - The evidence that the token is good is now a frame that ARRIVED, not the handshake. A `101`
-        is answered by whatever sits in front of the server as readily as by the server, so a socket
-        that opened and then said nothing used to be read as proof and went round the ladder again
-        for no information.
-      - **A stuck socket is diagnosed instead of looped on**, which was audit finding
-        `src/client/connection.ts:574`, still OPEN before this. The probe answering "the server is
-        answering and this token is good" while no socket carries anything is neither the network
-        nor the token, and after three such attempts the client says so once and keeps retrying —
-        an inference, so it does not stop the ladder the way a `401` or a `403` does.
-      - `verifyToken` grew a fourth verdict, `unreachable`, because the sentence above must not be
-        said when nothing answered at all. Plan 002 was edited first.
-      - **A re-attach storm could still become a spawn storm through the FAILURE path**, and that is
-        a server-side bug this item found: every joiner of a failed coalesced snapshot was woken by
-        the same rejection and made its own build, so eight tabs coming back from one stalled server
-        cost eight concurrent capture-panes at the tmux server that was already the problem.
-        Measured at 8, now 2. `src/ws.test.ts`.
+      which is the part of this product most likely to be wrong and least likely to be noticed: - The evidence that the token is good is now a frame that ARRIVED, not the handshake. A `101`
+      is answered by whatever sits in front of the server as readily as by the server, so a socket
+      that opened and then said nothing used to be read as proof and went round the ladder again
+      for no information. - **A stuck socket is diagnosed instead of looped on**, which was audit finding
+      `src/client/connection.ts:574`, still OPEN before this. The probe answering "the server is
+      answering and this token is good" while no socket carries anything is neither the network
+      nor the token, and after three such attempts the client says so once and keeps retrying —
+      an inference, so it does not stop the ladder the way a `401` or a `403` does. - `verifyToken` grew a fourth verdict, `unreachable`, because the sentence above must not be
+      said when nothing answered at all. Plan 002 was edited first. - **A re-attach storm could still become a spawn storm through the FAILURE path**, and that is
+      a server-side bug this item found: every joiner of a failed coalesced snapshot was woken by
+      the same rejection and made its own build, so eight tabs coming back from one stalled server
+      cost eight concurrent capture-panes at the tmux server that was already the problem.
+      Measured at 8, now 2. `src/ws.test.ts`.
       **What the review pass added on top of QA**, all of it the one failure this item exists to
       prevent — a set of the ladder's flags that leaves the connection with no socket, nothing
-      scheduled and no status the user can act on, which a green suite cannot show:
-      - The token probe is bounded. `fetch` has no timeout, `#onClosed` awaits it with no socket,
-        and `#probing` is what turns a wake away — so a request that never settled took the tab out
-        for good, and `visibilitychange` and `online`, both of which a phone unlocking fires, hit
-        the guard rather than reconnecting.
-      - A socket that cannot be CONSTRUCTED — blocked mixed content, a CSP that refuses the
-        endpoint — is a closed socket rather than a throw out of a timer callback.
-      - `#open` cancels any outstanding retry after dropping the old socket, so dropping one that
-        had carried frames cannot leave a retry that fires beside the socket just opened and
-        re-attaches every tab for nothing.
+      scheduled and no status the user can act on, which a green suite cannot show: - The token probe is bounded. `fetch` has no timeout, `#onClosed` awaits it with no socket,
+      and `#probing` is what turns a wake away — so a request that never settled took the tab out
+      for good, and `visibilitychange` and `online`, both of which a phone unlocking fires, hit
+      the guard rather than reconnecting. - A socket that cannot be CONSTRUCTED — blocked mixed content, a CSP that refuses the
+      endpoint — is a closed socket rather than a throw out of a timer callback. - `#open` cancels any outstanding retry after dropping the old socket, so dropping one that
+      had carried frames cannot leave a retry that fires beside the socket just opened and
+      re-attaches every tab for nothing.
       Making a restart recover WITHOUT the recreate is still the metadata gap owned by
       `m0/supervisor-crash-test`'s **Known gap, unsolved** above.
 
