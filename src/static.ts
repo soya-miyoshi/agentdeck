@@ -52,23 +52,23 @@ const cacheControlFor = (urlPath: string): string =>
   urlPath.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
 
 /** Whether an API or socket route owns this path. Those keep their own answers, including 404. */
-export const isApiPath = (urlPath: string): boolean =>
+const isApiPath = (urlPath: string): boolean =>
   urlPath === "/api" || urlPath.startsWith("/api/") || urlPath === "/ws";
 
 const NOT_BUILT = (root: string): string =>
   `agentdeck: the client is not built, so there is no page to serve. ` +
   `Run \`pnpm build\`, which writes ${root}.`;
 
-const send = (
+/** Every answer this file writes by hand rather than streams is a sentence, so the type is fixed. */
+const sendText = (
   req: IncomingMessage,
   res: ServerResponse,
   status: number,
-  type: string,
   headers: Record<string, string>,
   body: string,
 ): void => {
   res.writeHead(status, {
-    "content-type": type,
+    "content-type": "text/plain; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "x-content-type-options": "nosniff",
     ...headers,
@@ -138,7 +138,7 @@ const contains = (root: string, candidate: string): boolean =>
  * is holding someone's agents - but it must not present as a silent 404 on every page load
  * either, so it says the sentence that names the command to run, at boot and on every request.
  */
-export const createStaticHandler = (
+const createStaticHandler = (
   rootDir: string,
 ): ((req: IncomingMessage, res: ServerResponse, urlPath: string) => void) => {
   const configured = resolve(rootDir);
@@ -147,14 +147,7 @@ export const createStaticHandler = (
   return (req, res, urlPath) => {
     const method = req.method ?? "GET";
     if (method !== "GET" && method !== "HEAD") {
-      send(
-        req,
-        res,
-        405,
-        "text/plain; charset=utf-8",
-        { allow: "GET, HEAD" },
-        "method not allowed\n",
-      );
+      sendText(req, res, 405, { allow: "GET, HEAD" }, "method not allowed\n");
       return;
     }
 
@@ -163,14 +156,7 @@ export const createStaticHandler = (
       try {
         root = await realpath(configured);
       } catch {
-        send(
-          req,
-          res,
-          503,
-          "text/plain; charset=utf-8",
-          { "cache-control": "no-store" },
-          `${NOT_BUILT(configured)}\n`,
-        );
+        sendText(req, res, 503, { "cache-control": "no-store" }, `${NOT_BUILT(configured)}\n`);
         return;
       }
 
@@ -178,14 +164,7 @@ export const createStaticHandler = (
       if ("reason" in found && found.reason === "outside") {
         // Deliberately not the history fallback: a request that tried to leave the build
         // directory is refused, not answered with the page.
-        send(
-          req,
-          res,
-          403,
-          "text/plain; charset=utf-8",
-          { "cache-control": "no-store" },
-          "forbidden\n",
-        );
+        sendText(req, res, 403, { "cache-control": "no-store" }, "forbidden\n");
         return;
       }
 
@@ -200,14 +179,7 @@ export const createStaticHandler = (
             ? undefined
             : await locate(root, "/index.html").then((r) => ("file" in r ? r.file : undefined));
       if (target === undefined) {
-        send(
-          req,
-          res,
-          404,
-          "text/plain; charset=utf-8",
-          { "cache-control": "no-store" },
-          "not found\n",
-        );
+        sendText(req, res, 404, { "cache-control": "no-store" }, "not found\n");
         return;
       }
 

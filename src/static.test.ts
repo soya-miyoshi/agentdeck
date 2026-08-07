@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,10 +20,7 @@ let secretFile: string;
 let server: Server;
 let port: number;
 
-const api = (
-  _req: unknown,
-  res: { writeHead: (s: number, h: object) => void; end: (b: string) => void },
-): void => {
+const api = (_req: IncomingMessage, res: ServerResponse): void => {
   const payload = JSON.stringify({ error: "no route" });
   res.writeHead(404, { "content-type": "application/json" });
   res.end(payload);
@@ -45,7 +42,7 @@ void before(async () => {
   symlinkSync(secretFile, join(root, "leak"));
   symlinkSync(outside, join(root, "assets", "elsewhere"));
 
-  server = createServer(withClient(api as never, root));
+  server = createServer(withClient(api, root));
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
   port = (server.address() as AddressInfo).port;
 });
@@ -60,6 +57,7 @@ const dechunk = (raw: string): string => {
   let out = "";
   for (;;) {
     const end = rest.indexOf("\r\n");
+    if (end < 0) return out;
     const size = parseInt(rest.slice(0, end), 16);
     if (!(size > 0)) return out;
     out += rest.slice(end + 2, end + 2 + size);
@@ -249,7 +247,7 @@ void describe("an unbuilt client", () => {
   let unbuiltBase: string;
 
   void before(async () => {
-    unbuilt = createServer(withClient(api as never, join(tmpdir(), "agentdeck-no-such-build")));
+    unbuilt = createServer(withClient(api, join(tmpdir(), "agentdeck-no-such-build")));
     await new Promise<void>((ready) => unbuilt.listen(0, "127.0.0.1", ready));
     unbuiltBase = `http://127.0.0.1:${String((unbuilt.address() as AddressInfo).port)}`;
   });
