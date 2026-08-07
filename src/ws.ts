@@ -244,7 +244,8 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
         // So it queues until the snapshot is away, then flushes only what the snapshot does not
         // already reflect.
         let queued: { epoch: string; seq: number; data: Buffer }[] | undefined = [];
-        if (!client.attached.has(message.sessionId)) {
+        const registeredHere = !client.attached.has(message.sessionId);
+        if (registeredHere) {
           const off = stream.onChunk((chunk) => {
             if (queued !== undefined) {
               queued.push(chunk);
@@ -277,10 +278,18 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
             message.haveSeq,
           );
         } catch (error) {
-          client.attached.get(message.sessionId)?.();
-          client.attached.delete(message.sessionId);
-          stream.detach(client.id);
-          applySize(message.sessionId);
+          // Undo what THIS call set up, and nothing else. A re-attach - which the reconnect ladder
+          // now sends by itself - would otherwise tear down a working attachment that predates it,
+          // leaving a socket that is still OPEN with no listener and no way back: the client only
+          // sends `attach` on mount and on reconnect, so the tab shows a stale screen forever while
+          // the strip keeps reporting state from the registry. `applySize` after that detach also
+          // reflows the OTHER clients' panes mid-session.
+          if (registeredHere) {
+            client.attached.get(message.sessionId)?.();
+            client.attached.delete(message.sessionId);
+            stream.detach(client.id);
+            applySize(message.sessionId);
+          }
           throw error;
         } finally {
           held = queued ?? [];
@@ -355,7 +364,16 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     stream: SessionStream,
   ): Promise<Awaited<ReturnType<typeof buildSnapshot>>> => {
     const inFlight = snapshots.get(sessionId);
-    if (inFlight !== undefined) return await inFlight.promise;
+    if (inFlight !== undefined) {
+      try {
+        return await inFlight.promise;
+      } catch {
+        // Coalescing is an optimisation, not a verdict. Sharing the SUCCESS is the point; sharing
+        // the FAILURE means one client's flood - or one capture-pane past its buffer - decides the
+        // outcome for every client that happened to attach beside it, and the attach path treats a
+        // failed snapshot as a reason to detach. Fall through and make our own attempt.
+      }
+    }
     const generation = nextGeneration++;
     // A late settle from a build that already timed out must not delete a newer entry.
     const evict = (): void => {
