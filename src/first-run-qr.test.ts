@@ -223,9 +223,8 @@ void describe("the QR the server prints on first run", () => {
   });
 
   void test("with no configured origin, prints the address it is really listening on", async () => {
-    // m4/tailscale-serve is not merged and HTTPS is not enabled on this tailnet, so the only URL
-    // this process can honestly print is its own. A hardcoded `https://<host>.ts.net` would be a
-    // URL that does not answer, which is worse than a loopback one that does.
+    // The only URL this process can honestly print is its own: a hardcoded `https://<host>.ts.net`
+    // would be a URL that does not answer, which is worse than a loopback one that does.
     const home = temp("agentdeck-qr-home-");
     const run = await boot(home);
     const token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();

@@ -217,11 +217,8 @@ export const main = async (): Promise<void> => {
   // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
   // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
   // than leaving a stated protection whose enable switch is invisible.
-  //
-  // The value it should have is not a placeholder any more: this is also where the tailnet is
-  // read (plan 006), so the ts.net origin, the two admin-console switches `tailscale serve`
-  // depends on, and the command itself are all reported here in sentences a person can act on -
-  // the CLI reports none of them well, and one of them it reports by hanging.
+  // The tailnet is read here too (plan 006), so the value that variable should have is the real
+  // ts.net origin rather than a placeholder.
   const tailnet = await readTailnet();
   if (process.env["AGENTDECK_ORIGIN"] === undefined) {
     console.error(

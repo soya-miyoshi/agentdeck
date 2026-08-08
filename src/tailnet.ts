@@ -1,17 +1,9 @@
 /**
  * What `tailscale serve` needs, and which of it this machine actually has (plan 006).
  *
- * The phone reaches agentdeck over `tailscale serve --bg <port>` in front of the loopback
- * listener. That command is one line, and every hard part of it is a tailnet setting that is off
- * by default and that the CLI does not report well: with Serve disabled the command prints an
- * enable link and then BLOCKS forever rather than exiting, and with HTTPS certificates disabled
- * there is no certificate for the `ts.net` name at all. Neither is something agentdeck can turn
- * on, and neither is visible from inside the process - so this module reads the one cheap,
- * non-mutating source of truth there is, `tailscale status --json`, and turns what is missing
- * into a sentence naming the admin page.
- *
- * Reporting only. Nothing here runs `tailscale serve`: exposure is decided on the host, in one
- * place, which is the whole reason the server binds loopback (plan 001).
+ * Reads `tailscale status --json` - the one cheap, non-mutating source - and turns the two
+ * default-off tailnet switches into sentences naming the admin page. Reporting only: nothing here
+ * runs `tailscale serve`, because exposure is decided on the host in one place (plan 001).
  */
 
 import { execFile } from "node:child_process";
@@ -48,14 +40,8 @@ export interface Tailnet {
   readonly httpsCertificates: boolean;
 }
 
-/**
- * The two facts, out of `tailscale status --json`.
- *
- * `Self.DNSName` carries a trailing dot (`host.tail0000.ts.net.`) and an origin must not, so it
- * is stripped here rather than at each caller. `CertDomains` is `null` when HTTPS certificates
- * are disabled and lists the machine's names when they are enabled; it is the only field that
- * answers the question without provisioning anything, which `tailscale cert` would.
- */
+/** The two facts, out of `tailscale status --json`: `Self.DNSName` carries a trailing dot an
+ *  origin must not, and `CertDomains` is null exactly when HTTPS certificates are off. */
 export const parseTailnetStatus = (raw: unknown): Tailnet => {
   const status = raw as { Self?: { DNSName?: unknown }; CertDomains?: unknown };
   const dnsName = typeof status.Self?.DNSName === "string" ? status.Self.DNSName : "";
@@ -66,14 +52,8 @@ export const parseTailnetStatus = (raw: unknown): Tailnet => {
   };
 };
 
-/**
- * Read it, or report nothing readable.
- *
- * Undefined covers every way this can fail - no `tailscale` on PATH, `tailscaled` not running,
- * logged out, JSON that is not what this version emits. They are one case to the caller: nothing
- * can be said about the tailnet, so nothing is claimed about it. A boot must never depend on
- * this, so the timeout is hard and no failure propagates.
- */
+/** Read it, or report nothing readable: undefined covers every failure alike, because a boot must
+ *  never depend on this and nothing may be claimed about a tailnet that could not be read. */
 export const readTailnet = async (): Promise<Tailnet | undefined> => {
   const binary = tailscaleBinary();
   if (binary === undefined) return undefined;
@@ -87,14 +67,8 @@ export const readTailnet = async (): Promise<Tailnet | undefined> => {
   }
 };
 
-/**
- * What to tell the operator, given what was found and how the server is configured.
- *
- * Sentences, in the order a person acts on them: the setting that has to be changed in a browser
- * first, then the command, then the variable. Each names the thing to do rather than the state
- * that is wrong, because the failure this exists to prevent is an opaque one - a URL that does
- * not resolve, or a `tailscale serve` that hangs with no error at all.
- */
+/** What to tell the operator, in the order a person acts on it: the browser switch, then the
+ *  command, then the variable. Each names the action, because the failures it prevents are silent. */
 export const tailnetAdvice = (
   tailnet: Tailnet | undefined,
   port: number,

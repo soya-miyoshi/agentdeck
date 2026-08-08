@@ -176,10 +176,8 @@ void describe("qr", () => {
   });
 
   void test("no ts.net host is hardcoded anywhere in the source", () => {
-    // The URL printed today has to be the one the operator can actually open. HTTPS is not on this
-    // tailnet and `m4/tailscale-serve` is not merged, so a `.ts.net` literal reaching the printed
-    // line would be a URL that does not answer - and would keep answering wrongly after the serve
-    // item lands on some other hostname.
+    // The URL printed has to be one the operator can actually open, and a `.ts.net` literal would
+    // keep naming this Mac's hostname on every other machine.
     const source = readFileSync(join(import.meta.dirname, "qr.ts"), "utf8");
     const code = source
       .split("\n")
