@@ -197,13 +197,19 @@ const waitForHealth = async (port: string): Promise<boolean> => {
   return false;
 };
 
-const listenerPid = (port: string): number | null => {
+/** Every pid listening on the port, as the watchdog itself asks. More than one is two servers. */
+const listeningPids = (port: string): number[] => {
   const out = spawnSync("/usr/sbin/lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], {
     encoding: "utf8",
   });
-  const pid = Number(out.stdout.trim().split("\n")[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
+  return out.stdout
+    .trim()
+    .split("\n")
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isInteger(pid) && pid > 1);
 };
+
+const listenerPid = (port: string): number | null => listeningPids(port)[0] ?? null;
 
 /** A stand-in for the server, as a CHILD PROCESS: the watchdog stops what `lsof` reports on the
  *  port, so an in-process listener would have it SIGTERM the test runner. */
@@ -431,6 +437,15 @@ void describe("a wedged server needs three consecutive failures, then is restart
     assert.equal(state().restarts, 1);
     assert.equal(state().failures, 0, "the streak was not reset by acting on it");
     assert.match(notified(), /Restarted the agentdeck server/);
+  });
+
+  void test("the recovery leaves ONE server on the port, not a second beside the old one", async () => {
+    // The restart path stops what lsof reports before it spawns, so a recovery replaces the
+    // listener rather than adding to it: two servers on one port is the state nothing detects.
+    assert.ok(await waitForHealth(port), "the restarted server never became healthy");
+    const holding = listeningPids(port);
+    assert.equal(holding.length, 1, `${String(holding.length)} processes hold the port`);
+    assert.equal(alive(wedged.pid as number), false, "the wedged process outlived its replacement");
   });
 });
 
