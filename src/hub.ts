@@ -115,6 +115,19 @@ export class Hub {
       // A session that has already exited gets no PTY: attaching to a dead pane would produce a
       // stream that never carries anything, and the exit code is already on the list.
       if (session.state === "exited") continue;
+      // Our ATTACH CLIENT dying is not the AGENT dying, and the two were indistinguishable. tmux
+      // `detach-client` kills the client while the pane keeps running - and it is one keystroke
+      // away for anyone with a real keyboard - after which `SessionPty.onExit` declares `exited`
+      // on the stream, which is sticky, while the loop below leaves the dead pty in place because
+      // the session is still in the live list. The result was a tab reporting a finished agent
+      // that is still working, with every keystroke written into a dead pty and going nowhere, and
+      // no recovery short of restarting the server. tmux still lists the session as alive, so the
+      // list is the authority: drop the corpse and let the next line re-attach.
+      const existing = this.#ptys.get(session.id);
+      if (existing !== undefined && existing.stream.state() === "exited") {
+        existing.dispose();
+        this.#ptys.delete(session.id);
+      }
       if (!this.#ptys.has(session.id)) {
         try {
           this.#ptys.set(session.id, this.#createPty(session.id));

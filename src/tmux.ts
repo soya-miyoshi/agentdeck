@@ -335,6 +335,32 @@ export class Tmux {
       "-g",
       "update-environment",
       "",
+      // The prefix is a COMMAND CHANNEL, and everything the phone types reaches it. `src/pty.ts`
+      // attaches with `tmux attach-session`, so the bytes land on a tmux CLIENT's stdin and tmux
+      // parses them as keys before the pane ever sees them. With the default C-b that means
+      // `Ctrl` `b` `:` opens the tmux command prompt, and `run-shell "..."` from there executes on
+      // the host - outside the cwd allowlist, outside AGENTDECK_PROFILES, and without touching
+      // `POST /api/sessions`. Verified on tmux 3.7b by driving a real attach client with exactly
+      // the bytes m4/key-row can emit: the marker file appeared. `new-window -c /` and
+      // `attach-session -t <off-list-id>` are reachable the same way, which is precisely the
+      // situation plan 005 declares the allowlist a boundary against.
+      //
+      // Not a key-row problem: any client with a real keyboard could always type C-b. The key row
+      // only made it reachable from a phone, which is what surfaced it.
+      //
+      // The cost is real and belongs to whoever attaches to this socket by hand - the refusal text
+      // and the README both tell them to - and they lose tmux's own key bindings there. That is
+      // the right trade: this socket is agentdeck's, and its clients are a remote input path.
+      ";",
+      "set-option",
+      "-g",
+      "prefix",
+      "none",
+      ";",
+      "set-option",
+      "-g",
+      "prefix2",
+      "none",
     ]);
     await this.#clearInheritedGlobalEnv();
   }

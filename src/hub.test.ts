@@ -525,3 +525,29 @@ void describe("a state change is announced, and nothing else is", () => {
     assert.deepEqual(announced, [{ id: session.id, state: "waiting" }]);
   });
 });
+
+void describe("our attach client dying is not the agent dying", () => {
+  void test("a session tmux still lists gets a new pty rather than a sticky exited tab", async () => {
+    // tmux `detach-client` kills OUR client and leaves the pane running, and it is one keystroke
+    // away for anyone with a real keyboard. `SessionPty.onExit` then declares `exited` on the
+    // stream, which is sticky, while the session is still in the live list - so the dead pty was
+    // kept, the strip showed a finished agent that was still working, and every keystroke was
+    // written into a dead pty and went nowhere. tmux lists the session, so tmux is the authority.
+    const { hub, registry, created } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    assert.deepEqual(created, [session.id], "the first sync did not attach");
+
+    // What onExit does when the CLIENT dies: the stream says exited while tmux still lists it.
+    hub.streamFor(session.id)?.declare("exited", 0);
+    assert.equal(hub.streamFor(session.id)?.state(), "exited");
+
+    await hub.sync();
+    assert.deepEqual(
+      created,
+      [session.id, session.id],
+      "the hub kept the dead pty, so the tab is stuck reporting exited for a live agent",
+    );
+    assert.notEqual(hub.streamFor(session.id)?.state(), "exited", "the new stream is still dead");
+  });
+});
