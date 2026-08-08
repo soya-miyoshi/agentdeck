@@ -137,15 +137,7 @@ const qrFirstRunLines = (token: string, url: string, tokenFile: string): string[
   "there is one token, not one per device, so that invalidates every client at once.",
 ];
 
-/**
- * The URL to print beside the QR.
- *
- * Not derived and not guessed. `AGENTDECK_ORIGIN` is the origin the operator has already told the
- * server the phone loads, so when it is set it is the answer. When it is not, the only URL this
- * process can honestly claim is the one it is listening on: it binds loopback, and whether a
- * `tailscale serve` in front of it exists, and on what hostname, is not knowable from here.
- * `m4/tailscale-serve` is not merged and HTTPS is not enabled on this tailnet, so a
- * `https://<host>.ts.net` URL printed today would be a URL that does not answer.
- */
+/** The URL to print beside the QR: `AGENTDECK_ORIGIN` when the operator has set it, else the
+ *  loopback address, because whether a `tailscale serve` fronts this port is not knowable here. */
 export const clientUrl = (origin: string | undefined, port: number): string =>
   origin ?? `http://127.0.0.1:${String(port)}`;

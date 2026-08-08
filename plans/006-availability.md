@@ -77,6 +77,49 @@ turning, not just that a socket accepts:
 trip and hits `/api/health`, and requires both. Nothing schedules it yet — it is a command a
 person or the watchdog runs, and until the watchdog exists it is the former.
 
+## Reaching it at all: `tailscale serve`, and the two switches that are off
+
+`tailscale serve --bg <port>` in front of the loopback listener is the whole of the phone's path
+in. The command is one line. What is not one line is that it depends on **tailnet settings that
+are off by default and that the CLI does not name well**, measured on the development Mac on
+2026-08-08:
+
+- **Serve is not enabled for the tailnet.** `tailscale serve --bg 7777` prints
+  `Serve is not enabled on your tailnet` with an enable link — and then **does not exit**. It
+  blocks waiting for someone to click that link, so anything that runs it unattended (a script, a
+  `launchd` job, an agent) hangs rather than fails. Never run it without a timeout.
+- **HTTPS certificates are not enabled.** Without them there is no certificate for the `ts.net`
+  name and the URL cannot be HTTPS at all. `tailscale status --json` reports
+  `"CertDomains": null` when they are off, and the machine's names when they are on. That field is
+  the only cheap, non-mutating way to tell; `tailscale cert` provisions rather than asks.
+- MagicDNS supplies the name itself, `Self.DNSName` in the same JSON (trailing dot included).
+
+Both switches live in the admin console — <https://login.tailscale.com/admin/dns>, under HTTPS
+Certificates — and neither the loopback server nor `tailscale serve` can turn them on.
+
+So agentdeck reads that JSON once at boot, with a hard timeout, and **says which of the three
+facts is missing in a sentence naming the settings page**. It is the same rule as every other boot
+warning here: a protection or a route that is not actually there is stated, never assumed. It is a
+report and nothing more — agentdeck does not run `tailscale serve` itself. Exposure stays a
+decision a person makes on the host, in one place, exactly as plan 001 has it, and a server that
+reconfigured the proxy on every boot would be a second place.
+
+Putting serve in place is still one decision a person makes, and it is now one command:
+`scripts/tailscale-serve.mjs`. It is not a second place exposure is decided — it is the operator
+running the same `tailscale serve --bg <port>` with the two things a person cannot do by hand
+reliably. It reads the JSON above and **refuses before running anything** when either switch is
+off, because that is the state in which the command hangs; every call it makes is timed out, and a
+hang is reported as the enable link rather than waited on. Having applied the proxy it verifies it
+— `serve status` names the port, `/api/health` answers over loopback and over the `ts.net` URL —
+and exits non-zero if any of that is untrue, so one green run is the demonstration. Nothing in the
+server or the watchdog invokes it.
+
+`AGENTDECK_ORIGIN` is **recommended, not set**. This is the first code that knows what the origin
+is (`https://` plus the MagicDNS name without its trailing dot), so the boot warning names that
+value rather than a placeholder. It is not applied automatically: setting it would turn the check
+on from ambient machine state rather than from the operator's intent, and would 403 the loopback
+and Vite flows the same run serves. Naming the exact string is what makes it one paste.
+
 ## The watchdog: a `launchd` agent on the Mac
 
 There is one place it can live, and it is the same place everything else now lives. It is the only
@@ -112,7 +155,7 @@ The rule the health branch settled on, which the plan above left as "N consecuti
 **A recovery may not hand back a weaker server than the one it replaced.** The watchdog spawns the
 server with its own environment, which under launchd is exactly what the plist declares — so
 anything the operator exported in the shell they normally start the server from and did not repeat
-in the plist is absent from the replacement. Three of those change what the server *is* rather
+in the plist is absent from the replacement. Three of those change what the server _is_ rather
 than how it is configured: no `AGENTDECK_MOUNTS` is an empty allowlist, no `AGENTDECK_PROFILES` is
 nothing startable, and no `AGENTDECK_ORIGIN` is the Origin check off on every `/api` route and
 every `/ws` upgrade. The watchdog refuses to start a server without any of them, says so in the

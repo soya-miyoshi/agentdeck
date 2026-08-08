@@ -591,8 +591,9 @@ void describe("tailscale serve: not configured is not an outage", () => {
     seedState();
     const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /tailscale serve is not configured for the port/);
-    assert.match(outcome.stdout, /m4\/tailscale-serve is not built yet/);
-    assert.doesNotMatch(notified(), /tailscale/, "an unbuilt milestone woke somebody");
+    // Not configured is a state to report, not to wake anyone for: an operator who has not run
+    // the serve script yet is not in trouble.
+    assert.doesNotMatch(notified(), /tailscale/, "not-configured woke somebody");
   });
 
   void test("was configured and is gone: that one is a notification", () => {
@@ -1139,4 +1140,42 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
 // `after`: a crashed test run must not leave a server or a tmux socket behind.
 process.on("exit", () => {
   for (const port of usedPorts) killListener(port);
+});
+
+void describe("exposure is watched, not just availability", () => {
+  let port = "";
+  const stubTailscale = (output: string, code: number): void => {
+    putStub("tailscale", `#!/bin/sh\ncat <<'EOF'\n${output}\nEOF\nexit ${String(code)}\n`);
+  };
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("exposure");
+  });
+
+  after(() => {
+    rmSync(join(stubs, "tailscale"), { force: true });
+  });
+
+  void test("Funnel on is an alert every pass, because it is the public internet", () => {
+    // The install script refuses to run under Funnel, but that check happens once. This is the
+    // only thing that looks again, and it had no notion of Funnel at all - so a same-uid process
+    // running `tailscale funnel <port> on` after a green install put a terminal server on the
+    // public internet while every automated check stayed green.
+    stubTailscale(`https://host.tail0.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:${port}`, 0);
+    seedState({ serveConfigured: true });
+    const outcome = pass(port, asStubRepo);
+    assert.match(outcome.stdout, /FUNNEL IS ON/);
+    assert.match(notified(), /public internet/, "funnel did not wake anybody");
+  });
+
+  void test("exposure appearing is reported, not only exposure disappearing", () => {
+    // The asymmetry: configured -> gone raised a banner, gone -> configured said nothing. One is
+    // an availability event and the other is a security event, and only the first was reported.
+    stubTailscale(`|-- / proxy http://127.0.0.1:${port}`, 0);
+    seedState({ serveConfigured: false });
+    const outcome = pass(port, asStubRepo);
+    assert.match(outcome.stdout, /tailscale serve is configured for the port/);
+    assert.match(notified(), /now publishes port/, "exposure appeared silently");
+  });
 });

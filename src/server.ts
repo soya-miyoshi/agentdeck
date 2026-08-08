@@ -21,6 +21,7 @@ import { clientUrl, firstRunLines } from "./qr.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
+import { readTailnet, tailnetAdvice } from "./tailnet.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
@@ -216,6 +217,9 @@ export const main = async (): Promise<void> => {
   // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
   // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
   // than leaving a stated protection whose enable switch is invisible.
+  // The tailnet is read here too (plan 006), so the value that variable should have is the real
+  // ts.net origin rather than a placeholder.
+  const tailnet = await readTailnet();
   if (process.env["AGENTDECK_ORIGIN"] === undefined) {
     console.error(
       "agentdeck: AGENTDECK_ORIGIN is not set, so the Origin check plan 001 describes is off. " +
@@ -223,6 +227,8 @@ export const main = async (): Promise<void> => {
         "https://<host>.ts.net origin the phone loads.",
     );
   }
+  for (const line of tailnetAdvice(tailnet, port, process.env["AGENTDECK_ORIGIN"]))
+    console.error(line);
 
   // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
   // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of

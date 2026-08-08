@@ -385,6 +385,40 @@ Agent-agnostic signals first, so the generic path is the proven one.
 - [ ] **`m4/tailscale-serve`** — `tailscale serve --bg` in front of the loopback port.
       **Done when:** the `ts.net` URL loads over HTTPS from the phone and the page reports a
       secure context.
+      **Blocked on the admin console, and the wiring is done (2026-08-08).** Measured on this Mac:
+      `tailscale serve --bg 7791` prints `Serve is not enabled on your tailnet` with an enable link
+      and then **hangs** — 20s timeout, exit 124, never exits on its own — and
+      `tailscale cert example-host.tailXXXXXX.ts.net` answers `your Tailscale account does
+    not support getting TLS certs`. Both switches are at
+      <https://login.tailscale.com/admin/dns> and neither is something this repo can turn on, so
+      `https://example-host.tailXXXXXX.ts.net/` does not connect and the HTTPS half is
+      undemonstrated. What is built is the half that made those failures opaque: `src/tailnet.ts`
+      reads `tailscale status --json` at boot and names the missing switch, the settings page, the
+      `tailscale serve` command with the real port, the URL, and the exact
+      `AGENTDECK_ORIGIN=https://<dnsname>` value — plan 001's placeholder, resolved. Plan 006 gains
+      the section this shape comes from. Nothing runs `tailscale serve` and nothing sets
+      `AGENTDECK_ORIGIN`: both stay the operator's one decision. When the two settings are on, the
+      remaining work is running the command and re-checking from a phone.
+      **NOT TICKED, and the HTTPS half is still undemonstrated (2026-08-09).** Both switches are
+      off on this Mac — `tailscale status --json` still reports `"CertDomains": null` and
+      `tailscale serve --bg <port>` still hangs — so no `ts.net` URL has ever loaded from here and
+      no page has ever reported a secure context. The two settings are **HTTPS Certificates** at
+      <https://login.tailscale.com/admin/dns> and **Serve for the tailnet**, whose enable link the
+      CLI prints (`https://login.tailscale.com/f/serve?node=…`). Neither is something this repo can
+      turn on.
+      **What is finished is the code, so the remaining step is one action, not a debugging
+      session:** `scripts/tailscale-serve.mjs` is that action. It refuses BEFORE running
+      `tailscale serve --bg` when either switch is off (running it then is the hang), times out
+      every call it makes and reports the enable link instead of blocking, applies the proxy, then
+      verifies `tailscale serve status`, loopback `/api/health` and the same over the `ts.net` URL,
+      and prints the exact `AGENTDECK_ORIGIN=https://<dnsname>` line to restart the server with.
+      `src/tailscale-serve.test.ts` covers all of that against a stubbed `tailscale` (the
+      `AGENTDECK_TAILSCALE` absolute path `src/watchdog.test.ts` uses); the ts.net fetch is the one
+      step no stub can stand in for.
+      **Once both switches are on, in order:** `pnpm start` in one terminal, then
+      `AGENTDECK_PORT=7777 node scripts/tailscale-serve.mjs` — a zero exit is the verification —
+      then restart the server as `AGENTDECK_ORIGIN=https://<dnsname> pnpm start` and open the URL
+      on the phone.
 
 - [x] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
       **Done when:** it installs to the home screen and launches without browser chrome.

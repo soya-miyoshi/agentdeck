@@ -194,9 +194,11 @@ logs the names it cleared. Without that the client half bounds nothing, and empt
 
 ## Driving it from a browser
 
-The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. Nothing serves the built bundle yet
-— that is `m2/serve-client` — so today the page comes from Vite's dev server, which proxies `/api`
-and `/ws` to the server on 7777.
+The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. `pnpm build` writes it to
+`dist/client` and the server serves it from there on 7777, so the app and the API are one origin
+— that is the path the phone uses. For iterating on the client itself the page comes instead from
+Vite's dev server, which proxies `/api` and `/ws` to the server on 7777, and the two caveats below
+are about that flow only.
 
 ```
 # one terminal: the server
@@ -209,8 +211,9 @@ pnpm dev
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
 your session appears.
 
-Two things about the dev flow specifically, neither of which applies once `m2/serve-client` makes
-the app and the API one origin. **`AGENTDECK_ORIGIN` must be unset for this**, or set to the Vite
+Two things about the dev flow specifically, neither of which applies to the built bundle the
+server serves, where the app and the API are already one origin. **`AGENTDECK_ORIGIN` must be
+unset for this**, or set to the Vite
 origin: the proxy leaves the browser's `Origin` header alone, so a server configured with the
 `https://<host>.ts.net` origin answers 403 to the upgrade and to every `/api` call — and the client
 cannot tell that from a network failure, so it reconnects forever instead of saying so. And the
@@ -335,14 +338,14 @@ One pass does three things: finds the node process holding the port, probes
 `http://127.0.0.1:<port>/api/health`, and checks whether `tailscale serve` is still configured for
 it. What it does about the answer:
 
-| It sees | It does |
-| --- | --- |
-| A 200, however slow | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict. |
-| Nothing listening | Starts the server at once. There is no socket to drop and no snapshot to lose. |
-| Accepted and silent for 15s, or a 503 | Counts it. Three consecutive passes — three minutes — before it restarts anything. |
-| Still unhealthy after two restarts | Stops. Marks the state file `gaveUp` and puts a critical dialog on the screen. A server that is down and known to be down beats one killed every minute. |
-| `tailscale serve` never configured | Says so and carries on. That is `m4/tailscale-serve`, which is not built. |
-| `tailscale serve` configured last pass and gone now | Notifies. That is the reboot case, and it is an outage. |
+| It sees                                             | It does                                                                                                                                                  |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A 200, however slow                                 | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict.                                                             |
+| Nothing listening                                   | Starts the server at once. There is no socket to drop and no snapshot to lose.                                                                           |
+| Accepted and silent for 15s, or a 503               | Counts it. Three consecutive passes — three minutes — before it restarts anything.                                                                       |
+| Still unhealthy after two restarts                  | Stops. Marks the state file `gaveUp` and puts a critical dialog on the screen. A server that is down and known to be down beats one killed every minute. |
+| `tailscale serve` never configured                  | Says so and carries on. That is `m4/tailscale-serve`, which is not built.                                                                                |
+| `tailscale serve` configured last pass and gone now | Notifies. That is the reboot case, and it is an outage.                                                                                                  |
 
 The 15-second probe timeout is five times what the server gives its own `tmux list-sessions` round
 trip. That gap is the whole point: a busy machine, a large capture or a wedged tmux makes a healthy
@@ -369,7 +372,7 @@ binary, both script paths and the log path against your own checkout, since laun
 `~` nor `$PATH`.
 
 **Fill in the environment block as well as the paths.** The watchdog spawns the server with its own
-environment, so under launchd the plist *is* the server's environment and nothing you exported in
+environment, so under launchd the plist _is_ the server's environment and nothing you exported in
 the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
 Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
 protected than the one it replaced. Those three — `AGENTDECK_MOUNTS`, `AGENTDECK_PROFILES` and
@@ -421,6 +424,65 @@ You can run a pass by hand at any time without launchd, which is how the logic w
 ```sh
 AGENTDECK_WATCHDOG_STATE=/tmp/watchdog-state.json node scripts/watchdog.mjs
 ```
+
+## From the phone: `tailscale serve`
+
+The server binds `127.0.0.1` and nothing else. `tailscale serve --bg 7777` on this Mac is the one
+place remote exposure is decided; it puts a real certificate on the machine's `ts.net` name and
+proxies to the loopback port. Never `tailscale funnel` — that is the public internet, and nothing
+here is built to survive it.
+
+With the server already running, one command does it and checks its own work:
+
+```
+AGENTDECK_PORT=7777 node scripts/tailscale-serve.mjs
+```
+
+It reads `tailscale status --json` first and **refuses** if either switch below is off, because
+running `tailscale serve --bg` in that state hangs rather than fails; every call it makes has a
+timeout, and a hang is reported with the enable link the CLI printed. Then it applies the proxy,
+checks `tailscale serve status` names the port, fetches `/api/health` over loopback and again over
+the `ts.net` URL, and finishes by printing the exact `AGENTDECK_ORIGIN=` line to restart with. It
+exits non-zero on any of those, so a green run is the whole verification.
+
+By hand, the same thing:
+
+```
+tailscale serve --bg 7777       # with a timeout: it blocks forever if Serve is not enabled
+tailscale serve status          # what is configured, and the https:// URL
+tailscale serve reset           # take it down again
+```
+
+**Two tailnet settings are off by default and the CLI will not tell you which one bit you.** Both
+are at <https://login.tailscale.com/admin/dns>, and agentdeck reports at boot which of them this
+machine is missing, by name, along with the URL and the exact `AGENTDECK_ORIGIN` value:
+
+- **Serve**, for the tailnet. Without it `tailscale serve --bg` prints an enable link
+  (`https://login.tailscale.com/f/serve?node=…`) and then **never exits** — it blocks waiting for
+  someone to click it, so a script or a `launchd` job hangs rather than fails. Run it with a
+  timeout.
+- **HTTPS Certificates**. Without them there is no certificate for the `ts.net` name at all;
+  `tailscale cert <name>` answers `your Tailscale account does not support getting TLS certs`, and
+  `tailscale status --json` reports a null `CertDomains`, which is what agentdeck reads.
+
+Behind the proxy the page, `/api` and `/ws` are all the same origin — the `https://<host>.ts.net`
+one — so the dev-flow caveats above do not apply, and this is the run where the `Origin` check can
+actually be on. Set it to the value the boot log names:
+
+```
+AGENTDECK_ORIGIN=https://<host>.tailXXXXXX.ts.net pnpm start
+```
+
+**Neither half of this is demonstrated on this Mac** (2026-08-09): both switches are still off, so
+`tailscale serve` has never been in place here and the `ts.net` URL has never loaded. What is
+tested is everything up to the switches — the refusals, the hang, the reports — against a stubbed
+`tailscale`.
+
+The agentdeck _server_ never sets that variable itself and never runs `tailscale serve` itself; the
+script above is a thing you run, not something a boot does. Turning the check on
+from ambient machine state rather than from your intent would 403 the loopback and Vite flows the
+same server serves, and re-applying the proxy on every boot would make exposure two decisions
+instead of one.
 
 ## Non-goals
 

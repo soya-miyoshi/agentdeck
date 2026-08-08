@@ -268,7 +268,7 @@ const stopServer = async (pid) => {
 
 /** Whether `tailscale serve` still points at the port, or `null` for "could not ask". Detect and
  *  report only - re-applying is m4/tailscale-serve's, and that item is blocked (plan 006). */
-const serveConfigured = async () => {
+const serveState = async () => {
   if (!existsSync(TAILSCALE)) return null;
   return await new Promise((resolve) => {
     execFile(
@@ -277,10 +277,14 @@ const serveConfigured = async () => {
       { timeout: TOOL_TIMEOUT_MS },
       (error, stdout, stderr) => {
         // tailscale missing, tailscaled down or not logged in: not configured.
-        if (error) return resolve(false);
+        if (error) return resolve({ configured: false, funnel: false });
         const text = `${stdout}${stderr}`;
-        if (/no serve config/i.test(text)) return resolve(false);
-        resolve(text.includes(`127.0.0.1:${port}`) || text.includes(`localhost:${port}`));
+        // Same predicate as scripts/tailscale-serve.mjs, deliberately: Funnel is the public
+        // internet rather than the tailnet, and the two must not disagree about what it looks like.
+        const funnel = /funnel\s+on/i.test(text) || /^\s*Funnel on\b/im.test(text);
+        if (/no serve config/i.test(text)) return resolve({ configured: false, funnel });
+        const configured = text.includes(`127.0.0.1:${port}`) || text.includes(`localhost:${port}`);
+        resolve({ configured, funnel });
       },
     );
   });
@@ -289,14 +293,32 @@ const serveConfigured = async () => {
 /** Reports it, and only notifies for "was configured last pass and is gone" - never configured is
  *  the expected state of an unbuilt milestone (plan 006). */
 const checkServe = async (state) => {
-  const configured = await serveConfigured();
-  if (configured === null) {
+  const serve = await serveState();
+  if (serve === null) {
     // No fall back to PATH: the writable copy is exactly what must not be executed here.
     log(`no tailscale at ${TAILSCALE}; the serve check is skipped this pass`);
     return;
   }
+  const { configured, funnel } = serve;
+
+  // Funnel is the public internet. The install script refuses to run under it, but that check
+  // happens once and this is the only thing that looks again - so exposure widening after the
+  // fact was invisible. Alerted at the same weight as giving up, every pass it is true, because
+  // a terminal server on the public internet is not a thing to mention once.
+  if (funnel) {
+    log("TAILSCALE FUNNEL IS ON: this port is exposed to the public internet, not the tailnet");
+    await notify(
+      `agentdeck: tailscale FUNNEL is on for this machine. The deck is reachable from the public ` +
+        `internet, not just your tailnet. Turn it off with \`tailscale funnel ${port} off\`.`,
+    );
+  }
+
   if (configured) {
     log("tailscale serve is configured for the port");
+    // Exposure APPEARING is a security event and was silent; only its disappearance was reported.
+    if (!state.serveConfigured) {
+      await notify(`tailscale serve now publishes port ${port} on the tailnet.`);
+    }
   } else if (state.serveConfigured) {
     log("tailscale serve WAS configured for the port and is not any more");
     await notify(
@@ -304,7 +326,7 @@ const checkServe = async (state) => {
         `Mac. Sessions are untouched. Re-apply it by hand.`,
     );
   } else {
-    log("tailscale serve is not configured for the port (m4/tailscale-serve is not built yet)");
+    log("tailscale serve is not configured for the port");
   }
   state.serveConfigured = configured;
 };
@@ -349,9 +371,25 @@ const holder = await listenerPid(state);
 if (holder !== null && typeof holder === "object") {
   log(`port ${String(port)} is held by pid ${String(holder.squatter)}, which is not agentdeck`);
   log(`  it is running: ${holder.command}`);
+  // `tailscale serve` outlives the server it was verified against: it is tailscaled state, kept
+  // across a logout and a reboot, and its one identity check ran when it was applied. So a
+  // squatter on this port does not merely conflict locally - it is PUBLISHED, with a real
+  // certificate, to every device on the tailnet. Saying "port conflict" and stopping would let
+  // the operator read this as a local annoyance.
+  const exposure = await serveState();
+  const published = exposure !== null && exposure.configured;
+  if (published) {
+    log(`  and tailscale serve is publishing that port on the tailnet`);
+  }
   alert(
     `agentdeck watchdog: port ${String(port)} is held by something that is not agentdeck ` +
-      `(pid ${String(holder.squatter)}). Not restarting and not killing it - that is your call.`,
+      `(pid ${String(holder.squatter)}).` +
+      (published
+        ? ` tailscale serve is PUBLISHING that port to your tailnet, so whatever that process is, ` +
+          `it is reachable from your other devices. Run \`tailscale serve reset\` if that is not ` +
+          `what you want.`
+        : "") +
+      ` Not restarting and not killing it - that is your call.`,
   );
   process.exit(1);
 }
