@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { AgentSummary } from "../agent-profiles.ts";
 import type { Session } from "../registry.ts";
 import { fetchAgents, fetchSessions, UnauthorizedError, verifyToken } from "./api.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type ConnectionStatus } from "./connection.ts";
+import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
+import KeyRow from "./KeyRow.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -137,6 +139,50 @@ const select = (id: string): void => {
   handles.get(id)?.focus();
 };
 
+// Ctrl latches rather than being held: there is one thumb, and the second press is a separate
+// event. The latch is spent by the next single character sent from this tab, whether that comes
+// from a cap on the row or from a character typed on the soft keyboard - which is what makes
+// Ctrl+C reachable by pressing Ctrl and then `c`.
+const ctrlLatched = ref(false);
+
+// The latch belongs to the tab it was armed on. It is one app-wide ref while `send` reads
+// `active.value` at SPEND time, and the active tab can move on its own - the session list settling
+// after a sync, or a tab exiting - so an armed Ctrl could be spent on a session the user was not
+// looking at when they armed it. Ctrl+C to the wrong agent is the confidently-wrong output this
+// design refuses, and the person would have no way to know it happened. Disarming on any change of
+// tab costs one extra tap in the case where they meant it.
+watch(active, () => {
+  ctrlLatched.value = false;
+});
+
+const send = (data: string): void => {
+  const id = active.value;
+  if (id === undefined || data === "") return;
+  const spend = ctrlLatched.value && spendable(data);
+  const bytes = spend ? withCtrl(data) : data;
+  if (spend) ctrlLatched.value = false;
+  // Straight through `Connection.input`, which chunks and paces: the key row is not a side channel.
+  connection.value?.input(id, bytes);
+};
+
+const pressKey = (key: KeyName): void => {
+  if (key === "ctrl") {
+    ctrlLatched.value = !ctrlLatched.value;
+    return;
+  }
+  const id = active.value;
+  if (id === undefined) return;
+  send(keyBytes(key, handles.get(id)?.applicationCursorKeys() ?? false));
+};
+
+const typed = (sessionId: string, data: string): void => {
+  if (sessionId !== active.value) {
+    connection.value?.input(sessionId, data);
+    return;
+  }
+  send(data);
+};
+
 const ready = (sessionId: string, handle: TerminalHandle): void => {
   handles.set(sessionId, handle);
   const size = handle.size();
@@ -177,10 +223,13 @@ if (token.value !== undefined) start(token.value);
         :visible="id === active"
         @ready="ready"
         @gone="gone"
-        @input="(sessionId, data) => connection?.input(sessionId, data)"
+        @input="typed"
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
       />
     </main>
+    <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
+         needs. Without it the deck is a window onto a process waiting for an answer. -->
+    <KeyRow :ctrl-latched="ctrlLatched" @key="pressKey" />
   </div>
 </template>
 
@@ -194,9 +243,11 @@ if (token.value !== undefined) start(token.value);
   position: relative;
   flex: 1;
   min-height: 0;
-  /* Bottom edge of the app. Without this the last rows of the terminal - which is where a
-     permission prompt and the cursor are - sit under the home indicator. */
-  padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+  /* The key row is the bottom edge of the app now, and it carries the bottom inset - the last rows
+     of the terminal, which is where a permission prompt and the cursor are, sit above the row and
+     the row sits above the home indicator. Insetting here as well would leave a band of the pane's
+     background between the two. */
+  padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
 }
 .banner {

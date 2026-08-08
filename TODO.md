@@ -419,8 +419,31 @@ Agent-agnostic signals first, so the generic path is the proven one.
       **Done when:** the token gets onto a phone without being typed by hand, and survives
       backgrounding the app.
 
-- [ ] **`m4/key-row`** — Esc, Tab, arrows, Enter, Ctrl.
+- [x] **`m4/key-row`** — Esc, Tab, arrows, Enter, Ctrl.
       **Done when:** a real permission prompt is **answered** from the phone, not merely watched.
+      **Built, and the phone half is NOT demonstrated.** The bytes are in `src/client/key-row.ts`
+      and go out through the same paced `Connection.input` as every other keystroke: Esc `0x1b`,
+      Tab `0x09`, Enter `0x0d` (CR, not LF — the pty's line discipline is what makes it a line),
+      and the arrows as CSI or SS3 according to DECCKM, read off xterm's
+      `modes.applicationCursorKeysMode` rather than hardcoded either way. Ctrl is a modifier and
+      LATCHES: one thumb means the second press is a separate event, so it applies to the next
+      thing sent from that tab — a cap, or a character typed on the soft keyboard — which is what
+      makes Ctrl then `c` reach `0x03`.
+      **A blocked prompt is really answered, in `src/client/end-to-end.test.ts`:** a shell `read`
+      that does not return until Enter arrives (the answer is typed, the marker file is checked
+      absent, then Enter commits it), a `sleep 300` interrupted with the latch, a filename
+      completed with Tab, and Esc and the arrows read back out of `cat -v` — real server, real
+      tmux, real pty, real shell. **Measured and worth knowing:** tmux parses its client's input as
+      keys and re-encodes them for the pane, so `ESC O A` arrives at a pane that has not set DECCKM
+      as `ESC [ A`; both forms are recognised as Up, which bounds what that test proves and does
+      not excuse guessing the mode, since xterm's own parser normalises nothing.
+      **The thumb is the part nobody here can do**: the only other tailnet device has been offline,
+      so "answered from the phone" is unproven. The steps for a person holding one are in the
+      README under "Answering a prompt from the phone".
+      The row owns the bottom edge of the app now, so it carries `--safe-bottom` (the pane area no
+      longer does, which would have left a band of pane background between the two) and its caps
+      claim `--touch-target`; `src/pwa.test.ts` holds both against the built CSS. Text labels on
+      the caps, never glyphs.
 
 - [ ] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
       reachable, `tailscale serve` still configured. Restarts the server after consecutive
