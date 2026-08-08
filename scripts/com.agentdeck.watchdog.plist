@@ -14,7 +14,18 @@
 
   EVERY PATH BELOW IS ABSOLUTE AND MACHINE-SPECIFIC, because launchd expands nothing - not `~`,
   not `$HOME`, not a login shell's PATH. The four to check against your own checkout are the node
-  binary, the two script paths, and the log path.
+  binary, the two script paths, and the log path. The EnvironmentVariables block below is the
+  fifth thing to fill in, and the one that is not a path: it is the server's environment too.
+
+  INSTALLING THIS CHANGES WHAT `scripts/` IS. Until now `scripts/` was agent-writable and
+  host-executed on a trigger a PERSON pulls - `pnpm install`'s postinstall, or running one by hand
+  - which is what makes the `git status` / `git diff` review before those commands a control at
+  all. ProgramArguments points at a file inside the checkout, so once this is loaded the trigger
+  is a timer: an agent that appends a line to scripts/watchdog.mjs has it executed as you, in your
+  GUI session, within 60 seconds and again after every reboot, with no human action - and the same
+  edit chooses the command line the watchdog then spawns as the server. To keep the review gating
+  what it says it gates, copy the script out of the checkout (`~/.agentdeck/bin/watchdog.mjs`) and
+  point ProgramArguments there. README.md's "Installing it" says the same.
 
   It cannot fight a sleeping Mac (plan 006). With the lid shut nothing here runs, and the answer
   is Energy Saver or `caffeinate`, decided deliberately rather than discovered.
@@ -36,8 +47,23 @@
 
     <!--
       The watchdog spawns the server with its own environment, so this block is also the server's
-      environment: what is not here is not set. `/opt/homebrew/bin` is here for `tailscale`, and
-      the node directory so the spawned server finds the same runtime.
+      environment: WHAT IS NOT HERE IS NOT SET, and the server the watchdog starts at 3am is
+      configured by this file rather than by the shell you ran `pnpm start` in. So everything the
+      README's Environment table tells you to set has to be repeated here, or the recovery quietly
+      replaces your server with one that is emptier and less protected:
+
+        AGENTDECK_MOUNTS    absent, the allowlist is empty - every live session is filtered out of
+                            /api/sessions and every create is refused. The watchdog REFUSES to
+                            start a server without it and notifies instead.
+        AGENTDECK_PROFILES  absent, nothing is startable. Same refusal.
+        AGENTDECK_ORIGIN    absent, the Origin check on every /api route and every /ws upgrade is
+                            OFF. Set it to the tailnet origin you set it to by hand.
+
+      AGENTDECK_TOKEN_FILE and AGENTDECK_AGENT_STATE_DIR belong here too if you moved them off
+      their defaults, and AGENTDECK_REPO if you followed the README and pointed ProgramArguments at
+      a copy of the script outside the checkout - a copy cannot find src/server.ts by sitting next
+      to it. `/opt/homebrew/bin` is here for `tailscale`, and the node directory so the
+      spawned server finds the same runtime.
 
       No LANG and no LC_*, on purpose. The locale-less environment launchd hands a job is exactly
       what broke every create in m0/create-500, and it is fixed at its cause in `baseEnv` rather
@@ -51,6 +77,12 @@
       <string>7777</string>
       <key>TMUX_SOCKET</key>
       <string>agentdeck</string>
+      <key>AGENTDECK_MOUNTS</key>
+      <string>/Users/you/ghq/github.com/soya-miyoshi</string>
+      <key>AGENTDECK_PROFILES</key>
+      <string>/Users/you/.agentdeck/agents.json</string>
+      <key>AGENTDECK_ORIGIN</key>
+      <string>https://mac.example.ts.net</string>
     </dict>
 
     <!-- Once at load, then every 60s. A wedge needs three consecutive failures, so acting on one

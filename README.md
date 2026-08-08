@@ -351,7 +351,11 @@ server slow, and restarting it drops every phone's socket and every tab's snapsh
 A restart is announced, never silent — `osascript` puts a banner up saying the tmux sessions were
 kept, because a restart notification that does not say so is one you learn to fear. State between
 passes lives in `~/.agentdeck/watchdog-state.json`; the log is
-`~/Library/Logs/agentdeck-watchdog.log`.
+`~/Library/Logs/agentdeck-watchdog.log`. The server the watchdog starts writes its own output to
+`~/Library/Logs/agentdeck-server.log` (`AGENTDECK_SERVER_LOG` moves it) — a separate file, because
+those are the server's words rather than the watchdog's, and a server that refuses to boot says why
+in one line before it exits. Without that file the watchdog would report "started" and then, three
+minutes later, "still unhealthy after two restarts", with the sentence explaining why sent nowhere.
 
 It cannot fight a sleeping Mac. With the lid shut nothing runs, and Energy Saver or `caffeinate` is
 the only answer.
@@ -364,7 +368,27 @@ has been copied into `~/Library/LaunchAgents`, so none of the launchd half — t
 binary, both script paths and the log path against your own checkout, since launchd expands neither
 `~` nor `$PATH`.
 
+**Fill in the environment block as well as the paths.** The watchdog spawns the server with its own
+environment, so under launchd the plist *is* the server's environment and nothing you exported in
+the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
+Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
+protected than the one it replaced. `AGENTDECK_MOUNTS` and `AGENTDECK_PROFILES` are the two the
+watchdog refuses to start a server without — it logs it and puts a banner up instead of quietly
+producing a server with an empty allowlist and no agents. Add `AGENTDECK_TOKEN_FILE` and
+`AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults.
+
+**Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
+repository, which agents working here can write — as you, every 60 seconds, with no human action.
+Everywhere else `scripts/` is executed by a command a person types after the review under
+[Toolchain](#toolchain); a timer is not. So copy the script out of the checkout and point
+`ProgramArguments` at the copy, which is what keeps what launchd runs unattended out of an agent's
+reach:
+
 ```sh
+mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs
+# then edit ProgramArguments to name ~/.agentdeck/bin/watchdog.mjs (absolute, launchd expands no ~)
+# and set AGENTDECK_REPO to the checkout, since the copy can no longer find src/server.ts by
+# sitting next to it
 cp scripts/com.agentdeck.watchdog.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
 launchctl kickstart -p gui/$(id -u)/com.agentdeck.watchdog   # run one pass now
@@ -444,7 +468,12 @@ shell, `pnpm-lock.yaml` is resolved by a pnpm 9 that does not gate dependency li
 `package.json` declares `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm
 always runs the root project's own lifecycle scripts, so `pnpm install --frozen-lockfile` executes
 a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs` and
-`scripts/restart-survival.mjs` are run by hand besides. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
+`scripts/restart-survival.mjs` are run by hand besides. **If you install the LaunchAgent, `scripts/`
+stops being triggered only by a person**: launchd then runs `scripts/watchdog.mjs` unattended, as
+you, in your GUI session, every 60 seconds and again after every reboot, so an edit to it is
+executed within a minute with no human action and no chance to read a diff — and that same edit chooses the command line the
+watchdog spawns as the server. Pointing the plist at a copy outside the checkout is what keeps this
+review gating it; see "Installing it" under [The watchdog](#the-watchdog). `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
 executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
 loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
 `.git/hooks/`. `pnpm build` is on the list for a different reason: Vite copies `src/client/public/`

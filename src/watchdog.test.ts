@@ -52,6 +52,10 @@ const stubs = temp("agentdeck-watchdog-stubs-");
 
 const statePath = join(conf, "state.json");
 const profiles = join(conf, "agents.json");
+// Where the SERVER the watchdog starts writes its output. Under launchd the watchdog's own lines
+// go to StandardOutPath and the server's used to go to /dev/null, which is where the sentence
+// explaining a refusal to boot went with them.
+const serverLog = join(conf, "server.log");
 
 // Each suite gets its OWN transcript of what the watchdog told the user. One shared file was not
 // enough: the give-up alert is spawned detached on purpose, so it can land after the pass that
@@ -83,6 +87,7 @@ interface State {
   gaveUp: boolean;
   pid: number | null;
   serveConfigured: boolean;
+  startRefused: boolean;
 }
 
 const state = (): State => JSON.parse(readFileSync(statePath, "utf8")) as State;
@@ -95,6 +100,7 @@ const seedState = (overrides: Partial<State> = {}): void => {
     gaveUp: false,
     pid: null,
     serveConfigured: false,
+    startRefused: false,
     ...overrides,
   };
   writeFileSync(statePath, JSON.stringify(seeded));
@@ -102,6 +108,19 @@ const seedState = (overrides: Partial<State> = {}): void => {
 
 const notified = (): string =>
   existsSync(notifications) ? readFileSync(notifications, "utf8") : "";
+
+/** What the SERVER the watchdog started printed, which is a different file from the above. */
+const logged = (): string => (existsSync(serverLog) ? readFileSync(serverLog, "utf8") : "");
+
+/** Signal 0: does this pid exist. Only ever called here with a pid this file spawned. */
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * The transcript, once it matches. The critical alert is deliberately detached - a dialog nobody
@@ -123,24 +142,35 @@ const freshTranscript = (name: string): void => {
   rmSync(notifications, { force: true });
 };
 
-/** One launchd tick, run synchronously so a test can reason about passes in order. */
-const pass = (port: string): SpawnSyncReturns<string> =>
-  spawnSync(process.execPath, [watchdog], {
-    encoding: "utf8",
-    env: {
-      // Stubs first so `osascript` is the recorder; the rest of PATH is real, because `tailscale`
-      // and the node the watchdog spawns are real.
-      PATH: `${stubs}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
-      HOME: home,
-      AGENTDECK_PORT: port,
-      TMUX_SOCKET: socket,
-      AGENTDECK_MOUNTS: work,
-      AGENTDECK_PROFILES: profiles,
-      AGENTDECK_WATCHDOG_STATE: statePath,
-      AGENTDECK_TEST_NOTIFY: notifications,
-      // No LANG and no LC_*: the environment launchd actually hands the job (m0/create-500).
-    },
-  });
+/**
+ * One launchd tick, run synchronously so a test can reason about passes in order. `overrides` is
+ * how a test says what the plist did or did not declare: `undefined` REMOVES a variable, which is
+ * the failure the environment tests are about.
+ */
+const pass = (
+  port: string,
+  overrides: Record<string, string | undefined> = {},
+): SpawnSyncReturns<string> => {
+  const env: Record<string, string> = {
+    // Stubs first so `osascript` is the recorder; the rest of PATH is real, because `tailscale`
+    // and the node the watchdog spawns are real.
+    PATH: `${stubs}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
+    HOME: home,
+    AGENTDECK_PORT: port,
+    TMUX_SOCKET: socket,
+    AGENTDECK_MOUNTS: work,
+    AGENTDECK_PROFILES: profiles,
+    AGENTDECK_WATCHDOG_STATE: statePath,
+    AGENTDECK_SERVER_LOG: serverLog,
+    AGENTDECK_TEST_NOTIFY: notifications,
+    // No LANG and no LC_*: the environment launchd actually hands the job (m0/create-500).
+  };
+  for (const [name, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[name];
+    else env[name] = value;
+  }
+  return spawnSync(process.execPath, [watchdog], { encoding: "utf8", env });
+};
 
 /** `<session id> <pane pid>` for everything on our socket - survival at pid level, not by name. */
 const panes = (): string[] => {
@@ -672,6 +702,7 @@ void describe("the watchdog survives its own surroundings", () => {
       gaveUp: false,
       pid: listenerPid(port),
       serveConfigured: false,
+      startRefused: false,
     });
   });
 
@@ -765,6 +796,194 @@ void describe("what the watchdog is forbidden to do", () => {
       budget,
       "the server's health round trip no longer has the 3s budget 15000ms is five times",
     );
+  });
+});
+
+void describe("the environment the recovered server gets is the plist's, and it has to be enough", () => {
+  // The watchdog spawns the server with its own environment, which under launchd is exactly what
+  // the plist declares. The operator's documented way to run the server is `AGENTDECK_MOUNTS=...
+  // AGENTDECK_PROFILES=... pnpm start` from a shell, so a plist that declares neither replaces
+  // their server at 3am with one whose allowlist is empty (every live session filtered out of
+  // /api/sessions, every create refused) and which can start no agent - under a banner saying the
+  // sessions were kept. Refusing is the only honest answer, and it has to be audible.
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("environment");
+    seedState();
+  });
+
+  after(() => {
+    killListener(port);
+  });
+
+  void test("no AGENTDECK_MOUNTS: it starts nothing, exits non-zero, and says why", async () => {
+    const outcome = pass(port, { AGENTDECK_MOUNTS: undefined });
+    assert.equal(outcome.status, 1, "a refusal exited 0, so launchd would see success");
+    assert.match(outcome.stdout, /refusing to start the server: AGENTDECK_MOUNTS not set/);
+    assert.doesNotMatch(outcome.stdout, /started the server/);
+    assert.equal(listenerPid(port), null, "it started a server with no allowlist");
+    const seen = await notifiedEventually(/will NOT start one/);
+    assert.match(seen, /AGENTDECK_MOUNTS/);
+    assert.match(seen, /tmux sessions are untouched/);
+    assert.equal(state().startRefused, true);
+  });
+
+  void test("it says it once: the next pass logs the refusal and does not notify again", () => {
+    const before = notified();
+    const outcome = pass(port, { AGENTDECK_MOUNTS: undefined, AGENTDECK_PROFILES: undefined });
+    assert.equal(outcome.status, 1);
+    assert.match(
+      outcome.stdout,
+      /refusing to start the server: AGENTDECK_MOUNTS, AGENTDECK_PROFILES/,
+    );
+    assert.equal(notified(), before, "a banner a minute is the crash-loop in another medium");
+  });
+
+  void test("the plist declares the whole server environment, not only the port and socket", () => {
+    // The file this is really about. Whatever is not in this block is not set on the server the
+    // watchdog starts - and AGENTDECK_ORIGIN missing is the Origin check on every /api route and
+    // every /ws upgrade silently off, which is a protection the operator configured being removed
+    // by the recovery.
+    const text = readFileSync(plist, "utf8");
+    for (const name of ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"]) {
+      assert.match(
+        text,
+        new RegExp(`<key>${name}</key>\\s*<string>[^<]+</string>`),
+        `the plist does not declare ${name}, so the recovered server does not have it`,
+      );
+    }
+  });
+
+  void test("the README tells the operator to fill the environment in, AGENTDECK_ORIGIN by name", () => {
+    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+    const installing = readme.slice(readme.indexOf("### Installing it"));
+    assert.match(installing, /AGENTDECK_ORIGIN/);
+    assert.match(installing, /AGENTDECK_MOUNTS/);
+    assert.match(installing, /AGENTDECK_PROFILES/);
+  });
+});
+
+void describe("the server the watchdog starts logs somewhere", () => {
+  // `stdio: "ignore"` sent every word the recovered server said to /dev/null: the one line a
+  // refusal to boot prints before exiting, the boot warning that the Origin check is off, every
+  // `sync failed`, a first run's token and QR. The watchdog would then log "started the server",
+  // notify that it had, and three minutes later put a critical dialog up saying it was still
+  // unhealthy - with the diagnosis written to a closed fd.
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("server-log");
+    seedState();
+    rmSync(serverLog, { force: true });
+  });
+
+  after(() => {
+    killListener(port);
+  });
+
+  void test("what the started server printed is in the log file, not in /dev/null", async () => {
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /started the server/);
+    assert.ok(await waitForHealth(port), "the server never became healthy");
+    // The boot warning src/server.ts prints whenever AGENTDECK_ORIGIN is unset, which is exactly
+    // the sentence audit.md recorded as having no log destination.
+    for (let i = 0; i < 40 && !/AGENTDECK_ORIGIN/.test(logged()); i++) await sleep(50);
+    assert.match(logged(), /AGENTDECK_ORIGIN is not set/, "the server's output went nowhere");
+  });
+});
+
+void describe("a remembered pid is not a licence to kill", () => {
+  // `stopServer` is SIGTERM and then SIGKILL, so the pid it is handed had better be the server.
+  // The server crashing is this script's premise and macOS recycles pids, so a pid that is merely
+  // alive is not evidence: the next thing to hold it is another process of this user.
+  let port = "";
+  let innocent: ReturnType<typeof spawn>;
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("pid");
+    innocent = spawn("/bin/sh", ["-c", "exec sleep 300"], { stdio: "ignore" });
+    for (let i = 0; i < 40 && innocent.pid === undefined; i++) await sleep(25);
+  });
+
+  after(() => {
+    innocent.kill("SIGKILL");
+    killListener(port);
+  });
+
+  void test("a recycled pid that is not holding the port is not stopped", async () => {
+    // The state file remembers 4242; 4242 is now a pane's agent, a build, or an editor. Nothing is
+    // listening, so this pass recovers - and it must recover without signalling a stranger.
+    seedState({ pid: innocent.pid ?? null });
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /no node process is holding the port/);
+    assert.doesNotMatch(outcome.stdout, /stopping /, "it signalled a pid that held nothing");
+    assert.ok(await waitForHealth(port), "the recovery itself did not happen");
+    assert.equal(
+      alive(innocent.pid ?? 0),
+      true,
+      "the watchdog killed an unrelated process of this user",
+    );
+  });
+
+  void test("a pid of -1 in the state file is not believed, because kill(-1) is everything", () => {
+    // A truncated or hand-edited state file. `kill(-1, ...)` signals every process this user owns
+    // and `kill(0, ...)` the watchdog's own group, and both answer signal 0 happily - so the pid
+    // has to be validated where it is read, not trusted because a probe did not throw. The port
+    // here HAS a healthy listener, so this asserts on what the pass believes rather than by
+    // letting an unfixed script signal the test runner's group.
+    const held = listenerPid(port);
+    assert.notEqual(held, null);
+    seedState({ pid: -1 });
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, new RegExp(`node process ${String(held)} holds it`));
+    assert.doesNotMatch(outcome.stdout, /node process -1/, "-1 was taken for a live server");
+    assert.equal(state().pid, held);
+  });
+});
+
+void describe("installing the LaunchAgent changes what `scripts/` is, and that is written down", () => {
+  // `scripts/` is enumerated as agent-writable-and-host-executed in plan 005, in the README's
+  // toolchain exception and in src/containment.test.ts - with the trigger stated as pnpm's root
+  // postinstall or being run by hand, i.e. something a PERSON does, which is what makes the
+  // prescribed `git status` / `git diff` review a control at all. A loaded LaunchAgent makes the
+  // trigger a 60-second timer instead. If that is not said where the claim is made, the review is
+  // still described as gating something it no longer gates.
+  const mentionsTimer = (text: string): boolean =>
+    /60 seconds|60-second/.test(text) && /unattended|no human action|timer/i.test(text);
+
+  void test("the README's toolchain exception says the timer runs it with no human action", () => {
+    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+    const start = readme.indexOf("Every one of those lines is a review gate");
+    assert.notEqual(start, -1, "the toolchain exception has been renamed or removed");
+    const exception = readme.slice(start, readme.indexOf("\n## ", start));
+    assert.ok(
+      mentionsTimer(exception),
+      "the toolchain exception does not say installing the LaunchAgent makes `scripts/` unattended",
+    );
+  });
+
+  void test("plan 005's enumeration of host-executed files says it too", () => {
+    const plan = readFileSync(join(repoRoot, "plans", "005-containment.md"), "utf8");
+    assert.ok(mentionsTimer(plan), "plan 005 still describes `scripts/` as human-triggered only");
+    assert.match(plan, /launchd-watchdog/);
+  });
+
+  void test("the install copies the script out of the checkout before pointing launchd at it", () => {
+    // The fix rather than the warning: what launchd runs unattended should not be a file an agent
+    // can rewrite between reviews.
+    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+    const installing = readme.slice(readme.indexOf("### Installing it"));
+    assert.match(installing, /cp scripts\/watchdog\.mjs/);
+    assert.match(installing, /AGENTDECK_REPO/);
+    // And the script can actually be run from that copy, which is the half a document cannot do.
+    assert.match(readFileSync(watchdog, "utf8"), /process\.env\.AGENTDECK_REPO/);
   });
 });
 

@@ -43,6 +43,14 @@
 // pass, the state file is marked `gaveUp` and every later pass does nothing but say so. A server
 // that is down and loudly known to be down is better than one being killed every minute.
 //
+// THE ENVIRONMENT IS THE PLIST'S, AND THAT IS A HAZARD, NOT A CONVENIENCE. The server this script
+// spawns inherits this process's environment, which under launchd is exactly what the plist
+// declares and nothing else - not the shell the operator started the server from. A variable they
+// set there and did not copy into the plist is one the replacement server does not have:
+// AGENTDECK_ORIGIN absent turns the Origin check off on every /api route and /ws upgrade,
+// AGENTDECK_MOUNTS absent empties the allowlist. The last two are refused outright (`missingEnv`)
+// rather than started; the rest is why the plist declares the whole server environment.
+//
 // TWO KNOWN BLIND SPOTS, both in audit.md, neither fixed here:
 //   1. `/api/health` answers 200 for exactly the locale failure that broke every create in
 //      m0/create-500, because the server's `probeTmux` does not go through `baseEnv` and so has
@@ -56,7 +64,7 @@
 //      the pile it is meant to notice.
 
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,10 +76,21 @@ const SLOW_MS = 3_000;
 const TOOL_TIMEOUT_MS = 5_000;
 const STOP_GRACE_MS = 10_000;
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+// The checkout holding src/server.ts. It is the parent of this script when the script is run from
+// the repository, and AGENTDECK_REPO when it is not - which is the supported install, because a
+// copy outside the checkout is what stops launchd running a file an agent can rewrite (README,
+// "Installing it").
+const repoRoot = process.env.AGENTDECK_REPO ?? fileURLToPath(new URL("..", import.meta.url));
 const port = process.env.AGENTDECK_PORT ?? "7777";
 const statePath =
   process.env.AGENTDECK_WATCHDOG_STATE ?? join(homedir(), ".agentdeck", "watchdog-state.json");
+// Where the SERVER this script starts writes its own output. Without it every word the recovered
+// server says - the refusal that made it exit, the boot warning that the Origin check is off, a
+// first run's token and QR - goes to a closed fd, and the watchdog then reports "started" for a
+// process that printed one line and exited. The watchdog's own lines go to launchd's
+// StandardOutPath; this is the other half.
+const serverLogPath =
+  process.env.AGENTDECK_SERVER_LOG ?? join(homedir(), "Library", "Logs", "agentdeck-server.log");
 
 const stamp = () => new Date().toISOString();
 const log = (message) => {
@@ -86,7 +105,16 @@ const log = (message) => {
 // last healthy pass, `pid` the server this watchdog started, `serveConfigured` what the last
 // pass saw of `tailscale serve`. A missing or unreadable file is a first run, not an error: the
 // honest recovery is to start from zero rather than refuse to supervise.
-const emptyState = { failures: 0, restarts: 0, gaveUp: false, pid: null, serveConfigured: false };
+// `startRefused` is the once-only latch on the "I will not start a server this misconfigured"
+// notification, cleared by the next healthy pass.
+const emptyState = {
+  failures: 0,
+  restarts: 0,
+  gaveUp: false,
+  pid: null,
+  serveConfigured: false,
+  startRefused: false,
+};
 
 const readState = () => {
   try {
@@ -146,8 +174,12 @@ const alert = (message) => {
 // Is the node process running, and does the port answer
 // -----------------------------------------------------------------------------------------
 
+// `pid > 1` rather than `typeof pid === "number"`, because the state file is JSON on disk that a
+// crash can truncate and a hand can edit: `kill(0, …)` signals this process's whole group and
+// `kill(-1, …)` every process the user owns, so an unvalidated pid turns a signal aimed at one
+// process into one aimed at all of them.
 const alive = (pid) => {
-  if (typeof pid !== "number") return false;
+  if (!Number.isInteger(pid) || pid <= 1) return false;
   try {
     // Signal 0 is the check with no signal delivered.
     process.kill(pid, 0);
@@ -157,28 +189,43 @@ const alive = (pid) => {
   }
 };
 
-/**
- * The pid holding the port: the one this watchdog started if it is still alive, otherwise
- * whatever is listening. The second half matters because a server started by hand at login is
- * the normal case on this Mac, and a watchdog that will only restart its own children would
- * watch a wedged one forever.
- */
-const listenerPid = async (state) => {
-  if (alive(state.pid)) return state.pid;
-  return await new Promise((resolve) => {
+/** Every pid listening on the port, as lsof reports it, validated. */
+const listeningPids = async () =>
+  await new Promise((resolve) => {
     execFile(
       "/usr/sbin/lsof",
       ["-ti", `tcp:${port}`, "-sTCP:LISTEN"],
       { timeout: TOOL_TIMEOUT_MS },
       (error, stdout) => {
         // Non-zero simply means nothing is listening, which is an answer.
-        if (error) return resolve(null);
-        const first = stdout.trim().split("\n")[0];
-        const parsed = Number(first);
-        resolve(Number.isInteger(parsed) && parsed > 0 ? parsed : null);
+        if (error) return resolve([]);
+        const pids = stdout
+          .trim()
+          .split("\n")
+          .map((line) => Number(line.trim()))
+          .filter((parsed) => Number.isInteger(parsed) && parsed > 1);
+        resolve(pids);
       },
     );
   });
+
+/**
+ * The pid holding the port, ASKED EVERY PASS rather than remembered. `state.pid` is used only when
+ * lsof still reports it as the listener, and this is the whole reason: what this pid is for is
+ * `stopServer`, which is SIGTERM and then SIGKILL. The server crashing is the premise of the
+ * script, macOS recycles pids, and the next thing to hold 4242 is another process of this user - a
+ * pane's agent, a build, an editor. A remembered pid that is merely alive is not evidence it is
+ * the server, and killing on it would be killing a stranger while the banner says every agent is
+ * still running.
+ *
+ * Whatever is listening counts, not only this watchdog's own children: a server started by hand at
+ * login is the normal case on this Mac, and a watchdog that will only restart what it started
+ * would watch a wedged one forever.
+ */
+const listenerPid = async (state) => {
+  const listening = await listeningPids();
+  if (alive(state.pid) && listening.includes(state.pid)) return state.pid;
+  return listening[0] ?? null;
 };
 
 /** `answered` (with status and latency), `silent`, or `refused`. */
@@ -212,15 +259,35 @@ const probe = async () => {
 // -----------------------------------------------------------------------------------------
 
 /**
- * Start the server detached, so it outlives this pass and launchd's next tick. Its environment
- * is this process's, which under launchd is exactly what the plist declares - the same path by
- * which the server gets its port, socket and mounts.
+ * What the server cannot be started without. Its environment is this process's, which under
+ * launchd is exactly what the plist declares - so anything the operator set in the shell they
+ * started the server from and did NOT put in the plist is absent from the replacement. With no
+ * AGENTDECK_MOUNTS the allowlist is empty, so every live session is filtered out of
+ * `/api/sessions` and every create is refused; with no AGENTDECK_PROFILES nothing is startable.
+ * A recovery that produces that server is worse than the outage it recovered from, and it would
+ * do it under a banner saying the sessions were kept. So it is refused and said out loud, in the
+ * log and to a person, rather than performed quietly.
+ */
+const REQUIRED_ENV = ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES"];
+const missingEnv = () => REQUIRED_ENV.filter((name) => (process.env[name] ?? "") === "");
+
+/**
+ * Start the server detached, so it outlives this pass and launchd's next tick, with its output in
+ * a file rather than in /dev/null: a server that refuses to boot says why in one line and exits,
+ * and that line is the whole diagnosis.
  */
 const startServer = () => {
+  let out = "ignore";
+  try {
+    mkdirSync(dirname(serverLogPath), { recursive: true });
+    out = openSync(serverLogPath, "a");
+  } catch (error) {
+    log(`could not open ${serverLogPath} (${String(error)}); the server's output is discarded`);
+  }
   const child = spawn(process.execPath, [join(repoRoot, "src", "server.ts")], {
     cwd: repoRoot,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", out, out],
   });
   child.unref();
   return child.pid ?? null;
@@ -334,6 +401,7 @@ if (healthy) {
   if (state.restarts > 0 || state.failures > 0) log("recovered; failure counters reset");
   state.failures = 0;
   state.restarts = 0;
+  state.startRefused = false;
   state.pid = pid;
   await checkServe(state);
   writeState(state);
@@ -363,6 +431,25 @@ if (state.restarts >= MAX_RESTARTS) {
     `untouched and still running. Nothing is reaching the phone until you look at this.`;
   log(`giving up after ${String(MAX_RESTARTS)} restarts`);
   alert(message);
+  process.exit(1);
+}
+
+const absent = missingEnv();
+if (absent.length > 0) {
+  // Nothing is stopped either: a server that is at least configured, however wedged, beats being
+  // replaced by one that cannot list a session or start an agent.
+  const message =
+    `The agentdeck server needs recovering and the watchdog will NOT start one: ` +
+    `${absent.join(" and ")} ${absent.length > 1 ? "are" : "is"} not set in the watchdog's own ` +
+    `environment, so the server it started would have no mounts and no agents. Put them in the ` +
+    `LaunchAgent (scripts/com.agentdeck.watchdog.plist) and start the server yourself. Your tmux ` +
+    `sessions are untouched.`;
+  log(`refusing to start the server: ${absent.join(", ")} not set in this environment`);
+  // Said once. Every pass logs it, but a banner a minute is the crash-loop in another medium.
+  const first = !state.startRefused;
+  state.startRefused = true;
+  writeState(state);
+  if (first) await notify(message);
   process.exit(1);
 }
 
