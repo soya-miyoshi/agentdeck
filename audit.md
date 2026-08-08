@@ -1210,3 +1210,50 @@ dependency is spent here, which plan 003 line 218 pre-authorises.
   solved.
 - **No token expiry and no revocation list**, carried from `m4/pwa`.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/key-row - final whole-codebase pass - 2026-08-08
+
+Esc, Tab, arrows, Enter and a latching Ctrl, sending the bytes a PTY expects rather than DOM key
+events. **The phone-side half of the done-when is NOT demonstrated** - the only other tailnet device
+has been offline for five days - so a real blocking prompt is answered through the key row's own
+code path against real tmux and a real shell instead, and the README carries the steps for someone
+holding a phone.
+
+### Findings
+
+- [high] src/client/key-row.ts:71 - **The Ctrl latch made the tmux prefix reachable, and the pty is
+  a tmux CLIENT - so `Ctrl` `b` `:` `run-shell "..."` executes arbitrary host commands.**
+  `src/pty.ts` attaches with `tmux attach-session`, so bytes land on a client's stdin and tmux
+  parses them as keys before the pane sees them. Nothing set a prefix on this socket, so it was the
+  operator's own - C-b by default. **Verified on tmux 3.7b by driving a real attach client with
+  exactly the bytes this row can emit: the marker file appeared.** That is outside the cwd
+  allowlist, outside `AGENTDECK_PROFILES` and without `POST /api/sessions`; `new-window -c /` and
+  `attach-session` to a session the registry deliberately filters off the socket are reachable the
+  same way, which is the precise situation plan 005 declares the allowlist a boundary against.
+  **Not a key-row bug** - any client with a real keyboard could always type C-b; the row only made
+  it reachable from a phone, which is what surfaced it. Status: FIXED in ee464ff by taking the
+  channel away rather than one route to it: `ensureServer` sets `prefix` and `prefix2` to `none`.
+  Re-verified: the same bytes no longer execute anything. The cost is real and belongs to whoever
+  attaches to this socket by hand, and it is stated.
+
+- [medium] src/client/key-row.ts:71 - `Ctrl` then `d` is tmux `detach-client`: it kills the
+  server's own attach pty while the pane keeps running, and it is a plausible mis-tap rather than
+  an attack. `SessionPty.onExit` then declared `exited` on a sticky stream while `sync` kept the
+  dead pty, because the session was still in the live list - so the strip showed a finished agent
+  that was still working, every keystroke went into a dead pty, and recovery meant restarting the
+  server. Status: FIXED in ee464ff, and independently of the prefix fix: tmux still lists the
+  session, so tmux is the authority - the corpse is dropped and the next sync re-attaches.
+
+- [medium] src/client/App.vue:146 - The Ctrl latch is one app-wide ref while `send` reads
+  `active.value` at spend time, and the active tab moves on its own when the session list settles
+  or a tab exits. An armed Ctrl could therefore be spent on a session the user was not looking at
+  when they armed it - Ctrl+C to the wrong agent, with nothing to tell them. Status: FIXED: the
+  latch disarms on any change of active tab.
+
+### Open after this iteration
+
+- **A hand-attached client on this socket has no tmux bindings.** The deliberate cost of the fix
+  above, stated rather than discovered.
+- **Same-uid**, unchanged.
