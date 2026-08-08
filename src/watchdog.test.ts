@@ -11,6 +11,7 @@ import type { SpawnSyncReturns } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -35,6 +36,8 @@ const home = temp("agentdeck-watchdog-home-");
 const work = temp("agentdeck-watchdog-work-");
 const conf = temp("agentdeck-watchdog-conf-");
 const stubs = temp("agentdeck-watchdog-stubs-");
+// The repo the stub server pretends to be, so the watchdog's argv check can recognise it.
+const stubRepo = temp("agentdeck-watchdog-repo-");
 
 const statePath = join(conf, "state.json");
 const profiles = join(conf, "agents.json");
@@ -143,6 +146,11 @@ const pass = (
     AGENTDECK_PROFILES: profiles,
     AGENTDECK_ORIGIN: "https://stub.example.ts.net",
     AGENTDECK_WATCHDOG_STATE: statePath,
+    // Milliseconds rather than the real values: this file waits on these, and the production
+    // defaults are asserted separately so shrinking them here cannot hide a changed default.
+    AGENTDECK_WATCHDOG_PROBE_TIMEOUT_MS: String(PROBE_TIMEOUT_MS),
+    AGENTDECK_WATCHDOG_SLOW_MS: "150",
+    AGENTDECK_WATCHDOG_STOP_GRACE_MS: "800",
     AGENTDECK_SERVER_LOG: serverLog,
     AGENTDECK_TEST_NOTIFY: notifications,
     // No LANG and no LC_*: the environment launchd actually hands the job (m0/create-500).
@@ -188,15 +196,19 @@ const freePort = async (): Promise<string> => {
   return found;
 };
 
-const waitForHealth = async (port: string): Promise<boolean> => {
-  for (let i = 0; i < 80; i++) {
+/** Waits for a healthy answer, bounded. The timeout matters: a wedged listener accepts the
+ *  connection and never replies, and a bare `fetch` waits on that forever. */
+const waitForHealth = async (port: string, attempts = 20): Promise<boolean> => {
+  for (let i = 0; i < attempts; i++) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+        signal: AbortSignal.timeout(300),
+      });
       if (response.ok) return true;
     } catch {
-      // Not listening yet.
+      // Not listening, or listening and not answering.
     }
-    await sleep(250);
+    await sleep(100);
   }
   return false;
 };
@@ -217,12 +229,22 @@ const listenerPid = (port: string): number | null => listeningPids(port)[0] ?? n
 
 /** A stand-in for the server, as a CHILD PROCESS: the watchdog stops what `lsof` reports on the
  *  port, so an in-process listener would have it SIGTERM the test runner. */
+// Written to <stubRepo>/src/server.ts and run from there, not `node -e`: the watchdog identifies
+// the server by argv before believing or killing it, so a stub has to be shaped like one to be
+// seen. Tests that stand one up pass `asStubRepo` so the watchdog is looking at the same repo;
+// tests where the watchdog must start the REAL server leave it alone.
+/** What the tests give the watchdog for its probe timeout, and what the wedged case waits out. */
+const PROBE_TIMEOUT_MS = 1_200;
+
 const startStub = async (
   what: string,
   port: string,
   source: string,
 ): Promise<ReturnType<typeof spawn>> => {
-  const child = spawn(process.execPath, ["-e", source], { stdio: "ignore" });
+  const dir = join(stubRepo, "src");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "server.ts"), source);
+  const child = spawn(process.execPath, [join(dir, "server.ts")], { stdio: "ignore" });
   for (let i = 0; i < 80 && listenerPid(port) === null; i++) await sleep(50);
   assert.notEqual(listenerPid(port), null, `the ${what} never came up`);
   return child;
@@ -234,6 +256,9 @@ const healthyStub = (port: string): string =>
   `res.writeHead(200, {"content-type": "application/json"});` +
   `res.end(JSON.stringify({ ok: true, version: "stub" }));` +
   `}).listen(${port}, "127.0.0.1");`;
+
+/** Point the watchdog at the stub's repo, for a pass whose listener is a stub rather than ours. */
+const asStubRepo = { AGENTDECK_REPO: stubRepo };
 
 const api = async (port: string, path: string, init: RequestInit = {}): Promise<Response> => {
   const token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
@@ -351,7 +376,8 @@ void describe("a slow-but-alive server is not restarted", () => {
   // The clause a naive check gets wrong: 200 with `ok: true` after six seconds, which every
   // simpler check on this machine calls dead (audit.md). Requests go to a file because the stub
   // is a child process.
-  const DELAY_MS = 6_000;
+  // Slower than SLOW_MS, faster than the probe timeout: slow, not silent.
+  const DELAY_MS = 500;
   let slow: ReturnType<typeof spawn>;
   let port = "";
   let requests = "";
@@ -380,7 +406,7 @@ void describe("a slow-but-alive server is not restarted", () => {
   void test("three consecutive slow passes restart nothing and notify nobody", () => {
     const held = listenerPid(port);
     for (let i = 0; i < 3; i++) {
-      const outcome = pass(port);
+      const outcome = pass(port, asStubRepo);
       assert.equal(outcome.status, 0, outcome.stderr);
       assert.match(outcome.stdout, /answered 200 SLOWLY/, "a slow 200 was not read as alive");
       assert.doesNotMatch(outcome.stdout, /started the server/);
@@ -423,9 +449,12 @@ void describe("a wedged server needs three consecutive failures, then is restart
 
   void test("the first two passes see the wedge, say so, and do nothing", () => {
     for (const expected of [1, 2]) {
-      const outcome = pass(port);
+      const outcome = pass(port, asStubRepo);
       assert.equal(outcome.status, 0, outcome.stderr);
-      assert.match(outcome.stdout, /did not answer within 15000ms - wedged/);
+      assert.match(
+        outcome.stdout,
+        new RegExp(`did not answer within ${String(PROBE_TIMEOUT_MS)}ms`),
+      );
       assert.match(outcome.stdout, /not restarting yet/);
       assert.equal(state().failures, expected);
       assert.equal(state().restarts, 0);
@@ -434,7 +463,7 @@ void describe("a wedged server needs three consecutive failures, then is restart
   });
 
   void test("the third consecutive failure restarts it", () => {
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /stopping \d+/, "the wedged process was not stopped");
     assert.match(outcome.stdout, /started the server/);
@@ -446,7 +475,9 @@ void describe("a wedged server needs three consecutive failures, then is restart
   void test("the recovery leaves ONE server on the port, not a second beside the old one", async () => {
     // The restart path stops what lsof reports before it spawns, so a recovery replaces the
     // listener rather than adding to it: two servers on one port is the state nothing detects.
-    assert.ok(await waitForHealth(port), "the restarted server never became healthy");
+    // Health is not the question here - what the watchdog restarted is the same wedged stub, by
+    // construction - so this waits for the port to be held again rather than answered.
+    for (let i = 0; i < 40 && listeningPids(port).length === 0; i++) await sleep(100);
     const holding = listeningPids(port);
     assert.equal(holding.length, 1, `${String(holding.length)} processes hold the port`);
     assert.equal(alive(wedged.pid as number), false, "the wedged process outlived its replacement");
@@ -558,7 +589,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
   void test("never configured: reported, not alarming, and not a failure of the pass", () => {
     stubTailscale("no serve config", 0);
     seedState();
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /tailscale serve is not configured for the port/);
     assert.match(outcome.stdout, /m4\/tailscale-serve is not built yet/);
     assert.doesNotMatch(notified(), /tailscale/, "an unbuilt milestone woke somebody");
@@ -567,7 +598,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
   void test("was configured and is gone: that one is a notification", () => {
     stubTailscale("no serve config", 0);
     seedState({ serveConfigured: true });
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /WAS configured for the port and is not any more/);
     assert.match(notified(), /tailscale serve is no longer configured/);
     assert.match(notified(), /Sessions are untouched/);
@@ -580,7 +611,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
       0,
     );
     seedState();
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /tailscale serve is configured for the port/);
     assert.equal(state().serveConfigured, true);
   });
@@ -590,7 +621,10 @@ void describe("tailscale serve: not configured is not an outage", () => {
     // every agent runs as, so a PATH fallback would have the timer execute an agent's file.
     stubTailscale(`|-- / proxy http://127.0.0.1:${port}`, 0);
     seedState();
-    const outcome = pass(port, { AGENTDECK_TAILSCALE: join(conf, "no-such-tailscale") });
+    const outcome = pass(port, {
+      ...asStubRepo,
+      AGENTDECK_TAILSCALE: join(conf, "no-such-tailscale"),
+    });
     assert.match(outcome.stdout, /the serve check is skipped this pass/);
     assert.doesNotMatch(outcome.stdout, /tailscale serve is configured/, "it fell back to PATH");
     assert.equal(state().serveConfigured, false);
@@ -687,7 +721,7 @@ void describe("an answer that is not a healthy one", () => {
     seedState();
     const held = listenerPid(port);
     for (const expected of [1, 2]) {
-      const outcome = pass(port);
+      const outcome = pass(port, asStubRepo);
       assert.equal(outcome.status, 0, outcome.stderr);
       assert.match(outcome.stdout, /answered 503 in \d+ms - unhealthy/);
       assert.match(outcome.stdout, /not restarting yet/);
@@ -704,7 +738,7 @@ void describe("an answer that is not a healthy one", () => {
     // fails - and a watchdog that reads only the status code calls that healthy forever.
     writeFileSync(mode, "notok");
     seedState();
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200 in \d+ms - unhealthy/);
     assert.equal(state().failures, 1, "a 200 saying `ok: false` was read as healthy");
@@ -713,7 +747,7 @@ void describe("an answer that is not a healthy one", () => {
   void test("a healthy answer from the same server clears the streak", () => {
     writeFileSync(mode, "healthy");
     seedState({ failures: 2 });
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200 in \d+ms$/m);
     assert.equal(state().failures, 0, "two failures then a healthy pass did not reset the streak");
@@ -747,11 +781,11 @@ void describe("a planted negative streak cannot disable recovery", () => {
 
   void test("the counters are clamped on read, so the 503 is restarted at the third pass", () => {
     for (const expected of [1, 2]) {
-      const outcome = pass(port);
+      const outcome = pass(port, asStubRepo);
       assert.equal(outcome.status, 0, outcome.stderr);
       assert.equal(state().failures, expected, "a planted negative streak survived the read");
     }
-    const acting = pass(port);
+    const acting = pass(port, asStubRepo);
     assert.equal(acting.status, 0, acting.stderr);
     assert.match(acting.stdout, /started the server/, "an unhealthy server was never recovered");
     assert.equal(state().restarts, 1);
@@ -785,7 +819,7 @@ void describe("the watchdog survives its own surroundings", () => {
     // recovery; exiting non-zero and touching nothing leaves the machine unsupervised over a
     // scratch file.
     writeFileSync(statePath, "{ this is not json");
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200/);
     assert.deepEqual(state(), {
@@ -804,7 +838,7 @@ void describe("the watchdog survives its own surroundings", () => {
     // state file is how they resume. That sentence is an instruction to a person at 3am and is
     // worth being true.
     seedState({ failures: 3, restarts: 2, gaveUp: true });
-    const stuck = pass(port);
+    const stuck = pass(port, asStubRepo);
     assert.equal(stuck.status, 1);
     const instruction = /Clear (\S+) to resume/.exec(stuck.stdout);
     assert.notEqual(
@@ -815,7 +849,7 @@ void describe("the watchdog survives its own surroundings", () => {
     assert.equal(instruction?.[1], statePath, "it names a state file other than the one it reads");
 
     rmSync(statePath, { force: true });
-    const resumed = pass(port);
+    const resumed = pass(port, asStubRepo);
     assert.equal(resumed.status, 0, resumed.stderr);
     assert.match(resumed.stdout, /answered 200/);
     assert.equal(state().gaveUp, false, "it stayed given-up after the state file was cleared");
@@ -830,7 +864,7 @@ void describe("the watchdog survives its own surroundings", () => {
     // `serveConfigured: true` with a stub that now says there is none: the regression branch, the
     // cheapest pass that has something to say to a person.
     seedState({ serveConfigured: true });
-    const outcome = pass(port);
+    const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /WAS configured for the port and is not any more/);
     assert.match(outcome.stdout, /could not post the notification/);
@@ -875,7 +909,8 @@ void describe("what the watchdog is forbidden to do", () => {
   void test("the probe timeout is well above the server's own health budget", () => {
     // The slow-but-alive clause in numbers rather than in prose: 15s is five times the 3s the
     // server gives its own tmux round trip, so "silent" means silent, not busy.
-    assert.match(source, /const PROBE_TIMEOUT_MS = 15_000;/);
+    // The production DEFAULTS, which is what the plist runs with.
+    assert.match(source, /PROBE_TIMEOUT_MS", 15_000\)/);
     assert.match(source, /const FAIL_THRESHOLD = 3;/);
     assert.match(source, /const MAX_RESTARTS = 2;/);
     const health = readFileSync(join(repoRoot, "src", "server.ts"), "utf8");

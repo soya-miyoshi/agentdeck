@@ -11,13 +11,21 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PROBE_TIMEOUT_MS = 15_000;
+// Overridable so the tests drive milliseconds instead of waiting on the real values. Production
+// uses the defaults; nothing in the plist sets these, and a non-positive value falls back rather
+// than disabling a bound.
+const ms = (name, fallback) => {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const PROBE_TIMEOUT_MS = ms("AGENTDECK_WATCHDOG_PROBE_TIMEOUT_MS", 15_000);
 const FAIL_THRESHOLD = 3;
 const MAX_RESTARTS = 2;
-const SLOW_MS = 3_000;
-const TOOL_TIMEOUT_MS = 5_000;
-const STOP_GRACE_MS = 10_000;
-const GIVE_UP_REALERT_MS = 3_600_000;
+const SLOW_MS = ms("AGENTDECK_WATCHDOG_SLOW_MS", 3_000);
+const TOOL_TIMEOUT_MS = ms("AGENTDECK_WATCHDOG_TOOL_TIMEOUT_MS", 5_000);
+const STOP_GRACE_MS = ms("AGENTDECK_WATCHDOG_STOP_GRACE_MS", 10_000);
+const GIVE_UP_REALERT_MS = ms("AGENTDECK_WATCHDOG_REALERT_MS", 3_600_000);
 
 // Absolute, and both in directories this user cannot write: PATH order does nothing for a command
 // whose only copy lives in a user-writable directory (audit.md). `osascript` stays on PATH.
@@ -147,12 +155,32 @@ const listeningPids = async () =>
     );
   });
 
-/** The pid holding the port, asked every pass. `state.pid` is believed only while lsof still
- *  reports it as the listener, because what this pid is for is SIGTERM then SIGKILL. */
+/** A pid's full command line, or "" if it is gone. Used to tell agentdeck from a namesake. */
+const commandOf = async (pid) =>
+  await new Promise((resolve) => {
+    execFile(
+      "/bin/ps",
+      ["-o", "command=", "-p", String(pid)],
+      { timeout: TOOL_TIMEOUT_MS },
+      (error, stdout) => resolve(error ? "" : stdout.trim()),
+    );
+  });
+
+/** Whether a pid is OUR server: this node running this repo's src/server.ts. */
+const isOurServer = async (pid) => {
+  const command = await commandOf(pid);
+  return command.includes(process.execPath) && command.includes(join(repoRoot, "src", "server.ts"));
+};
+
+/** The pid holding the port, only if it is our server. Anything else is reported as a squatter:
+ *  this pid is what gets SIGTERM then SIGKILL, and it is not ours to send. */
 const listenerPid = async (state) => {
   const listening = await listeningPids();
-  if (alive(state.pid) && listening.includes(state.pid)) return state.pid;
-  return listening[0] ?? null;
+  const candidate =
+    alive(state.pid) && listening.includes(state.pid) ? state.pid : (listening[0] ?? null);
+  if (candidate === null) return null;
+  if (await isOurServer(candidate)) return candidate;
+  return { squatter: candidate, command: await commandOf(candidate) };
 };
 
 /** `answered` (with status and latency), `silent`, or `refused`. A timeout is the wedge - a
@@ -187,7 +215,14 @@ const probe = async () => {
 // What the server may not be started without: no mounts is an empty allowlist, no profiles is
 // nothing startable, no origin is the Origin check off on every /api route and /ws upgrade.
 const REQUIRED_ENV = ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"];
-const missingEnv = () => REQUIRED_ENV.filter((name) => (process.env[name] ?? "") === "");
+// Unset OR still the plist's sentinel. A placeholder is worse than an absence: a wrong
+// AGENTDECK_ORIGIN 403s every browser request while /api/health keeps answering 200, so the
+// watchdog would log a green pass forever against a server the phone cannot use.
+const missingEnv = () =>
+  REQUIRED_ENV.filter((name) => {
+    const value = process.env[name] ?? "";
+    return value === "" || value.includes("REPLACE_ME");
+  });
 
 /** Start the server detached so it outlives this pass. The log is 0600 because it can carry a
  *  first run's token. */
@@ -306,7 +341,22 @@ if (state.gaveUp) {
   process.exit(1);
 }
 
-const pid = await listenerPid(state);
+const holder = await listenerPid(state);
+
+// Something else owns the port. Not ours to kill and not evidence we are healthy: killing it would
+// be an unattended timer SIGKILLing an unrelated process of the operator's, and blessing it would
+// let a same-uid stub answering /api/health buy permanent silence from the only thing watching.
+if (holder !== null && typeof holder === "object") {
+  log(`port ${String(port)} is held by pid ${String(holder.squatter)}, which is not agentdeck`);
+  log(`  it is running: ${holder.command}`);
+  alert(
+    `agentdeck watchdog: port ${String(port)} is held by something that is not agentdeck ` +
+      `(pid ${String(holder.squatter)}). Not restarting and not killing it - that is your call.`,
+  );
+  process.exit(1);
+}
+
+const pid = holder;
 log(pid === null ? "no node process is holding the port" : `node process ${String(pid)} holds it`);
 
 const result = await probe();

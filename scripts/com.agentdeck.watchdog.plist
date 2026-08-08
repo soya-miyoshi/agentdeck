@@ -95,12 +95,17 @@
       <string>7777</string>
       <key>TMUX_SOCKET</key>
       <string>agentdeck</string>
+      <!-- One entry per REPOSITORY, comma separated. Not the ghq owner directory: that would
+           allowlist every repo you own, which is broader than the list it replaced. -->
       <key>AGENTDECK_MOUNTS</key>
-      <string>/Users/you/ghq/github.com/soya-miyoshi</string>
+      <string>REPLACE_ME</string>
       <key>AGENTDECK_PROFILES</key>
       <string>/Users/you/.agentdeck/agents.json</string>
+      <!-- The https://<host>.ts.net address the phone opens. Wrong-but-present is worse than
+           absent: the server 403s every browser request and every socket upgrade while
+           /api/health, which is answered before the origin check, keeps returning 200. -->
       <key>AGENTDECK_ORIGIN</key>
-      <string>https://mac.example.ts.net</string>
+      <string>REPLACE_ME</string>
     </dict>
 
     <!-- Once at load, then every 60s. A wedge needs three consecutive failures, so acting on one
