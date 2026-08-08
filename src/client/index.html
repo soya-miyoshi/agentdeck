@@ -8,6 +8,17 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
     />
     <title>agentdeck</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- The strip's background, so the notch and the status bar are not a different colour from
+         the row underneath them once the app runs without browser chrome. -->
+    <meta name="theme-color" content="#14161a" />
+    <!-- iOS installs from Share > Add to Home Screen and reads these rather than the manifest on
+         older Safari; `black-translucent` is what puts the page under the status bar, which is
+         what the safe-area insets in main.css then inset from. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="agentdeck" />
+    <link rel="apple-touch-icon" href="/icons/icon-180.png" />
   </head>
   <body>
     <div id="app"></div>

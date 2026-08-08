@@ -11,9 +11,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -48,7 +48,11 @@ const readDoc = async (name: string): Promise<string> =>
 // `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm always runs the ROOT
 // project's own lifecycle scripts - the pnpm 9 gating caveat above covers dependencies only. So
 // `pnpm install --frozen-lockfile` executes a file in this tree no matter what the lockfile says,
-// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides.
+// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides. Every
+// one of those triggers is one a PERSON pulls, which is what makes the review a control; installing
+// the LaunchAgent from m4/launchd-watchdog would make `scripts/watchdog.mjs` a 60-second UNATTENDED
+// trigger instead, which is why the install is specified to copy it out of the checkout first.
+// `src/watchdog.test.ts` holds the documents to that.
 const hostExecutedFiles = [
   "package.json",
   "scripts/",
@@ -58,10 +62,21 @@ const hostExecutedFiles = [
   ".mise*.toml",
   "mise-tasks/",
   "src/**/*.test.ts",
+  // `src/**/*.test.ts` is what `pnpm test` hands to `node --test`, but it is not everything that
+  // command executes: a test file's imports run too, at module scope, and a helper under
+  // `src/fixtures/` is imported by tests without matching that glob. Naming the directory keeps
+  // the enumeration true for every future fixture rather than for the one that exists.
+  "src/fixtures/",
   ".claude/",
   ".github/workflows/",
   ".git/config",
   ".git/hooks/",
+  // Not host-EXECUTED, and listed here anyway because the consequence is the same shape and the
+  // review is directed at this list. Vite copies `src/client/public/` verbatim into `dist/client`,
+  // which is served with no bearer token - and the copy dereferences symlinks, so an entry here
+  // becomes a real file in the publish root holding whatever it pointed at. `static.ts` cannot see
+  // that: by serve time it is a real file inside the root.
+  "src/client/public/",
 ];
 
 void describe("the host-execution consequence is documented where the claim is made", () => {
@@ -105,6 +120,59 @@ void describe("the host-execution consequence is documented where the claim is m
     const section = plan.slice(start, plan.indexOf("\n## ", start + 1));
     for (const file of hostExecutedFiles) {
       assert.ok(section.includes(file), `plan 005 does not name ${file} as agent-writable`);
+    }
+  });
+
+  // The enumeration above is written by hand, so it goes stale the moment `pnpm test` executes a
+  // module the glob `src/**/*.test.ts` does not match. That happens whenever a test imports a
+  // helper that is not itself a test file and is not part of the production graph: `node --test`
+  // runs the helper's top-level statements just as readily, and a reviewer following the list is
+  // told that file may be skimmed. This derives the set from the tree rather than trusting it.
+  void test("every test-only module the test run executes is covered by the enumeration", async () => {
+    const entries = await readdir(new URL("./", repoRoot), {
+      recursive: true,
+      withFileTypes: true,
+    });
+    const srcFiles = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+      .map((entry) => `${relative(repoRootPath, join(entry.parentPath, entry.name))}`);
+
+    // `src/*.ts` is the production module layer - the server's own graph, reviewed as code
+    // whether or not a test imports it. What this test is after is the layer below: a directory
+    // of test-only helpers, which reads as test scaffolding and is executed like production.
+    // Production imports are not all in `.ts`: `src/client/App.vue` imports client modules, so a
+    // graph built from TypeScript alone would call them test-only.
+    const nonTestSources = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => relative(repoRootPath, join(entry.parentPath, entry.name)))
+        .filter((file) => !file.endsWith(".test.ts") && /\.(ts|vue|mjs|js|json)$/.test(file))
+        .map(async (file) => [file, await readFile(join(repoRootPath, file), "utf8")] as const),
+    );
+    const isProductionModule = (file: string): boolean =>
+      dirname(file) === "src" ||
+      nonTestSources.some(
+        ([other, source]) => other !== file && source.includes(`/${file.split("/").pop() ?? ""}"`),
+      );
+
+    const importedByTests = new Set<string>();
+    for (const file of srcFiles.filter((candidate) => candidate.endsWith(".test.ts"))) {
+      const source = await readFile(join(repoRootPath, file), "utf8");
+      for (const match of source.matchAll(/from\s+"(\.[^"]+)"/g)) {
+        const target = relative(repoRootPath, join(repoRootPath, dirname(file), match[1] ?? ""));
+        if (srcFiles.includes(target) && !target.endsWith(".test.ts")) importedByTests.add(target);
+      }
+    }
+
+    for (const target of importedByTests) {
+      if (isProductionModule(target)) continue;
+      const covered = hostExecutedFiles.some(
+        (entry) => entry === target || (entry.endsWith("/") && target.startsWith(entry)),
+      );
+      assert.ok(
+        covered,
+        `${target} is executed by \`pnpm test\` but no entry of the review list names it`,
+      );
     }
   });
 });

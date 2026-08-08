@@ -19,7 +19,19 @@
 > (`eslint.config.mjs`, `.prettierrc*`, `package.json` scripts, `pnpm-lock.yaml`,
 > `src/**/*.test.ts`, `mise.toml`, `.claude/`, `scripts/` - `package.json`'s own `postinstall` runs
 > `scripts/fix-node-pty-permissions.mjs` on every `pnpm install`) are agent-writable as before, and there is no
-> longer a container between that and the machine. The agent profiles file `AGENTDECK_PROFILES`
+> longer a container between that and the machine. `scripts/` needs one more line since
+> **`m4/launchd-watchdog`**: every trigger in that list is one a PERSON pulls, which is what makes
+> the `git status` / `git diff` review before it a control — but installing the LaunchAgent makes
+> `scripts/watchdog.mjs` run on a TIMER, as the user, in their GUI session, every 60 seconds and
+> after every reboot, with no human action, and the same file chooses the command line spawned as
+> the server. The install is therefore specified to copy the script out of the checkout and point
+> `ProgramArguments` at the copy (README, "Installing it").
+> **That copy buys review scope, not write protection**:
+> `~/.agentdeck/bin` and the mise node named as `ProgramArguments[0]` are both
+> writable by this uid, so anything running as you can still rewrite the script and the
+> interpreter — and being outside the checkout, that edit is one `git status` / `git diff` cannot
+> see either. Only a root-owned script and a root-owned interpreter would close it, and that is
+> not built. The agent profiles file `AGENTDECK_PROFILES`
 > names belongs in that enumeration and was missing from it: `command` and `args` go unmodified
 > into `tmux new-session -- command args` and run as the human, so it is a more direct execution
 > surface than any config the toolchain evaluates. Since 2026-08-07 the server refuses to start
@@ -199,7 +211,10 @@ can edit.
 of them looks like a build file.** `src/**/*.test.ts` is what `pnpm test` hands to `node --test`,
 which executes it as code — the suite already shells out (`execFileSync("/bin/sh", ...)`) and
 already prepends `node_modules/.bin` to `PATH`, so one more shell-out added to an existing helper
-is unremarkable in a diff nobody expects to contain an attack. `.mise*.toml` documents `mise install`
+is unremarkable in a diff nobody expects to contain an attack. `src/fixtures/` is the same surface
+one step out of sight: the glob matches test files only, but `node --test` executes what they
+import at module scope too, so a helper there runs on the host at every `pnpm test` while sitting
+outside the enumeration a reviewer is working from. `.mise*.toml` documents `mise install`
 and mise executes `[env] _.source` and `[tasks]` entries on the host — note the glob, because mise
 auto-discovers `mise.toml`, `.mise.toml`, `mise.local.toml`, `.config/mise/config.toml` and file
 tasks under `mise-tasks/` or `.mise/tasks/`, so enumerating the one filename we happen to have
@@ -226,7 +241,7 @@ never with the host toolchain (the README's Toolchain section states this as the
 require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
 `docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
 `.mise*.toml`, `mise-tasks/`,
-`src/**/*.test.ts`, `.claude/` and `.github/workflows/` before any `--build`, and before any host
+`src/**/*.test.ts`, `src/fixtures/`, `.claude/` and `.github/workflows/` before any `--build`, and before any host
 toolchain run or agent
 session taken as the exception. **That enumeration is a floor rather than the job**: every one of
 these tools discovers its own config, so the exception requires reading every added or modified
@@ -258,7 +273,10 @@ agent editing it cannot reach the host toolchain at all. **It is blind to `.git/
 clean after an agent writes a pager alias or a `pre-push` hook — and those cannot be volumed away,
 because the container needs the repository's git metadata. Two commands see them and belong in the
 same checklist: `git config --local --list`, and `ls -la .git/hooks` (a live hook is anything
-without a `.sample` suffix). The Performance section below wants the
+without a `.sample` suffix). `src/client/public/` joins that checklist under a different heading -
+not host-executed but host-PUBLISHED: Vite copies it into `dist/client`, which the server serves
+with no bearer token, and the copy dereferences symlinks, so an entry there lands in the publish
+root as a real file holding whatever it pointed at. The Performance section below wants the
 same thing for an unrelated reason, which is why it is cheap. For the same reason **the container
 needs pnpm in the image** (`corepack prepare pnpm@9.15.9 --activate`): a documented in-container
 command that does not run makes the host exception the only path there is.

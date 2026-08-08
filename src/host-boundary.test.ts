@@ -18,7 +18,16 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -310,6 +319,28 @@ void describe("the published build directory is a place a secret cannot go", () 
     assert.match(result.stderr, /UNAUTHENTICATED/);
     assert.match(result.stderr, /dist\/client/);
     rmSync(home, { recursive: true, force: true });
+  });
+
+  void test("a symlink at the token path cannot smuggle it in either", async () => {
+    // Both refusals compared LEXICAL paths, and `writeFileSync` follows symlinks. So a link at
+    // ~/.agentdeck/token pointing into the publish root passed both - its lexical path is nowhere
+    // near either - and the first boot created a real 0600 file inside dist/client, served at a
+    // URL equal to its filename to anything on the tailnet with no token at all. Measured before
+    // the fix: the file appeared and was downloadable. static.ts had used realpath for exactly
+    // this reason from the start; these checks had not.
+    const home = mkdtempSync(join(tmpdir(), "agentdeck-symlinked-"));
+    const planted = join(clientDir, `smuggled-${String(process.pid)}`);
+    mkdirSync(join(home, ".agentdeck"), { recursive: true });
+    symlinkSync(planted, join(home, ".agentdeck", "token"));
+    try {
+      const result = await boot({ HOME: home, AGENTDECK_PORT: "0" });
+      assert.notEqual(result.code, 0, "a symlinked token path started the server");
+      assert.match(result.stderr, /UNAUTHENTICATED/);
+      assert.equal(existsSync(planted), false, "the token was written into the publish root");
+    } finally {
+      rmSync(planted, { force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   void test("so is a profiles file, which is the more direct execution surface", async () => {

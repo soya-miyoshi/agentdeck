@@ -84,7 +84,11 @@ the next install), any lint, format or toolchain config the host tool discovers 
 JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
 host, and auto-discovers more filenames than the one we happen to have) —
 `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `.claude/`, `.github/workflows/`, `.git/config`, `.git/hooks/`
+the suite already shells out), `src/fixtures/` (imported by test files, so `node --test` runs it
+too even though the glob above does not match it), `src/client/public/` (Vite copies it verbatim into `dist/client`,
+which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
+there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
+`.git/config`, `.git/hooks/`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the
 toolchain runs agent-authored code on the Mac with your identity. `.claude/` is the one with no
 build step in front of it: `.claude/skills/*/SKILL.md`,
@@ -107,6 +111,27 @@ the root of a working tree — where an agent's `ls -la` or `grep -rn token .` m
 place it must not be. It lives in `~/.agentdeck/token`, created 0600 on first run;
 `AGENTDECK_TOKEN_FILE` moves it. **The server refuses to start if that path resolves inside an
 allowlist entry**, which is the rule made executable rather than written down three times.
+
+The run that creates that file — first run, and every run after the file is deleted — prints the
+token to the terminal as a QR code, with the URL to open beside it as text. Scan the code with the
+phone's camera and paste the result into the app's token field; the field is also there for typing
+it by hand if the camera is not to hand. **The QR carries the token alone and not a URL containing
+it**: a scanned `?token=...` would sign the phone in with one tap and leave the credential in
+browser history, in the `Referer` header of every request the page makes, and in the log of
+anything sitting in front of the server. The URL printed beside it is `AGENTDECK_ORIGIN` when that
+is set, and the loopback address the server is actually listening on when it is not — this process
+cannot know whether a `tailscale serve` exists in front of it, so it does not claim one.
+
+**That printed block is the credential, so do not do the first run in a pane that is being
+recorded.** The token has a second home the two boot refusals cannot reach - they check where the
+FILE is, and this is scrollback. `capture-pane -p -e` preserves the escape sequences the QR is made
+of, and agentdeck itself runs that on every cold attach, so a QR printed into a tmux pane comes back
+verbatim; the same goes for `pipe-pane`, `script`, Terminal.app and iTerm2 session logging, and a
+screen recording. Starting the server inside tmux is the ordinary way to keep it alive on a Mac,
+which is exactly when this bites. agentdeck prints nothing when stdout is not a terminal, which
+covers a pipe and a launchd log file, but a TTY that is being recorded is still a TTY. If the first
+run happened somewhere that keeps a transcript, treat the token as disclosed: delete the file,
+restart, and re-scan on each device.
 
 The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
 attaches to and streams the sessions whose directory is on it, and ignores everything else on the
@@ -210,6 +235,196 @@ Automated, the same path is `src/client/end-to-end.test.ts`: the real client mod
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
 the two pieces that need a DOM.
 
+## Answering a prompt from the phone
+
+A soft keyboard has no Escape, no Tab, no arrows and no Ctrl, and those are precisely the keys an
+agent's permission prompt is answered with. The row of text caps along the bottom of the app is
+those keys: Esc, Tab, Left, Down, Up, Right, Enter and Ctrl. They are bytes to a pty rather than DOM
+key events — `0x1b`, `0x09`, `0x0d` (CR, not LF: the pty's line discipline is what turns it into a
+line), `ESC [ A` or `ESC O A` depending on the terminal's application-cursor-keys mode (DECCKM),
+which `src/client/key-row.ts` reads off xterm rather than guessing — and they go out through the
+same paced `Connection.input` every other keystroke uses.
+
+**Ctrl latches rather than being held.** There is one thumb, so the second press is a separate
+event: tap Ctrl, and the next thing sent from that tab — a cap on the row, or a character typed on
+the soft keyboard — is sent as its control code and the latch is spent. Ctrl then `c` is `0x03`.
+The cap is highlighted while the latch is armed, and tapping it again disarms it.
+
+Automated, against real things: `src/client/end-to-end.test.ts` answers a shell `read` that is
+BLOCKED — the answer is typed, nothing happens, Enter is what commits it — interrupts a `sleep 300`
+with the latch, completes a filename with Tab, and reads Esc and the arrows back out of `cat -v`.
+Real server, real tmux, real pty, real shell. One thing measured there is worth knowing before
+debugging an arrow: tmux parses its client's input as keys and re-encodes them for the pane, so
+`ESC O A` reaches a pane that has not set DECCKM as `ESC [ A`.
+
+**NOT demonstrated: a thumb on a phone.** The only other tailnet device has been offline, so
+"answered from the phone" is unproven here. For someone holding one:
+
+1. `pnpm build`, start the server, open the deck on the phone and paste the token.
+2. Start a session with an agent that asks — claude, in a repository where it will want to edit a
+   file — and give it a task that needs permission.
+3. When the prompt appears, answer it with the row rather than the keyboard: the arrows to move
+   between the choices, Enter to take one, Esc to back out.
+4. Interrupt something with Ctrl then `c` and check the agent stops rather than the character `c`
+   appearing in the prompt.
+5. Check the row itself in standalone mode, where the insets are non-zero: the caps must sit above
+   the home indicator, and the row's background must run under it.
+
+## Installing to the home screen
+
+The built client ships a manifest (`/manifest.webmanifest`, `display: standalone`), its icons, and
+a service worker at `/sw.mjs`. `src/pwa.test.ts` checks all of that against the real build served by
+the real server: the manifest parses and is served as `application/manifest+json`, every icon it
+names exists at the size it claims, the worker is served from the root as JavaScript with a
+`no-cache` header, and the safe-area insets and 44px touch targets survive into the built CSS.
+
+**The install itself has not been demonstrated.** It needs a phone, and the only other tailnet
+device has been offline. Nothing in this repository has been observed launching without browser
+chrome. To confirm the remaining half, on an iPhone:
+
+1. Finish `m4/tailscale-serve` first. Safari will not register a service worker outside a secure
+   context, and iOS will not treat a plain-`http` page as installable, so the deck has to be
+   reached over its `https://<host>.ts.net` URL — not over `http://<mac>:7777`.
+2. `pnpm build`, then start the server, and open that HTTPS URL in **Safari** (Chrome on iOS cannot
+   add to the home screen).
+3. Share, then **Add to Home Screen**. The icon shown should be the blue prompt mark, not a
+   screenshot of the page — a screenshot means the `apple-touch-icon` did not load.
+4. Launch it from the home screen. It should open with no address bar and no toolbar. That is the
+   done-when.
+5. Check the layout in that mode specifically, because it is the only mode where the insets are
+   non-zero: the tab strip must sit below the status bar with its own background running up under
+   it, and the terminal's bottom rows — the cursor, and any permission prompt — must sit above the
+   home indicator rather than under it.
+6. In Safari on the Mac, with the phone attached, Develop > the device > Service Workers should
+   show one worker for the origin, scope `/`, and no storage under Caches. If anything appears
+   under Caches, something other than `public/sw.mjs` put it there.
+
+### Two consequences of installing, both about the token
+
+**The `.ts.net` hostname has to be agentdeck's alone.** The manifest takes `scope: "/"` and the
+worker registers at the root, and the token lives in `localStorage`, which is keyed by ORIGIN and
+not by path. So mounting a second service on the same hostname — `tailscale serve --set-path` is
+the ordinary way to do that — gives it read access to a credential that starts sessions in every
+allowed repository, kills live ones and attaches to every other agent's terminal. This is the same
+reasoning that moved the dev server off Vite's shared default port. If you ever want a sibling
+service there, the deck has to move under a path prefix first, and the manifest's `scope` and
+`start_url` and the `register()` URL move with it.
+
+**Installing makes the token permanent, and there is no revocation.** An installed iOS web app gets
+its own storage partition and is exempt from Safari's eviction of script-writable storage, so the
+token stops being purged after a week of disuse and lives until the app is deleted. It also now
+exists in two partitions — the installed app cannot see the one you pasted into Safari, so you will
+paste it twice. The server has no expiry and no revocation list: the only way to invalidate a token
+is to delete the token file and restart, which invalidates it for every device at once and means
+pasting the new one into each of them again.
+
+### Removing a worker that should not be running
+
+Delete `src/client/public/sw.mjs`, run `pnpm build`, and restart the server. `/sw.mjs` then answers
+404 — the static handler never falls back to `index.html` for a path that names a file — and 404 is
+the one response that makes a browser drop the registration on its next update check, so reloading
+the page on the phone unregisters the worker. A 200 with HTML would not: the browser reads that as
+a failed update and keeps running the worker it already has. `src/pwa.test.ts` holds the 404.
+
+## The watchdog
+
+Nothing on this Mac supervises the node process. tmux is a daemon of its own, so a crash leaves
+every agent alive and the server gone: the work survives, the phone gets nothing, and the recovery
+is a person opening a terminal (`src/supervisor-crash.test.ts` is the measurement of exactly that).
+`scripts/watchdog.mjs` is the answer, and `scripts/com.agentdeck.watchdog.plist` is the LaunchAgent
+that runs it every 60 seconds.
+
+One pass does three things: finds the node process holding the port, probes
+`http://127.0.0.1:<port>/api/health`, and checks whether `tailscale serve` is still configured for
+it. What it does about the answer:
+
+| It sees                                             | It does                                                                                                                                                  |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A 200, however slow                                 | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict.                                                             |
+| Nothing listening                                   | Starts the server at once. There is no socket to drop and no snapshot to lose.                                                                           |
+| Accepted and silent for 15s, or a 503               | Counts it. Three consecutive passes — three minutes — before it restarts anything.                                                                       |
+| Still unhealthy after two restarts                  | Stops. Marks the state file `gaveUp` and puts a critical dialog on the screen. A server that is down and known to be down beats one killed every minute. |
+| `tailscale serve` never configured                  | Says so and carries on. That is `m4/tailscale-serve`, which is not built.                                                                                |
+| `tailscale serve` configured last pass and gone now | Notifies. That is the reboot case, and it is an outage.                                                                                                  |
+
+The 15-second probe timeout is five times what the server gives its own `tmux list-sessions` round
+trip. That gap is the whole point: a busy machine, a large capture or a wedged tmux makes a healthy
+server slow, and restarting it drops every phone's socket and every tab's snapshot for nothing.
+
+A restart is announced, never silent — `osascript` puts a banner up saying the tmux sessions were
+kept, because a restart notification that does not say so is one you learn to fear. State between
+passes lives in `~/.agentdeck/watchdog-state.json`; the log is
+`~/Library/Logs/agentdeck-watchdog.log`. The server the watchdog starts writes its own output to
+`~/Library/Logs/agentdeck-server.log` (`AGENTDECK_SERVER_LOG` moves it) — a separate file, because
+those are the server's words rather than the watchdog's, and a server that refuses to boot says why
+in one line before it exits. Without that file the watchdog would report "started" and then, three
+minutes later, "still unhealthy after two restarts", with the sentence explaining why sent nowhere.
+
+It cannot fight a sleeping Mac. With the lid shut nothing runs, and Energy Saver or `caffeinate` is
+the only answer.
+
+### Installing it
+
+**The repository does not install this.** Nothing has run `launchctl` on this machine and no plist
+has been copied into `~/Library/LaunchAgents`, so none of the launchd half — the timer firing,
+`RunAtLoad`, recovery after a reboot — has been demonstrated. Read the plist first: check the node
+binary, both script paths and the log path against your own checkout, since launchd expands neither
+`~` nor `$PATH`.
+
+**Fill in the environment block as well as the paths.** The watchdog spawns the server with its own
+environment, so under launchd the plist _is_ the server's environment and nothing you exported in
+the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
+Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
+protected than the one it replaced. Those three — `AGENTDECK_MOUNTS`, `AGENTDECK_PROFILES` and
+`AGENTDECK_ORIGIN` — are the ones the watchdog refuses to start a server without: it logs it and
+puts a banner up instead of quietly producing a server with an empty allowlist, no agents or no
+Origin check. Add `AGENTDECK_TOKEN_FILE` and
+`AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults.
+
+**Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
+repository, which agents working here can write — as you, every 60 seconds, with no human action.
+Everywhere else `scripts/` is executed by a command a person types after the review under
+[Toolchain](#toolchain); a timer is not. So copy the script out of the checkout and point
+`ProgramArguments` at the copy. **The copy buys review scope, not write protection.** Both files
+launchd executes stay writable by this uid — `~/.agentdeck/bin/watchdog.mjs` and the mise node
+named as `ProgramArguments[0]` — so anything running as you can still rewrite the script and the
+interpreter, and because the copy lives outside the checkout that edit is one `git status` and
+`git diff` cannot see. Only a root-owned script and a root-owned interpreter would close it, and
+this repository does not install either. It does not close the whole hole elsewhere either: the
+watchdog still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable code
+as you either way, and only running the server from a checkout an agent cannot write closes that
+(audit.md). Nor does the copy move `~/.agentdeck/watchdog-state.json`: that file is part of the
+policy too — its give-up latch stops the watchdog restarting anything — and anything running as you
+can write it, which is why a latched pass still probes and re-alerts hourly instead of going quiet.
+
+```sh
+mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs
+# then edit ProgramArguments to name ~/.agentdeck/bin/watchdog.mjs (absolute, launchd expands no ~)
+# and set AGENTDECK_REPO to the checkout, since the copy can no longer find src/server.ts by
+# sitting next to it
+cp scripts/com.agentdeck.watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
+launchctl kickstart -p gui/$(id -u)/com.agentdeck.watchdog   # run one pass now
+launchctl print gui/$(id -u)/com.agentdeck.watchdog          # is it loaded, what did it exit
+tail -f ~/Library/Logs/agentdeck-watchdog.log
+```
+
+To take it away again, which also leaves the machine as it is today:
+
+```sh
+launchctl bootout gui/$(id -u)/com.agentdeck.watchdog
+rm ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
+```
+
+After it has given up, it stays given up until you say otherwise: `rm
+~/.agentdeck/watchdog-state.json`, then `launchctl kickstart`.
+
+You can run a pass by hand at any time without launchd, which is how the logic was demonstrated:
+
+```sh
+AGENTDECK_WATCHDOG_STATE=/tmp/watchdog-state.json node scripts/watchdog.mjs
+```
+
 ## From the phone: `tailscale serve`
 
 The server binds `127.0.0.1` and nothing else. `tailscale serve --bg 7777` on this Mac is the one
@@ -303,17 +518,27 @@ shell, `pnpm-lock.yaml` is resolved by a pnpm 9 that does not gate dependency li
 `package.json` declares `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm
 always runs the root project's own lifecycle scripts, so `pnpm install --frozen-lockfile` executes
 a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs` and
-`scripts/restart-survival.mjs` are run by hand besides. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
+`scripts/restart-survival.mjs` are run by hand besides. **If you install the LaunchAgent, `scripts/`
+stops being triggered only by a person**: launchd then runs `scripts/watchdog.mjs` unattended, as
+you, in your GUI session, every 60 seconds and again after every reboot, so an edit to it is
+executed within a minute with no human action and no chance to read a diff — and that same edit chooses the command line the
+watchdog spawns as the server. Pointing the plist at a copy outside the checkout is what keeps this
+review gating it; see "Installing it" under [The watchdog](#the-watchdog). `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
 executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
 loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
-`.git/hooks/`. There used to be a container between all of that and the machine; there is not one
+`.git/hooks/`. `pnpm build` is on the list for a different reason: Vite copies `src/client/public/`
+verbatim into `dist/client`, which this server publishes with no bearer token, and that copy
+DEREFERENCES symlinks — so an entry there becomes a real file in the publish root holding whatever
+it pointed at, which `static.ts` cannot refuse because by serve time it is not a symlink. Measured:
+a link to a file outside the repo came back as its contents over HTTP. There used to be a container between all of that and the machine; there is not one
 now, which makes the review below the only control rather than the second of two.
 
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
-`.github/workflows/` and the agent profiles file `AGENTDECK_PROFILES` points at. That last one is
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `src/fixtures/`, `scripts/`, `.claude/`,
+`.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
+points at. That last one is
 the most direct host-execution surface of the lot and had been on none of these lists: a profile's
 `command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
 profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.

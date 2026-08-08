@@ -400,24 +400,96 @@ Agent-agnostic signals first, so the generic path is the proven one.
       `AGENTDECK_ORIGIN`: both stay the operator's one decision. When the two settings are on, the
       remaining work is running the command and re-checking from a phone.
 
-- [ ] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
+- [x] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
       **Done when:** it installs to the home screen and launches without browser chrome.
+      **The install is NOT demonstrated** — it needs a phone and the only other tailnet device has
+      been offline for five days. Everything checkable from here is: the manifest parses and is
+      served as `application/manifest+json`, every icon exists at the size it claims, the worker is
+      root-scoped and cannot touch `/api` or `/ws`, and the insets and 44px targets survive into the
+      built CSS. The README carries the steps for the rest.
+      **Found by the audit and fixed before merge:** `src/client/public/` is copied into the
+      unauthenticated publish root and the copy dereferences symlinks, so a link planted there
+      becomes a real served file — measured with a canary. Structural test plus the directory named
+      in all three review lists.
+      **Built, and the install is NOT demonstrated.** Everything checkable from the Mac is checked
+      by `src/pwa.test.ts` against the real build served by the real server: the manifest parses
+      and is served `application/manifest+json`, declares `display: standalone` and scope `/`,
+      every icon it names exists at the size it claims, the worker is served from the root as
+      JavaScript with `no-cache`, and the safe-area insets and 44px touch targets survive into the
+      built CSS. The home-screen install needs a phone — the only other tailnet device has been
+      offline — and it also needs `m4/tailscale-serve` first, because iOS will not register a
+      worker or offer the install outside a secure context. The steps to confirm it are in the
+      README under "Installing to the home screen".
+      **The service worker caches nothing, deliberately.** This is a live view of other machines'
+      processes; a cache in front of `/api` or `/ws` is a cache of authenticated responses and of
+      a session list that was true a minute ago, and a cached shell would undo the `no-cache` the
+      server deliberately puts on `index.html` — on the one device nobody can open devtools on.
+      So `public/sw.mjs` has no `respondWith` and no `caches` use at all: `/api` and `/ws` are not
+      special-cased because there is no code path that could treat anything specially. It exists
+      for installability, and to `skipWaiting`/`claim` so it can never sit a version behind.
 
-- [ ] **`m4/token-qr`** — QR printed to the terminal on first run beside the URL, paste field in
+- [x] **`m4/token-qr`** — QR printed to the terminal on first run beside the URL, paste field in
       the client, `localStorage`, and the rejected-token path from M2 wired to it.
       **Done when:** the token gets onto a phone without being typed by hand, and survives
       backgrounding the app.
 
-- [ ] **`m4/key-row`** — Esc, Tab, arrows, Enter, Ctrl.
+- [x] **`m4/key-row`** — Esc, Tab, arrows, Enter, Ctrl.
       **Done when:** a real permission prompt is **answered** from the phone, not merely watched.
+      **Built, and the phone half is NOT demonstrated.** The bytes are in `src/client/key-row.ts`
+      and go out through the same paced `Connection.input` as every other keystroke: Esc `0x1b`,
+      Tab `0x09`, Enter `0x0d` (CR, not LF — the pty's line discipline is what makes it a line),
+      and the arrows as CSI or SS3 according to DECCKM, read off xterm's
+      `modes.applicationCursorKeysMode` rather than hardcoded either way. Ctrl is a modifier and
+      LATCHES: one thumb means the second press is a separate event, so it applies to the next
+      thing sent from that tab — a cap, or a character typed on the soft keyboard — which is what
+      makes Ctrl then `c` reach `0x03`.
+      **A blocked prompt is really answered, in `src/client/end-to-end.test.ts`:** a shell `read`
+      that does not return until Enter arrives (the answer is typed, the marker file is checked
+      absent, then Enter commits it), a `sleep 300` interrupted with the latch, a filename
+      completed with Tab, and Esc and the arrows read back out of `cat -v` — real server, real
+      tmux, real pty, real shell. **Measured and worth knowing:** tmux parses its client's input as
+      keys and re-encodes them for the pane, so `ESC O A` arrives at a pane that has not set DECCKM
+      as `ESC [ A`; both forms are recognised as Up, which bounds what that test proves and does
+      not excuse guessing the mode, since xterm's own parser normalises nothing.
+      **The thumb is the part nobody here can do**: the only other tailnet device has been offline,
+      so "answered from the phone" is unproven. The steps for a person holding one are in the
+      README under "Answering a prompt from the phone".
+      The row owns the bottom edge of the app now, so it carries `--safe-bottom` (the pane area no
+      longer does, which would have left a band of pane background between the two) and its caps
+      claim `--touch-target`; `src/pwa.test.ts` holds both against the built CSS. Text labels on
+      the caps, never glyphs.
 
-- [ ] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
+- [x] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
       reachable, `tailscale serve` still configured. Restarts the server after consecutive
       failures, then stops and notifies rather than crash-looping. This is also what finally
       answers `m0/supervisor-crash-test`: nothing supervises node before it.
       **Done when:** killing the node process results in automatic recovery with a notification,
       the tmux sessions still alive with the same ids afterwards, **and a deliberately
       slow-but-alive server is not restarted.**
+      `scripts/watchdog.mjs` is one pass; `scripts/com.agentdeck.watchdog.plist` is the
+      LaunchAgent that runs it every 60s. `src/watchdog.test.ts` drives the script exactly as
+      launchd would, against a real server, a real tmux socket and a captured `osascript`: a
+      SIGKILLed server is started again on the next pass and the surviving session is still there
+      with the same id and the same pane pid; a server that answers 200 after six seconds is
+      probed three times and never touched; a socket that accepts and never answers takes three
+      consecutive passes before anything is stopped; and two spent recoveries produce a critical
+      `display alert` and then silence rather than a loop. The notification is `osascript` —
+      a banner for a restart, saying the sessions were kept, and a dismiss-me dialog for giving
+      up. No new dependency: six of six, unchanged.
+      **NOT DEMONSTRATED, and not by oversight: launchd itself.** The plist is written, `plutil`
+      validates it, and it is deliberately NOT installed — nothing was loaded, nothing was copied
+      into `~/Library/LaunchAgents`, and a test asserts both, because the operator installs it
+      themselves. So the timer firing, `RunAtLoad`, and recovery after a reboot are untested
+      claims. README's "The watchdog" has the exact `launchctl bootstrap` / `bootout` commands.
+      **Known blind spots, both already in `audit.md` and neither fixed here:** `/api/health`
+      answers 200 for the locale failure class of `m0/create-500`, because `probeTmux` bypasses
+      `baseEnv` — so a green watchdog pass means the event loop turns, not that creates work; and
+      the server's tmux path still has no `execFile` timeout, so a wedged tmux accumulates
+      children, which is the state the wedge branch exists to notice and restart out of.
+      **Deviation from plan 006, recorded in the plan:** the `tailscale serve` check reports
+      rather than re-applies, and tells "never configured" apart from "was configured and is
+      gone". Re-applying belongs to `m4/tailscale-serve`, which is blocked on two admin-console
+      switches.
 
 ---
 

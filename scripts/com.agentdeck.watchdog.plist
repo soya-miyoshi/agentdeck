@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  m4/launchd-watchdog: the LaunchAgent that runs scripts/watchdog.mjs on a timer.
+
+  THIS FILE IS NOT INSTALLED. It lives in the repository and nothing on this Mac loads it. The
+  operator installs it themselves; the exact commands are in README.md under "The watchdog".
+  Copying it into ~/Library/LaunchAgents is what makes it survive a logout and a reboot, and that
+  is deliberately a person's decision rather than an agent's.
+
+  A LaunchAgent, not a LaunchDaemon: it must run as the user, in the user's GUI session. tmux is
+  a daemon of this user's, `osascript` needs a session to draw a notification in, and a daemon
+  running as root would share neither.
+
+  EVERY PATH BELOW IS ABSOLUTE AND MACHINE-SPECIFIC, because launchd expands nothing - not `~`,
+  not `$HOME`, not a login shell's PATH. The four to check against your own checkout are the node
+  binary, the two script paths, and the log path. The EnvironmentVariables block below is the
+  fifth thing to fill in, and the one that is not a path: it is the server's environment too.
+
+  INSTALLING THIS CHANGES WHAT `scripts/` IS. Until now `scripts/` was agent-writable and
+  host-executed on a trigger a PERSON pulls - `pnpm install`'s postinstall, or running one by hand
+  - which is what makes the `git status` / `git diff` review before those commands a control at
+  all. ProgramArguments points at a file inside the checkout, so once this is loaded the trigger
+  is a timer: an agent that appends a line to scripts/watchdog.mjs has it executed as you, in your
+  GUI session, within 60 seconds and again after every reboot, with no human action - and the same
+  edit chooses the command line the watchdog then spawns as the server. To keep the review gating
+  what it says it gates, copy the script out of the checkout (`~/.agentdeck/bin/watchdog.mjs`) and
+  point ProgramArguments there. README.md's "Installing it" says the same. THE COPY BUYS REVIEW
+  SCOPE, NOT WRITE PROTECTION: ~/.agentdeck/bin and the mise node named below are both writable by
+  this uid, so anything running as you can still rewrite the script and the interpreter - and
+  outside the checkout, `git status` / `git diff` cannot see that edit either. Only a root-owned
+  script and a root-owned interpreter close it, and neither is installed here.
+  The watchdog also still spawns `src/server.ts` FROM the checkout, so
+  a recovery executes agent-writable code as you either way. Only running the server from a
+  checkout an agent cannot write closes it, and that is not this item's to build (audit.md).
+  The copy does not move ~/.agentdeck/watchdog-state.json either, which is same-uid data with no
+  integrity check - so the give-up latch stays plantable, and is re-alerted hourly for that reason.
+
+  It cannot fight a sleeping Mac (plan 006). With the lid shut nothing here runs, and the answer
+  is Energy Saver or `caffeinate`, decided deliberately rather than discovered.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.agentdeck.watchdog</string>
+
+    <!-- mise's node, by absolute path: launchd gets no shell and therefore no shims. -->
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/you/.local/share/mise/installs/node/22/bin/node</string>
+      <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck/scripts/watchdog.mjs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck</string>
+
+    <!--
+      The watchdog spawns the server with its own environment, so this block is also the server's
+      environment: WHAT IS NOT HERE IS NOT SET, and the server the watchdog starts at 3am is
+      configured by this file rather than by the shell you ran `pnpm start` in. So everything the
+      README's Environment table tells you to set has to be repeated here, or the recovery quietly
+      replaces your server with one that is emptier and less protected:
+
+        AGENTDECK_MOUNTS    absent, the allowlist is empty - every live session is filtered out of
+                            /api/sessions and every create is refused. The watchdog REFUSES to
+                            start a server without it and notifies instead.
+        AGENTDECK_PROFILES  absent, nothing is startable. Same refusal.
+        AGENTDECK_ORIGIN    absent, the Origin check on every /api route and every /ws upgrade is
+                            OFF. Same refusal - a recovery is not allowed to hand back a server
+                            with a protection the one it replaced had. Set it to the tailnet
+                            origin you set it to by hand.
+
+      AGENTDECK_TOKEN_FILE and AGENTDECK_AGENT_STATE_DIR belong here too if you moved them off
+      their defaults, and AGENTDECK_REPO if you followed the README and pointed ProgramArguments at
+      a copy of the script outside the checkout - a copy cannot find src/server.ts by sitting next
+      to it. The node directory is on PATH so the spawned server finds the same runtime; if
+      `tmux` is only in /opt/homebrew/bin on this Mac, the recovered server resolves it from a
+      writable directory, which audit.md records.
+
+      No LANG and no LC_*, on purpose. The locale-less environment launchd hands a job is exactly
+      what broke every create in m0/create-500, and it is fixed at its cause in `baseEnv` rather
+      than papered over here - so this plist is also the test of that fix.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+      <!-- The system directories FIRST. `osascript` is looked up on this PATH, and both the mise
+           directory and /opt/homebrew/bin are writable by this user - which is who an agent in a
+           tmux session runs as. Ahead of /usr/bin either of them is a file an agent can drop to be
+           executed by a timer, as the operator, within 60 seconds. This order buys nothing for
+           `tailscale`, whose only copy here IS in a writable directory, so the script names an
+           absolute one instead (audit.md). -->
+      <key>PATH</key>
+      <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/you/.local/share/mise/installs/node/22/bin:/opt/homebrew/bin</string>
+      <key>AGENTDECK_PORT</key>
+      <string>7777</string>
+      <key>TMUX_SOCKET</key>
+      <string>agentdeck</string>
+      <!-- One entry per REPOSITORY, comma separated. Not the ghq owner directory: that would
+           allowlist every repo you own, which is broader than the list it replaced. -->
+      <key>AGENTDECK_MOUNTS</key>
+      <string>REPLACE_ME</string>
+      <key>AGENTDECK_PROFILES</key>
+      <string>/Users/you/.agentdeck/agents.json</string>
+      <!-- The https://<host>.ts.net address the phone opens. Wrong-but-present is worse than
+           absent: the server 403s every browser request and every socket upgrade while
+           /api/health, which is answered before the origin check, keeps returning 200. -->
+      <key>AGENTDECK_ORIGIN</key>
+      <string>REPLACE_ME</string>
+    </dict>
+
+    <!-- Once at load, then every 60s. A wedge needs three consecutive failures, so acting on one
+         takes three minutes; a dead process is acted on at the first pass that sees it.
+
+         NO KeepAlive, deliberately. Every deliberate refusal this script makes exits non-zero -
+         it gave up, or it will not start a misconfigured server - and under KeepAlive launchd
+         would relaunch each of those at ThrottleInterval, which is the crash-loop plan 006 says
+         to avoid, one layer below the give-up that was built to avoid it. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <!-- A restart must never be something you discover by finding sessions missing (plan 006):
+         every pass writes a timestamped line here whether it acted or not. -->
+    <key>StandardOutPath</key>
+    <string>/Users/you/Library/Logs/agentdeck-watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/you/Library/Logs/agentdeck-watchdog.log</string>
+  </dict>
+</plist>

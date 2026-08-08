@@ -335,6 +335,10 @@ void describe("ensuring a server exists", () => {
       ["start-server"],
       ["set-option", "-g", "exit-empty", "off"],
       ["set-option", "-g", "update-environment", ""],
+      // The prefix is a command channel and every byte the phone sends reaches it - see
+      // `ensureServer`. Chained with the rest for the same reason they are: one invocation.
+      ["set-option", "-g", "prefix", "none"],
+      ["set-option", "-g", "prefix2", "none"],
     ]);
   });
 
@@ -627,6 +631,36 @@ void describe("what a real tmux server hands a real pane", () => {
     } finally {
       try {
         execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  void test("the prefix is not a command channel on our socket", async () => {
+    // Everything the phone types reaches a tmux CLIENT's stdin, because `src/pty.ts` attaches
+    // rather than owning the pane directly - so tmux parses those bytes as KEYS first. With the
+    // default C-b, `Ctrl` `b` `:` is the tmux command prompt and `run-shell` executes on the host,
+    // outside the cwd allowlist, outside AGENTDECK_PROFILES, without POST /api/sessions.
+    //
+    // Verified against a real attach client before the fix: the marker file appeared. This asserts
+    // the option that closes it, on a server this class actually started, rather than trusting the
+    // argument list - the unit test above proves we SENT it, this proves tmux TOOK it.
+    const guarded = `${socket}-prefix`;
+    const guardedTmux = new Tmux({ socket: guarded });
+    try {
+      await guardedTmux.ensureServer();
+      const shown = execFileSync("tmux", ["-L", guarded, "show-options", "-g", "prefix"], {
+        encoding: "utf8",
+      });
+      const second = execFileSync("tmux", ["-L", guarded, "show-options", "-g", "prefix2"], {
+        encoding: "utf8",
+      });
+      assert.match(shown, /none/i, "the tmux prefix is still bound, so the phone can reach it");
+      assert.match(second, /none/i, "the secondary prefix is still bound");
+    } finally {
+      try {
+        execFileSync("tmux", ["-L", guarded, "kill-server"], { stdio: "ignore" });
       } catch {
         // Already gone.
       }
