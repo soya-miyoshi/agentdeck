@@ -6,7 +6,7 @@
 // installing the LaunchAgent does to scripts/ are in plan 006 and audit.md, not here.
 
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,10 +17,12 @@ const MAX_RESTARTS = 2;
 const SLOW_MS = 3_000;
 const TOOL_TIMEOUT_MS = 5_000;
 const STOP_GRACE_MS = 10_000;
+const GIVE_UP_REALERT_MS = 3_600_000;
 
-// Absolute. `osascript` and `tailscale` stay on PATH, which is why the plist's PATH puts the
-// system directories ahead of every user-writable one (audit.md).
+// Absolute, and both in directories this user cannot write: PATH order does nothing for a command
+// whose only copy lives in a user-writable directory (audit.md). `osascript` stays on PATH.
 const LSOF = "/usr/sbin/lsof";
+const TAILSCALE = process.env.AGENTDECK_TAILSCALE ?? "/usr/local/bin/tailscale";
 
 // The checkout holding src/server.ts: the script's parent, or AGENTDECK_REPO once the script has
 // been copied out of it, which is the supported install.
@@ -47,6 +49,7 @@ const emptyState = {
   failures: 0,
   restarts: 0,
   gaveUp: false,
+  gaveUpAlertedAt: 0,
   pid: null,
   serveConfigured: false,
   startRefused: false,
@@ -216,12 +219,13 @@ const stopServer = async (pid) => {
 // tailscale serve
 // -----------------------------------------------------------------------------------------
 
-/** Whether `tailscale serve` still points at the port. Detect and report only - re-applying is
- *  m4/tailscale-serve's, and that item is blocked (plan 006). */
-const serveConfigured = async () =>
-  await new Promise((resolve) => {
+/** Whether `tailscale serve` still points at the port, or `null` for "could not ask". Detect and
+ *  report only - re-applying is m4/tailscale-serve's, and that item is blocked (plan 006). */
+const serveConfigured = async () => {
+  if (!existsSync(TAILSCALE)) return null;
+  return await new Promise((resolve) => {
     execFile(
-      "tailscale",
+      TAILSCALE,
       ["serve", "status"],
       { timeout: TOOL_TIMEOUT_MS },
       (error, stdout, stderr) => {
@@ -233,11 +237,17 @@ const serveConfigured = async () =>
       },
     );
   });
+};
 
 /** Reports it, and only notifies for "was configured last pass and is gone" - never configured is
  *  the expected state of an unbuilt milestone (plan 006). */
 const checkServe = async (state) => {
   const configured = await serveConfigured();
+  if (configured === null) {
+    // No fall back to PATH: the writable copy is exactly what must not be executed here.
+    log(`no tailscale at ${TAILSCALE}; the serve check is skipped this pass`);
+    return;
+  }
   if (configured) {
     log("tailscale serve is configured for the port");
   } else if (state.serveConfigured) {
@@ -256,12 +266,28 @@ const checkServe = async (state) => {
 // One pass
 // -----------------------------------------------------------------------------------------
 
+const GAVE_UP_MESSAGE =
+  `The server is still unhealthy after ${String(MAX_RESTARTS)} restarts. The watchdog has ` +
+  `STOPPED restarting it rather than loop. Your tmux sessions and every agent in them are ` +
+  `untouched and still running. Nothing is reaching the phone until you look at this.`;
+
 const state = readState();
 
 if (state.gaveUp) {
-  // Deliberately quiet: it already said this loudly once, and an alert a minute is the crash-loop
-  // in a different medium.
+  // Still probes and re-alerts hourly: the latch is a file anyone with this uid can plant, so it
+  // may never be silent, and hourly is not the crash-loop a per-pass alert would be.
   log(`gave up after ${String(state.restarts)} restarts; not acting. Clear ${statePath} to resume`);
+  const latched = await probe();
+  if (latched.kind === "answered" && latched.ok) {
+    log("the server is answering, but the give-up latch is set - clear the state file to resume");
+  } else {
+    const since = Date.now() - (Number(state.gaveUpAlertedAt) || 0);
+    if (since >= GIVE_UP_REALERT_MS) {
+      state.gaveUpAlertedAt = Date.now();
+      writeState(state);
+      alert(GAVE_UP_MESSAGE);
+    }
+  }
   process.exit(1);
 }
 
@@ -313,13 +339,10 @@ if (state.failures < FAIL_THRESHOLD) {
 
 if (state.restarts >= MAX_RESTARTS) {
   state.gaveUp = true;
+  state.gaveUpAlertedAt = Date.now();
   writeState(state);
-  const message =
-    `The server is still unhealthy after ${String(MAX_RESTARTS)} restarts. The watchdog has ` +
-    `STOPPED restarting it rather than loop. Your tmux sessions and every agent in them are ` +
-    `untouched and still running. Nothing is reaching the phone until you look at this.`;
   log(`giving up after ${String(MAX_RESTARTS)} restarts`);
-  alert(message);
+  alert(GAVE_UP_MESSAGE);
   process.exit(1);
 }
 

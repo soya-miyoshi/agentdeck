@@ -68,6 +68,7 @@ interface State {
   failures: number;
   restarts: number;
   gaveUp: boolean;
+  gaveUpAlertedAt: number;
   pid: number | null;
   serveConfigured: boolean;
   startRefused: boolean;
@@ -81,6 +82,7 @@ const seedState = (overrides: Partial<State> = {}): void => {
     failures: 0,
     restarts: 0,
     gaveUp: false,
+    gaveUpAlertedAt: 0,
     pid: null,
     serveConfigured: false,
     startRefused: false,
@@ -129,9 +131,11 @@ const pass = (
   overrides: Record<string, string | undefined> = {},
 ): SpawnSyncReturns<string> => {
   const env: Record<string, string> = {
-    // Stubs first so `osascript` is the recorder; the rest of PATH is real, because `tailscale`
-    // and the node the watchdog spawns are real.
+    // Stubs first so `osascript` is the recorder; the rest of PATH is real, because the node the
+    // watchdog spawns is. `tailscale` is NOT on PATH for the watchdog - it names an absolute path,
+    // so the stub is injected by that variable instead.
     PATH: `${stubs}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
+    AGENTDECK_TAILSCALE: join(stubs, "tailscale"),
     HOME: home,
     AGENTDECK_PORT: port,
     TMUX_SOCKET: socket,
@@ -484,6 +488,31 @@ void describe("it stops and notifies rather than crash-looping", () => {
   });
 });
 
+void describe("a give-up latch nobody has heard about is not silent", () => {
+  // The state file is same-uid data with no integrity check, so `{"gaveUp":true}` is one line for
+  // an agent. A latch that is both terminal and quiet turns that line into unsupervised forever.
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("planted-latch");
+    seedState({ failures: 3, restarts: 2, gaveUp: true, gaveUpAlertedAt: 0 });
+  });
+
+  void test("a latch that never alerted alerts, then stays quiet for the hour after", async () => {
+    const planted = pass(port);
+    assert.equal(planted.status, 1);
+    assert.doesNotMatch(planted.stdout, /started the server/, "it restarted after giving up");
+    const seen = await notifiedEventually(/display alert/);
+    assert.match(seen, /STOPPED restarting/, "a planted latch left the operator with only a log");
+    assert.ok(state().gaveUpAlertedAt > 0, "the re-alert was not recorded, so it repeats per pass");
+
+    const next = pass(port);
+    assert.equal(next.status, 1);
+    assert.equal(notified(), seen, "it alerted again within the hour, which is the crash-loop");
+  });
+});
+
 void describe("tailscale serve: not configured is not an outage", () => {
   // "Never configured" is an unbuilt milestone, "was configured and is gone" is the reboot case
   // (plan 006); a stub `tailscale` drives both, because the real one can only produce the first.
@@ -535,6 +564,17 @@ void describe("tailscale serve: not configured is not an outage", () => {
     assert.match(outcome.stdout, /tailscale serve is configured for the port/);
     assert.equal(state().serveConfigured, true);
   });
+
+  void test("no tailscale at the absolute path: skipped, never resolved on PATH", () => {
+    // The whole point of the absolute path. `/opt/homebrew/bin/tailscale` is writable by the uid
+    // every agent runs as, so a PATH fallback would have the timer execute an agent's file.
+    stubTailscale(`|-- / proxy http://127.0.0.1:${port}`, 0);
+    seedState();
+    const outcome = pass(port, { AGENTDECK_TAILSCALE: join(conf, "no-such-tailscale") });
+    assert.match(outcome.stdout, /the serve check is skipped this pass/);
+    assert.doesNotMatch(outcome.stdout, /tailscale serve is configured/, "it fell back to PATH");
+    assert.equal(state().serveConfigured, false);
+  });
 });
 
 void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
@@ -559,9 +599,10 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
   });
 
   void test("PATH puts the system directories ahead of every user-writable one", () => {
-    // `osascript` and `tailscale` are resolved on this PATH. The mise node directory and
-    // /opt/homebrew/bin are writable by this user, which is who an agent in a session runs as, so
-    // ahead of /usr/bin either is a file an agent drops and a timer executes as the operator.
+    // `osascript` is resolved on this PATH. The mise node directory and /opt/homebrew/bin are
+    // writable by this user, which is who an agent in a session runs as, so ahead of /usr/bin
+    // either is a file an agent drops and a timer executes as the operator. `tailscale` is not
+    // covered by this order - it has no system copy - which is why the script names it absolutely.
     const text = readFileSync(plist, "utf8");
     const path = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
     assert.ok(path, "the plist declares no PATH, so launchd gives the job its own minimal one");
@@ -692,6 +733,7 @@ void describe("the watchdog survives its own surroundings", () => {
       failures: 0,
       restarts: 0,
       gaveUp: false,
+      gaveUpAlertedAt: 0,
       pid: listenerPid(port),
       serveConfigured: false,
       startRefused: false,

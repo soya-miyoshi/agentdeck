@@ -386,7 +386,9 @@ Everywhere else `scripts/` is executed by a command a person types after the rev
 spawned, what you are told — out of an agent's reach. It does not close the whole hole: the
 watchdog still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable code
 as you either way, and only running the server from a checkout an agent cannot write closes that
-(audit.md).
+(audit.md). Nor does the copy move `~/.agentdeck/watchdog-state.json`: that file is part of the
+policy too — its give-up latch stops the watchdog restarting anything — and anything running as you
+can write it, which is why a latched pass still probes and re-alerts hourly instead of going quiet.
 
 ```sh
 mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs

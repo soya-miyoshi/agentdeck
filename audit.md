@@ -1323,6 +1323,33 @@ operator**, not as a script.
   interposition is the only seam by which the suite proves a person is actually told what the
   watchdog did, and losing every notification assertion to gain a second lock on the same door is
   a bad trade. `lsof` is called by absolute path.
+- [medium] scripts/watchdog.mjs:tailscale - **PATH order bought nothing for `tailscale`, the one
+  PATH-resolved command with no copy in a system directory.** On this Mac `tailscale` resolves only
+  to `/opt/homebrew/bin/tailscale`, `drwxrwxr-x soya:admin` - writable by the uid every agent in a
+  session runs as - and `serveConfigured` runs it on every pass, healthy ones included, so an agent
+  replacing that symlink (or its Cellar target) has its file executed by launchd as the operator
+  within 60 seconds, at every RunAtLoad and after every reboot. Status: FIXED - `TAILSCALE` is
+  `/usr/local/bin/tailscale` (root:wheel here), overridable only by `AGENTDECK_TAILSCALE` for the
+  suite's stub, and when that path is absent the serve check is skipped with a log line rather than
+  falling back to PATH; a test drives the skip and asserts the PATH copy was not run. Residual,
+  RECORDED: the recovered server inherits this PATH and resolves `tmux` (`probeTmux`, `src/tmux.ts`)
+  from `/opt/homebrew/bin`, so the same drop owns every session a recovery creates - the same class
+  as the already-recorded agent-writable `src/server.ts`, and closed by the same deployment change.
+- [medium] scripts/watchdog.mjs:gaveUp - **The give-up latch disarmed supervision permanently and
+  silently, out of a file any agent can write.** `readState` trusts
+  `~/.agentdeck/watchdog-state.json`, and the first thing a pass did was exit on `state.gaveUp`
+  before probing and without notifying - sound only if the watchdog set it. It is same-uid data
+  with no integrity check, so `{"gaveUp":true}` plus a kill left the machine unsupervised across
+  reboots with only a log line; and the latch is reachable with no credential at all, since
+  unauthenticated `/api/health` forks `tmux list-sessions` per request and sustained tailnet
+  pressure spends both restarts and then latches. Copying the script out of the checkout does not
+  move this file. Status: FIXED - a latched pass still probes, and while the server is not
+  answering it re-alerts on a bounded cadence (`GIVE_UP_REALERT_MS`, one hour, stamped in
+  `gaveUpAlertedAt`), which keeps the anti-crash-loop property while making a planted latch
+  audible; a test plants one and asserts both the alert and the quiet hour after it. `startRefused`
+  is left as-is: its worst case is a suppressed banner about a misconfiguration that every pass
+  still logs and that stops nothing from running. README and the plist now say what the copy does
+  and does not put out of an agent's reach.
 - [medium] scripts/watchdog.mjs:180 - The recovered server's log is where the server's own words
   go, including a first run's token block (`m4/token-qr`). It was created at the umask default.
   `src/qr.ts` does not print the QR when stdout is not a TTY - which is always, under launchd -

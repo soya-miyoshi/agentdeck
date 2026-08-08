@@ -29,6 +29,8 @@
   surface rather than closing it: the watchdog still spawns `src/server.ts` FROM the checkout, so
   a recovery executes agent-writable code as you either way. Only running the server from a
   checkout an agent cannot write closes it, and that is not this item's to build (audit.md).
+  The copy does not move ~/.agentdeck/watchdog-state.json either, which is same-uid data with no
+  integrity check - so the give-up latch stays plantable, and is re-alerted hourly for that reason.
 
   It cannot fight a sleeping Mac (plan 006). With the lid shut nothing here runs, and the answer
   is Energy Saver or `caffeinate`, decided deliberately rather than discovered.
@@ -67,8 +69,9 @@
       AGENTDECK_TOKEN_FILE and AGENTDECK_AGENT_STATE_DIR belong here too if you moved them off
       their defaults, and AGENTDECK_REPO if you followed the README and pointed ProgramArguments at
       a copy of the script outside the checkout - a copy cannot find src/server.ts by sitting next
-      to it. `/opt/homebrew/bin` is here for `tailscale`, and the node directory so the
-      spawned server finds the same runtime.
+      to it. The node directory is on PATH so the spawned server finds the same runtime; if
+      `tmux` is only in /opt/homebrew/bin on this Mac, the recovered server resolves it from a
+      writable directory, which audit.md records.
 
       No LANG and no LC_*, on purpose. The locale-less environment launchd hands a job is exactly
       what broke every create in m0/create-500, and it is fixed at its cause in `baseEnv` rather
@@ -76,10 +79,12 @@
     -->
     <key>EnvironmentVariables</key>
     <dict>
-      <!-- The system directories FIRST. `osascript` and `tailscale` are looked up on this PATH,
-           and both the mise directory and /opt/homebrew/bin are writable by this user - which is
-           who an agent in a tmux session runs as. Ahead of /usr/bin either of them is a file an
-           agent can drop to be executed by a timer, as the operator, within 60 seconds. -->
+      <!-- The system directories FIRST. `osascript` is looked up on this PATH, and both the mise
+           directory and /opt/homebrew/bin are writable by this user - which is who an agent in a
+           tmux session runs as. Ahead of /usr/bin either of them is a file an agent can drop to be
+           executed by a timer, as the operator, within 60 seconds. This order buys nothing for
+           `tailscale`, whose only copy here IS in a writable directory, so the script names an
+           absolute one instead (audit.md). -->
       <key>PATH</key>
       <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/you/.local/share/mise/installs/node/22/bin:/opt/homebrew/bin</string>
       <key>AGENTDECK_PORT</key>
