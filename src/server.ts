@@ -341,6 +341,7 @@ export const main = async (): Promise<void> => {
     token,
     origin: process.env["AGENTDECK_ORIGIN"],
     streamFor: (id) => hub.streamFor(id),
+    listSessions: async () => await registry.list(),
     captureHistory: async (id) => await hub.captureHistory(id, HISTORY_LINES),
     isAlternateScreen: async (id) => await hub.isAlternateScreen(id),
     repaint: async (id) => await hub.repaint(id),

@@ -451,15 +451,45 @@ void describe("a state change is announced, and nothing else is", () => {
     // the state rather than being left for a fetch. There is no stream to read here - the hub
     // never attaches to a dead pane - so the registry's reading is the only one there is.
     //
-    // KNOWN GAP, not asserted here because it is the implementation's and not this test's: a
-    // session that dies while the hub IS attached keeps its stream, and the stream still says
-    // `idle`, so no exit is announced at all until something refetches the list. See the report
-    // for this item.
     const { hub, registry, die, announced } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     die(session.id, "137");
     await hub.sync();
     assert.deepEqual(announced, [{ id: session.id, state: "exited", exitCode: 137 }]);
+  });
+
+  void test("a session that dies while the hub is attached is announced exited, not idle", async () => {
+    // The dangerous direction. With `remain-on-exit on` the attach client survives the dead pane,
+    // so `SessionPty.onExit` never fires and the stream reads `idle` two seconds after the last
+    // byte. Announcing that overwrote the registry's correct `exited 137` on every open client:
+    // an agent killed mid-run showed a healthy `idle` pill, no code and no reap prompt, until the
+    // page was reloaded. tmux says the pane is dead, so the stream does not get a vote.
+    const { hub, registry, die, ptys, announced } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    announced.length = 0;
+
+    ptys.get(session.id)?.stream.write(Buffer.alloc(200, 0x61));
+    die(session.id, "137");
+    await hub.sync();
+
+    assert.deepEqual(announced, [{ id: session.id, state: "exited", exitCode: 137 }]);
+    // And the stream itself, because the `attach` reply in src/ws.ts answers from it: a tab opened
+    // after the death would otherwise be told `idle` by the same server that just said `exited`.
+    assert.equal(ptys.get(session.id)?.stream.state(), "exited");
+    assert.equal(ptys.get(session.id)?.stream.exitCode, 137);
+  });
+
+  void test("an exit code that arrives after the state is not suppressed as a repeat", () => {
+    // `exited` then `exited 137` is news: it is the difference between "it stopped" and "it was
+    // killed". A dedupe keyed on the state alone swallowed the second one forever.
+    const { hub, announced } = build();
+    hub.announce("s1", "exited");
+    hub.announce("s1", "exited", 137);
+    assert.deepEqual(announced, [
+      { id: "s1", state: "exited" },
+      { id: "s1", state: "exited", exitCode: 137 },
+    ]);
   });
 
   void test("a session that goes away and comes back is announced again", async () => {

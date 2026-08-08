@@ -55,8 +55,14 @@ export class Hub {
   #repaintQuietMs: number;
   #repaintMaxMs: number;
   #onState: StateListener | undefined;
-  /** The last state each live session was announced with, so a repeat is not sent. */
-  #announced = new Map<string, SessionState>();
+  /**
+   * The last state each live session was announced with, so a repeat is not sent.
+   *
+   * The exit code is part of the key, not a passenger: `exited` with no code followed by `exited
+   * 137` is news - it is the difference between "it stopped" and "it was killed" - and a key of
+   * state alone suppressed the second one forever.
+   */
+  #announced = new Map<string, { state: SessionState; exitCode: number | undefined }>();
 
   constructor(options: HubOptions) {
     this.#tmux = options.tmux;
@@ -135,6 +141,17 @@ export class Hub {
     // exited - is announced with what the registry says, because that is the only reading of it
     // there is, and there is nothing inferred to write back for it.
     for (const session of live) {
+      // tmux says the pane is dead, so the stream does not get a vote. With `remain-on-exit on`
+      // the attach client stays alive against the dead pane, so `SessionPty.onExit` never fires
+      // and the stream still reads `idle` two seconds after the last byte - which used to be
+      // announced OVER the registry's correct `exited 137`, turning a killed agent into a
+      // healthy-looking tab. Declaring it on the stream as well is what stops the `attach` reply
+      // in src/ws.ts from answering `idle` for the same session.
+      if (session.state === "exited") {
+        this.#ptys.get(session.id)?.stream.declare("exited", session.exitCode);
+        this.announce(session.id, session.state, session.exitCode);
+        continue;
+      }
       const stream = this.#ptys.get(session.id)?.stream;
       if (stream !== undefined) this.#registry.setState(session.id, stream.state());
       this.announce(session.id, stream?.state() ?? session.state, session.exitCode);
@@ -153,8 +170,9 @@ export class Hub {
    * sync interval.
    */
   announce(sessionId: string, state: SessionState, exitCode?: number): void {
-    if (this.#announced.get(sessionId) === state) return;
-    this.#announced.set(sessionId, state);
+    const last = this.#announced.get(sessionId);
+    if (last?.state === state && last.exitCode === exitCode) return;
+    this.#announced.set(sessionId, { state, exitCode });
     this.#onState?.(sessionId, state, exitCode);
   }
 

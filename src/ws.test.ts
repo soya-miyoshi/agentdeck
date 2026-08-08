@@ -5,6 +5,7 @@ import { after, before, describe, test } from "node:test";
 
 import { WebSocket } from "ws";
 
+import type { Session } from "./registry.ts";
 import { SessionStream } from "./stream.ts";
 import { attachWebSocketServer, type WsDeps } from "./ws.ts";
 
@@ -25,6 +26,7 @@ before(async () => {
     token: TOKEN,
     origin: ORIGIN,
     streamFor: (id) => (id === "s1" ? stream : undefined),
+    listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("scrollback\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () =>
@@ -56,13 +58,22 @@ interface Client {
   take: (count: number) => Promise<Frame[]>;
 }
 
-const open = async (protocols: string | string[] = TOKEN, target = url): Promise<Client> => {
+const open = async (
+  protocols: string | string[] = TOKEN,
+  target = url,
+  // Every socket is sent the session list the moment it opens - the baseline a reconnecting phone
+  // has no other way back to. It is not what any of the tests below are reading, so it is dropped
+  // here rather than skipped past in each of them; the test that IS about it keeps it.
+  keepSessions = false,
+): Promise<Client> => {
   const socket = new WebSocket(target, protocols, { origin: ORIGIN });
   const queue: Frame[] = [];
   let notify: (() => void) | undefined;
 
   socket.on("message", (raw: Buffer) => {
-    queue.push(JSON.parse(raw.toString("utf8")) as Frame);
+    const frame = JSON.parse(raw.toString("utf8")) as Frame;
+    if (!keepSessions && frame["t"] === "sessions") return;
+    queue.push(frame);
     notify?.();
   });
 
@@ -114,6 +125,7 @@ const privateServer = async (
     token: TOKEN,
     origin: ORIGIN,
     streamFor: (id) => (id === "s1" ? ownStream : undefined),
+    listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("scrollback\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint,
@@ -318,6 +330,7 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
     token: TOKEN,
     origin: ORIGIN,
     streamFor: (id) => (id === "s1" ? ownStream : undefined),
+    listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("what vim currently looks like\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () => await Promise.resolve({ data: "", seq: ownStream.buffer.headSeq }),
@@ -329,7 +342,11 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
   const ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
   const socket = new WebSocket(ownUrl, TOKEN, { origin: ORIGIN });
   const frames: Frame[] = [];
-  socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+  socket.on("message", (raw: Buffer) => {
+    const frame = JSON.parse(raw.toString("utf8")) as Frame;
+    // The open-time baseline, dropped for the same reason as in `open` above.
+    if (frame["t"] !== "sessions") frames.push(frame);
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);
@@ -547,7 +564,11 @@ void describe("a cold attach is told where it is before it is told what changed"
   void test("no chunk arrives before the snapshot", async () => {
     const socket = new WebSocket(ordUrl, TOKEN, { origin: ORIGIN });
     const frames: Frame[] = [];
-    socket.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString("utf8")) as Frame));
+    socket.on("message", (raw: Buffer) => {
+      const frame = JSON.parse(raw.toString("utf8")) as Frame;
+      // The open-time baseline, dropped for the same reason as in `open` above.
+      if (frame["t"] !== "sessions") frames.push(frame);
+    });
     await new Promise<void>((resolve, reject) => {
       socket.once("open", resolve);
       socket.once("error", reject);
@@ -853,6 +874,7 @@ void describe("a state change goes to every open socket, not only the attached o
       token: TOKEN,
       origin: ORIGIN,
       streamFor: (id) => (id === "s1" ? s1 : undefined),
+      listSessions: async () => await Promise.resolve([]),
       captureHistory: async () => await Promise.resolve("scrollback\n"),
       isAlternateScreen: async () => await Promise.resolve(false),
       repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
@@ -923,5 +945,58 @@ void describe("a state change goes to every open socket, not only the attached o
     // A push after every client has gone must be a no-op rather than a throw out of the hub's
     // sync, which is a timer callback with nothing above it to catch.
     assert.doesNotThrow(() => handle.pushState("s2", "waiting"));
+  });
+});
+
+// The other half of "pushed, not polled": a push only reaches the sockets that are open when it
+// is made, and `Hub.announce` suppresses a repeat server-wide. So a phone whose socket dropped -
+// plan 002 says that is the normal case, not the exception - missed every transition that
+// happened while it was away, and nothing ever said them again. The baseline is what closes that.
+void describe("a socket is given the session list the moment it opens", () => {
+  let own: Server;
+  let ownUrl: string;
+  let handle: ReturnType<typeof attachWebSocketServer>;
+  const listed: Session[] = [
+    {
+      id: "s1",
+      name: "s1",
+      cwd: "/workspace/a",
+      agent: "claude",
+      state: "waiting",
+      startedAt: 1,
+    },
+  ];
+
+  before(async () => {
+    const s1 = new SessionStream({ sessionId: "s1" });
+    own = createServer();
+    handle = attachWebSocketServer(own, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? s1 : undefined),
+      listSessions: async () => await Promise.resolve(listed),
+      captureHistory: async () => await Promise.resolve("scrollback\n"),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    });
+    await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+    ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    handle.close();
+    own.close();
+  });
+
+  void test("a reconnecting socket that attaches nothing is still told which one needs you", async () => {
+    // The failing case, exactly: the tab for s1 was never opened, so the reconnect ladder sends no
+    // `attach` for it and no state frame is produced. Its move to `waiting` was announced while
+    // this socket was down and will never be announced again. Without the baseline this socket
+    // hears nothing at all, and the strip keeps showing whatever it last had.
+    const client = await open(TOKEN, ownUrl, true);
+    assert.deepEqual(await client.next(), { t: "sessions", sessions: listed });
+    client.socket.close();
   });
 });

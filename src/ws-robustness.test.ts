@@ -33,6 +33,7 @@ before(async () => {
     token: TOKEN,
     origin: undefined,
     streamFor: (id) => (id === "s1" ? stream : undefined),
+    listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => {
       historyCalls += 1;
       historyLive += 1;

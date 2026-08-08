@@ -56,6 +56,7 @@ before(async () => {
     token: TOKEN,
     origin: undefined,
     streamFor: (id) => (id === "dead" ? dead : id === "live" ? live : undefined),
+    listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve(""),
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
@@ -406,7 +407,10 @@ void describe("the client-visible heartbeat, as the server sends it", () => {
       // On a timer, whatever the agent is doing: neither session wrote a byte for the whole wait,
       // and nothing here asked for anything.
       assert.deepEqual(
-        frames.filter((frame) => frame["t"] !== "ping"),
+        // `sessions` is not on a timer: it is sent once, when the socket opens, as the baseline a
+        // reconnecting phone has no other way back to. So it is excluded here rather than counted
+        // as traffic the heartbeat measurement is contaminated by.
+        frames.filter((frame) => frame["t"] !== "ping" && frame["t"] !== "sessions"),
         [],
         "something other than the heartbeat arrived, so the heartbeat is not what was measured",
       );

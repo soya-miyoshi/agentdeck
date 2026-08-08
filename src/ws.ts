@@ -5,6 +5,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { buildSnapshot, planAttach } from "./attach.ts";
 import { parseClientMessage, paneSize, type ServerMessage } from "./protocol.ts";
+import type { Session } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import type { SessionState } from "./tmux.ts";
 import { tokenMatches } from "./token.ts";
@@ -82,6 +83,18 @@ export interface WsDeps {
   isAlternateScreen: (sessionId: string) => Promise<boolean>;
   /** The live screen for a cold snapshot, and the seq the bytes of it end at. */
   repaint: (sessionId: string) => Promise<{ data: string; seq: number }>;
+  /**
+   * The whole session list, sent to a socket the moment it opens.
+   *
+   * A newly-opened socket otherwise has no baseline. `pushState` reaches the sockets that are
+   * open at that instant and `Hub.announce` dedupes server-wide, so every transition a phone's
+   * socket was dropped for - which plan 002 says is the normal case - was lost to it: the state
+   * was already announced, so it was never re-announced, and the reconnect ladder only re-attaches
+   * the tabs the user had actually opened. A session that went `waiting` while the screen was off
+   * stayed `working` in the strip until a full page reload, which is the strip answering "which
+   * one needs you" with "none of them" while one does.
+   */
+  listSessions: () => Promise<Session[]>;
   /** Raw bytes the user typed, straight to the PTY. */
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
@@ -196,6 +209,20 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle =>
     socket.on("pong", () => {
       client.alive = true;
     });
+
+    // The baseline, before any frame this client sends. Everything after it is a delta, and a
+    // socket that missed deltas while it was down has no other way back to the truth: the state
+    // dedupe is server-wide, so what was announced while nobody was listening is never repeated.
+    // A failure here costs this socket its resettle, not its connection - the list is fetched over
+    // HTTP too - so it is logged rather than thrown.
+    deps
+      .listSessions()
+      .then((sessions) => {
+        send(socket, { t: "sessions", sessions });
+      })
+      .catch((error: unknown) => {
+        console.error("agentdeck: could not send the session list on connect:", error);
+      });
 
     socket.on("message", (raw: Buffer) => {
       if (!withinRate(client)) return;
