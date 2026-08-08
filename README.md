@@ -111,6 +111,16 @@ place it must not be. It lives in `~/.agentdeck/token`, created 0600 on first ru
 `AGENTDECK_TOKEN_FILE` moves it. **The server refuses to start if that path resolves inside an
 allowlist entry**, which is the rule made executable rather than written down three times.
 
+The run that creates that file — first run, and every run after the file is deleted — prints the
+token to the terminal as a QR code, with the URL to open beside it as text. Scan the code with the
+phone's camera and paste the result into the app's token field; the field is also there for typing
+it by hand if the camera is not to hand. **The QR carries the token alone and not a URL containing
+it**: a scanned `?token=...` would sign the phone in with one tap and leave the credential in
+browser history, in the `Referer` header of every request the page makes, and in the log of
+anything sitting in front of the server. The URL printed beside it is `AGENTDECK_ORIGIN` when that
+is set, and the loopback address the server is actually listening on when it is not — this process
+cannot know whether a `tailscale serve` exists in front of it, so it does not claim one.
+
 The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
 attaches to and streams the sessions whose directory is on it, and ignores everything else on the
 tmux socket. That socket is `/tmp/tmux-<uid>/agentdeck` and every process running as you can write

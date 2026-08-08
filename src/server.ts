@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { installHookSettings } from "./claude-hooks.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
+import { clientUrl, firstRunLines } from "./qr.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
@@ -305,6 +306,13 @@ export const main = async (): Promise<void> => {
     console.error("agentdeck: reap at boot failed, continuing:", error);
   }
 
+  // Asked before `loadToken`, which is the call that creates the file. "First run" is the run that
+  // issues the token, and it is the only run where a QR is worth printing: on every later boot the
+  // devices already hold it, and reprinting a live credential into a terminal's scrollback on
+  // every restart is how it ends up in a screen recording. Rotating is deleting the file, which
+  // makes the next boot a first run again.
+  const firstRun = !existsSync(tokenFile);
+
   let token: string;
   try {
     token = loadToken(tokenFile);
@@ -400,6 +408,17 @@ export const main = async (): Promise<void> => {
   console.log(
     `agentdeck: ${String(profiles.size)} agent profile(s), ${String(mounts.length)} mount(s)`,
   );
+
+  // Last, after the boot warnings, so the QR is what is on the screen when a person turns to the
+  // terminal with a phone in their hand rather than something they have to scroll back to.
+  if (firstRun) {
+    for (const line of firstRunLines(
+      token,
+      clientUrl(process.env["AGENTDECK_ORIGIN"], port),
+      tokenFile,
+    ))
+      console.log(line);
+  }
 
   const shutdown = (): void => {
     clearInterval(syncTimer);

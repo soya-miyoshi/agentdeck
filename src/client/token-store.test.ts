@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import {
@@ -70,5 +72,21 @@ void describe("holding the token across a backgrounding", () => {
     assert.doesNotThrow(() => {
       clearToken(throwing);
     });
+  });
+});
+
+void describe("the rejected-token path lands on the paste field", () => {
+  // M2 already decided what a `rejected` verdict does: it stops the reconnect ladder, sets the
+  // status to `rejected` and calls `unauthorized()`, and `src/client/connection.test.ts` holds
+  // that. What no test held is the last hop - that App.vue's `unauthorized` handler is the one
+  // that clears the stored token, rather than leaving a token that the server has already refused
+  // in `localStorage` for the next reload to retry with. That hop lives in an SFC, which has no
+  // module boundary a unit test can reach, so it is asserted on the source.
+  void test("App.vue routes unauthorized to signOut, and signOut clears the stored token", () => {
+    const source = readFileSync(join(import.meta.dirname, "App.vue"), "utf8");
+    assert.match(source, /unauthorized: \(\) => \{\s*signOut\(/);
+    assert.match(source, /const signOut = [\s\S]*?clearToken\(window\.localStorage\)/);
+    // And the gate is what renders when there is no token.
+    assert.match(source, /<TokenGate v-if="token === undefined"/);
   });
 });
