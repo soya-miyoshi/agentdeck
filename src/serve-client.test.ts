@@ -15,7 +15,16 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -321,5 +330,46 @@ void describe("the API and the socket route are untouched by any of this", () =>
   void test("/ws is the socket route's; a plain GET is not the page", async () => {
     const res = await request("/ws");
     assert.doesNotMatch(res.body, /doctype/i);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+// `src/client/public/` is copied verbatim into `dist/client` by Vite's `publicDir`, and that copy
+// DEREFERENCES symlinks: `copyDir` is statSync + copyFileSync, both of which follow. So a symlink
+// planted in the source directory lands in the publish root as a REAL FILE holding the target's
+// bytes, and `dist/client` is served to any device that can reach the port with no bearer token.
+//
+// Measured on this machine before this test existed: a symlink at
+// `src/client/public/icons/planted.png` pointing at a file outside the repo produced a regular
+// file in `dist/client/icons/planted.png` containing that file's contents.
+//
+// Three controls miss it, which is why the check has to live here. `static.ts` resolves and checks
+// containment against the real root - by serve time it is a real file inside the root, not a
+// symlink. The purpose-built "symlink planted inside the REAL build output" test only catches
+// symlinks that survive AS symlinks. And the boot guard checks where the token and profiles files
+// are configured to be, never what is inside the publish root.
+void describe("nothing in the published source directory may point outside it", () => {
+  const publicDir = fileURLToPath(new URL("client/public", import.meta.url));
+
+  void test("no entry under src/client/public is a symlink", () => {
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        // lstat, not stat: the question is what the ENTRY is, not what it points at.
+        if (lstatSync(full).isSymbolicLink()) {
+          offenders.push(full);
+          continue;
+        }
+        if (entry.isDirectory()) walk(full);
+      }
+    };
+    if (existsSync(publicDir)) walk(publicDir);
+    assert.deepEqual(
+      offenders,
+      [],
+      "a symlink here becomes a real file in dist/client, which is served to the tailnet with no token",
+    );
   });
 });

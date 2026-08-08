@@ -258,7 +258,10 @@ agent editing it cannot reach the host toolchain at all. **It is blind to `.git/
 clean after an agent writes a pager alias or a `pre-push` hook — and those cannot be volumed away,
 because the container needs the repository's git metadata. Two commands see them and belong in the
 same checklist: `git config --local --list`, and `ls -la .git/hooks` (a live hook is anything
-without a `.sample` suffix). The Performance section below wants the
+without a `.sample` suffix). `src/client/public/` joins that checklist under a different heading -
+not host-executed but host-PUBLISHED: Vite copies it into `dist/client`, which the server serves
+with no bearer token, and the copy dereferences symlinks, so an entry there lands in the publish
+root as a real file holding whatever it pointed at. The Performance section below wants the
 same thing for an unrelated reason, which is why it is cheap. For the same reason **the container
 needs pnpm in the image** (`corepack prepare pnpm@9.15.9 --activate`): a documented in-container
 command that does not run makes the host exception the only path there is.

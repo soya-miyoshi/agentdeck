@@ -62,6 +62,12 @@ const hostExecutedFiles = [
   ".github/workflows/",
   ".git/config",
   ".git/hooks/",
+  // Not host-EXECUTED, and listed here anyway because the consequence is the same shape and the
+  // review is directed at this list. Vite copies `src/client/public/` verbatim into `dist/client`,
+  // which is served with no bearer token - and the copy dereferences symlinks, so an entry here
+  // becomes a real file in the publish root holding whatever it pointed at. `static.ts` cannot see
+  // that: by serve time it is a real file inside the root.
+  "src/client/public/",
 ];
 
 void describe("the host-execution consequence is documented where the claim is made", () => {

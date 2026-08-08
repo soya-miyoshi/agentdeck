@@ -84,7 +84,10 @@ the next install), any lint, format or toolchain config the host tool discovers 
 JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
 host, and auto-discovers more filenames than the one we happen to have) —
 `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `.claude/`, `.github/workflows/`, `.git/config`, `.git/hooks/`
+the suite already shells out), `src/client/public/` (Vite copies it verbatim into `dist/client`,
+which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
+there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
+`.git/config`, `.git/hooks/`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the
 toolchain runs agent-authored code on the Mac with your identity. `.claude/` is the one with no
 build step in front of it: `.claude/skills/*/SKILL.md`,
@@ -303,14 +306,19 @@ a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs`
 `scripts/restart-survival.mjs` are run by hand besides. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
 executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
 loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
-`.git/hooks/`. There used to be a container between all of that and the machine; there is not one
+`.git/hooks/`. `pnpm build` is on the list for a different reason: Vite copies `src/client/public/`
+verbatim into `dist/client`, which this server publishes with no bearer token, and that copy
+DEREFERENCES symlinks — so an entry there becomes a real file in the publish root holding whatever
+it pointed at, which `static.ts` cannot refuse because by serve time it is not a symlink. Measured:
+a link to a file outside the repo came back as its contents over HTTP. There used to be a container between all of that and the machine; there is not one
 now, which makes the review below the only control rather than the second of two.
 
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
 `.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
-`.github/workflows/` and the agent profiles file `AGENTDECK_PROFILES` points at. That last one is
+`.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
+points at. That last one is
 the most direct host-execution surface of the lot and had been on none of these lists: a profile's
 `command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
 profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.
