@@ -7,7 +7,7 @@
 // server process, `Connection` multiplexing over it, `stream-position` deciding what each frame
 // means, and the render callback App.vue passes in. The only pieces left out are the two that need
 // a DOM - the Vue components and xterm's renderer - and the seam they sit behind, TerminalHandle,
-// is four verbs wide, so a stand-in for it here writes what xterm would have painted.
+// is five verbs wide, so a stand-in for it here writes what xterm would have painted.
 //
 // The server end is real all the way down: a spawned `src/server.ts`, the real tmux binary, a real
 // pty, a real `/bin/sh` reading from it. Keystrokes go in as `input` frames and the shell's output
@@ -19,7 +19,14 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +40,7 @@ import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type SocketLike } from "./connection.ts";
+import { keyBytes, type KeyName, withCtrl } from "./key-row.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { type Tab, toTabs } from "./tabs.ts";
 
@@ -52,6 +60,12 @@ const work = temp("agentdeck-e2e-work-");
 const pasteWork = temp("agentdeck-e2e-paste-");
 const dropWork = temp("agentdeck-e2e-drop-");
 const restartWork = temp("agentdeck-e2e-restart-");
+// One working tree per key-row test, for the reason above: same path and same agent is the same
+// tmux session, and a pane left mid-`cat` by one test is not a starting state for the next.
+const keyWork = temp("agentdeck-e2e-keys-");
+const ctrlWork = temp("agentdeck-e2e-ctrl-");
+const tabWork = temp("agentdeck-e2e-tab-");
+const arrowWork = temp("agentdeck-e2e-arrow-");
 // Three, because the done-when for the strip is three sessions running at once: a status that is
 // right for one tab and wrong for the other two is the failure it is written against.
 const stripWork = [
@@ -110,7 +124,17 @@ const startServer = async (): Promise<ChildProcess> => {
       LC_ALL: "en_US.UTF-8",
       TMUX_SOCKET: socket,
       AGENTDECK_PORT: String(port),
-      AGENTDECK_MOUNTS: [work, pasteWork, dropWork, restartWork, ...stripWork].join(":"),
+      AGENTDECK_MOUNTS: [
+        work,
+        pasteWork,
+        dropWork,
+        restartWork,
+        keyWork,
+        ctrlWork,
+        tabWork,
+        arrowWork,
+        ...stripWork,
+      ].join(":"),
       AGENTDECK_PROFILES: profiles,
       AGENTDECK_AGENT_STATE_DIR: join(conf, "agent-state"),
     },
@@ -161,7 +185,19 @@ after(async () => {
   } catch {
     // Already gone: the desired end state.
   }
-  for (const dir of [home, work, pasteWork, dropWork, restartWork, ...stripWork, conf]) {
+  for (const dir of [
+    home,
+    work,
+    pasteWork,
+    dropWork,
+    restartWork,
+    keyWork,
+    ctrlWork,
+    tabWork,
+    arrowWork,
+    ...stripWork,
+    conf,
+  ]) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -179,6 +215,9 @@ const paintedTerminal = (): TerminalHandle & { text: () => string; clears: () =>
     clears: () => clears,
     size: () => ({ cols: 80, rows: 24 }),
     focus: () => undefined,
+    // The real one reads xterm's DECCKM. Nothing here paints, so it is stated: the key row's
+    // arrows are tested against both answers below rather than against whichever one is baked in.
+    applicationCursorKeys: () => false,
     text: () => painted,
   };
 };
@@ -761,5 +800,197 @@ void describe("the sessions this test started", () => {
     // Guards the whole file against the failure mode that would make it pass while proving
     // nothing: a server that answered without tmux ever being involved.
     assert.ok(sessionNames().length >= 1, "no tmux session was created");
+  });
+});
+
+// ------------------------------------------------------------------------------------------
+// m4/key-row: the keys a soft keyboard does not have, answering a prompt that BLOCKS on them.
+//
+// The bytes below come from src/client/key-row.ts - the module the caps call - and go out through
+// the same `Connection.input` xterm's keystrokes use, so nothing here is a second path to the pty.
+// What App.vue adds on top is the latch, and it is restated in `keyboard` rather than imitated:
+// press Ctrl, and the next thing sent is transformed and the latch spent.
+//
+// NOT DEMONSTRATED HERE, and not claimed: a thumb on a phone. The only other tailnet device has
+// been offline for days, so "answered from the phone" is unproven; the steps for a person holding
+// one are in README.md under "Answering a prompt from the phone". What IS proven is everything
+// between the cap and the process: a real server, real tmux, a real pty, a real shell, and a
+// prompt that cannot proceed until the right byte arrives.
+
+interface Keyboard {
+  press: (key: KeyName) => void;
+  /** What the soft keyboard types, through App.vue's latch. */
+  type: (text: string) => void;
+  latched: () => boolean;
+}
+
+/** App.vue's key handling, restated over a driven session. */
+const keyboard = (driven: Driven, applicationCursorKeys = false): Keyboard => {
+  let latch = false;
+  const send = (data: string): void => {
+    if (data === "") return;
+    driven.connection.input(driven.session.id, latch ? withCtrl(data) : data);
+    latch = false;
+  };
+  return {
+    press: (key) => {
+      if (key === "ctrl") {
+        latch = !latch;
+        return;
+      }
+      send(keyBytes(key, applicationCursorKeys));
+    },
+    type: (text) => send(text),
+    latched: () => latch,
+  };
+};
+
+void describe("the key row, against a real shell that is blocked on a keypress", () => {
+  void test("a permission prompt is ANSWERED: Enter is what unblocks a waiting `read`", async () => {
+    const driven = await drive(keyWork);
+    const keys = keyboard(driven);
+    try {
+      const marker = join(keyWork, "answered.txt");
+      // A prompt that BLOCKS. `read` does not return until a line arrives, and a line arrives only
+      // when the pty's line discipline sees CR - which is the byte Enter sends and the byte an iOS
+      // soft keyboard's own return key would send too. The point is the rest of the row: the answer
+      // is typed, then committed by a key the phone does not have to produce.
+      driven.connection.input(
+        driven.session.id,
+        `printf 'Allow edit to src/tmux.ts? [y/n] '; read reply; printf '%s' "$reply" > ${marker}\r`,
+      );
+      await waitFor("the prompt to paint", () => driven.screen().includes("Allow edit to"));
+
+      keys.type("y");
+      // Blocked: nothing has committed the line yet, so the redirection has not run and the marker
+      // does not exist. This is what makes the prompt a real one rather than a printed string.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(
+        existsSync(marker),
+        false,
+        "the prompt answered itself before Enter was pressed",
+      );
+
+      keys.press("enter");
+      await waitFor(
+        "the prompt to be answered",
+        () => existsSync(marker) && readFileSync(marker, "utf8") === "y",
+      );
+      assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
+  void test("Ctrl latches, and Ctrl then c interrupts a running process", async () => {
+    const driven = await drive(ctrlWork);
+    const keys = keyboard(driven);
+    try {
+      // `&&`, not `;`: an interrupted `sleep` exits non-zero, so the second half is the thing that
+      // does NOT happen. With `;` the shell would run it anyway and the check below would be a
+      // check on nothing.
+      const finished = join(ctrlWork, "the-sleep-finished");
+      driven.connection.input(driven.session.id, `sleep 300 && touch ${finished}\r`);
+      await new Promise((resolve) => setTimeout(resolve, 750));
+
+      keys.press("ctrl");
+      assert.equal(keys.latched(), true, "Ctrl did not latch");
+      keys.type("c");
+      assert.equal(keys.latched(), false, "the latch outlived the key it modified");
+
+      // The shell got its prompt back, which only happens if SIGINT reached the foreground group.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      driven.connection.input(driven.session.id, "echo still-here\r");
+      await waitFor(
+        "the interrupted shell to answer again",
+        () => (driven.screen().match(/still-here/g) ?? []).length >= 2,
+      );
+      // And `sleep 300` did not finish: it was killed, so its `&&` never ran. On disk rather than
+      // on the pane, because the pane also holds the echo of the command that names it.
+      assert.equal(existsSync(finished), false, "the sleep ran to completion instead of dying");
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
+  void test("Tab completes a filename the caller only half typed", async () => {
+    const driven = await drive(tabWork);
+    const keys = keyboard(driven);
+    try {
+      writeFileSync(join(tabWork, "completion-target-file.txt"), "");
+      keys.type("ls completion-tar");
+      await waitFor("the half-typed line to echo", () =>
+        driven.screen().includes("completion-tar"),
+      );
+      keys.press("tab");
+      await waitFor("the shell to complete the name", () =>
+        driven.screen().includes("completion-target-file.txt"),
+      );
+      keys.press("enter");
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
+  void test("Esc and the arrows arrive as the bytes they claim to be", async () => {
+    // `cat -v` prints control bytes rather than acting on them, so what the pty received is
+    // readable on the pane. This is the assertion that the row is sending sequences and not key
+    // names: an arrow that arrived as anything else shows up here as anything else.
+    const driven = await drive(arrowWork);
+    const normal = keyboard(driven, false);
+    const application = keyboard(driven, true);
+    try {
+      // `stty -echo` so the only thing on the pane is what `cat` received, not the tty's echo
+      // of it as well.
+      driven.connection.input(driven.session.id, "stty -echo; cat -v\r");
+      await new Promise((resolve) => setTimeout(resolve, 750));
+
+      normal.press("esc");
+      normal.press("up");
+      normal.press("down");
+      normal.press("right");
+      normal.press("left");
+      normal.press("enter");
+      await waitFor("the normal-mode sequences to come back", () =>
+        /\^\[\^\[\[A\^\[\[B\^\[\[C\^\[\[D/.test(driven.screen()),
+      );
+
+      // The same four caps with DECCKM set, which is what a full-screen TUI leaves the terminal in.
+      // The form is the terminal's answer rather than the row's opinion: in the browser it comes
+      // from xterm's `modes.applicationCursorKeysMode`, and here it is the flag passed to
+      // `keyboard`.
+      //
+      // MEASURED, and worth writing down because it decides how much this test can claim: tmux
+      // PARSES its client's input as keys and re-encodes them for the pane, so `ESC O A` arrives at
+      // a pane that has not set DECCKM as `ESC [ A`. Both forms are therefore recognised as Up here
+      // and neither reaches `cat` verbatim - so what this proves is that the row sends a real arrow
+      // key in either mode, not that the byte on the wire is the byte in the pane. The mode still
+      // has to be read rather than assumed: an application form invented for a terminal that never
+      // set DECCKM is a guess that happens to survive tmux, and the client also talks to xterm's
+      // own parser, which does not normalise anything.
+      // A different ORDER from the batch above, so the pattern below cannot be matched by a repaint
+      // of the first line - which a reconnect or a tmux redraw will happily put on the pane twice.
+      application.press("down");
+      application.press("up");
+      application.press("left");
+      application.press("right");
+      application.press("enter");
+      await waitFor("the application-mode presses to arrive as arrow keys", () =>
+        /\^\[\[B\^\[\[A\^\[\[D\^\[\[C/.test(driven.screen()),
+      );
+
+      // Out of `cat`, with the latch: Ctrl then d is EOF, and 0x04 is what ends it.
+      normal.press("ctrl");
+      normal.type("d");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      driven.connection.input(driven.session.id, "echo cat-is-done\r");
+      await waitFor(
+        "the shell to come back after Ctrl-D",
+        () => (driven.screen().match(/cat-is-done/g) ?? []).length >= 2,
+      );
+      assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
   });
 });

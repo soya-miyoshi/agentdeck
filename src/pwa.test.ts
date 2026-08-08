@@ -259,8 +259,8 @@ void describe("the phone layout, in the built CSS", () => {
     for (const side of ["top", "right", "bottom", "left"]) {
       assert.match(css, new RegExp(`env\\(safe-area-inset-${side}`), `no ${side} inset survived`);
     }
-    // The tab strip owns the top edge and the pane area owns the bottom, so the terminal's last
-    // rows - the cursor and any prompt - are clear of the home indicator.
+    // The tab strip owns the top edge and the key row owns the bottom, so the terminal's last rows
+    // - the cursor and any prompt - are clear of both the key caps and the home indicator.
     assert.match(css, /--safe-top:[^;]*safe-area-inset-top/);
     assert.match(css, /--safe-bottom:[^;]*safe-area-inset-bottom/);
     assert.match(css, /padding:[^;]*var\(--safe-bottom\)/);
@@ -269,9 +269,10 @@ void describe("the phone layout, in the built CSS", () => {
   void test("the touch targets survive the build at 44px or more", async () => {
     const css = await asset(".css");
     assert.match(css, /--touch-target:\s*44px/);
-    // Both surfaces a thumb has to hit before anything else works: the tabs and the paste field.
+    // Every surface a thumb has to hit: the tabs, the paste field, and the key row's caps - which
+    // are the ones pressed under time pressure, with an agent waiting on the answer.
     const uses = css.match(/min-height:\s*var\(--touch-target\)/g) ?? [];
-    assert.ok(uses.length >= 2, `only ${String(uses.length)} control claims a touch target`);
+    assert.ok(uses.length >= 3, `only ${String(uses.length)} control claims a touch target`);
   });
 });
 

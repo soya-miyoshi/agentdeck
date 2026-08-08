@@ -232,6 +232,41 @@ Automated, the same path is `src/client/end-to-end.test.ts`: the real client mod
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
 the two pieces that need a DOM.
 
+## Answering a prompt from the phone
+
+A soft keyboard has no Escape, no Tab, no arrows and no Ctrl, and those are precisely the keys an
+agent's permission prompt is answered with. The row of text caps along the bottom of the app is
+those keys: Esc, Tab, Left, Down, Up, Right, Enter and Ctrl. They are bytes to a pty rather than DOM
+key events — `0x1b`, `0x09`, `0x0d` (CR, not LF: the pty's line
+discipline is what turns it into a line), `ESC [ A` or `ESC O A` depending on the terminal's
+application-cursor-keys mode (DECCKM), which `src/client/key-row.ts` reads off xterm rather than
+guessing — and they go out through the same paced `Connection.input` every other keystroke uses.
+
+**Ctrl latches rather than being held.** There is one thumb, so the second press is a separate
+event: tap Ctrl, and the next thing sent from that tab — a cap on the row, or a character typed on
+the soft keyboard — is sent as its control code and the latch is spent. Ctrl then `c` is `0x03`.
+The cap is highlighted while the latch is armed, and tapping it again disarms it.
+
+Automated, against real things: `src/client/end-to-end.test.ts` answers a shell `read` that is
+BLOCKED — the answer is typed, nothing happens, Enter is what commits it — interrupts a `sleep 300`
+with the latch, completes a filename with Tab, and reads Esc and the arrows back out of `cat -v`.
+Real server, real tmux, real pty, real shell. One thing measured there is worth knowing before
+debugging an arrow: tmux parses its client's input as keys and re-encodes them for the pane, so
+`ESC O A` reaches a pane that has not set DECCKM as `ESC [ A`.
+
+**NOT demonstrated: a thumb on a phone.** The only other tailnet device has been offline, so
+"answered from the phone" is unproven here. For someone holding one:
+
+1. `pnpm build`, start the server, open the deck on the phone and paste the token.
+2. Start a session with an agent that asks — claude, in a repository where it will want to edit a
+   file — and give it a task that needs permission.
+3. When the prompt appears, answer it with the row rather than the keyboard: the arrows to move
+   between the choices, Enter to take one, Esc to back out.
+4. Interrupt something with Ctrl then `c` and check the agent stops rather than the character `c`
+   appearing in the prompt.
+5. Check the row itself in standalone mode, where the insets are non-zero: the caps must sit above
+   the home indicator, and the row's background must run under it.
+
 ## Installing to the home screen
 
 The built client ships a manifest (`/manifest.webmanifest`, `display: standalone`), its icons, and

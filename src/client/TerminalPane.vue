@@ -60,6 +60,9 @@ onMounted(() => {
     focus: () => {
       term.focus();
     },
+    // xterm tracks DECCKM as the application sets and clears it, so the key row's arrows take
+    // their form from the terminal rather than from a guess about what is running.
+    applicationCursorKeys: () => term.modes.applicationCursorKeysMode,
   });
   refit();
 });
