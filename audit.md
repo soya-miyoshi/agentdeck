@@ -1471,3 +1471,51 @@ gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist` is theirs to r
 - **`/api/health` is blind to the failure class that broke every create** (`probeTmux` does not use
   `baseEnv`), so the watchdog trusts a probe that cannot see it. Recorded, not fixed.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/tailscale-serve - final whole-codebase pass - 2026-08-09
+
+The code is complete; the item is NOT ticked. Both tailnet switches are still off, so the
+done-when - the `ts.net` URL loading over HTTPS with a secure context - cannot be demonstrated, and
+the phone has been offline besides. What IS demonstrated: the detection of both missing switches
+against the real binary, the origin derivation, the refusal paths, and the timeout behaviour
+against a stubbed tailscale.
+
+### Findings
+
+- [high] scripts/watchdog.mjs:291 - **The Funnel refusal existed only at install time, and the one
+  recurring check had no notion of Funnel.** `scripts/tailscale-serve.mjs` refuses to run under
+  Funnel, but that is one invocation; the watchdog looks at `tailscale serve status` every 60s and
+  matched only for the loopback port. So anything running as this uid could turn Funnel on after a
+  green install and put a terminal server on the **public internet** - the unauthenticated client
+  bundle and `/api/health` to anyone, session creation to anyone holding the token - while every
+  automated check stayed green. The same check was asymmetric: it alerted when exposure was LOST
+  and was silent when it was GAINED, which is the security event. Status: FIXED in 95184dd. Funnel
+  is read with the same predicate the install script uses, defined once in `src/tailnet.ts`, and
+  alerted every pass it is true; exposure appearing is now a notification too.
+
+- [high] scripts/tailscale-serve.mjs:136 - **The proxy outlives the server it was verified
+  against.** The script proves agentdeck owns the port before applying serve - it requires the real
+  `/api/health` body, not just a 2xx - but `tailscale serve --bg` writes tailscaled state that
+  survives the server exiting, a logout and a reboot, and nothing re-runs that proof. The
+  watchdog's squatter branch, added in `m4/launchd-watchdog`, makes it concrete: it deliberately
+  refuses to kill a non-agentdeck process holding the port, so that process is published to the
+  tailnet with a real certificate while the alert reads as a local port conflict. Status: PARTLY
+  FIXED in 95184dd - the alert now says when the port is published and names `tailscale serve
+reset`. **OPEN:** nothing tears the grant down automatically, and re-verifying it on a schedule
+  would be the real fix.
+
+### Found while verifying, not by the gate
+
+Two tests are flaky under load and pass repeatedly in isolation: `snapshot.test.ts`'s "scrollback
+that is already in history is not repeated in data" (the ring buffer does not hold the burst when
+the machine is busy) and the watchdog's "the recovery leaves ONE server on the port". Neither is a
+product defect; both are timing assumptions that hold on an idle machine. Worth an item.
+
+### Open after this iteration
+
+- **The serve grant is permanent once applied.** Named above.
+- **Two flaky tests.**
+- **The HTTPS half is undemonstrated** until both tailnet switches are on.
+- **Same-uid**, unchanged.
