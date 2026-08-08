@@ -119,3 +119,11 @@ export const tailnetAdvice = (
   }
   return lines;
 };
+
+/**
+ * Whether `tailscale serve status` output shows Funnel on, i.e. exposure to the public internet
+ * rather than to the tailnet. One definition, because the install script and the watchdog must not
+ * disagree about what it looks like.
+ */
+export const funnelLine = (text: string): string | undefined =>
+  text.split("\n").find((line) => /funnel\s+on/i.test(line) || /^\s*Funnel on\b/i.test(line));
