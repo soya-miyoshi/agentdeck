@@ -6,6 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { buildSnapshot, planAttach } from "./attach.ts";
 import { parseClientMessage, paneSize, type ServerMessage } from "./protocol.ts";
 import type { SessionStream } from "./stream.ts";
+import type { SessionState } from "./tmux.ts";
 import { tokenMatches } from "./token.ts";
 
 // One socket, multiplexed over every attached session. Not one per tab: phones background
@@ -117,7 +118,20 @@ const send = (socket: WebSocket, message: ServerMessage): void => {
   if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
 };
 
-export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: () => void } => {
+export interface WsHandle {
+  close: () => void;
+  /**
+   * Tell every open socket a session's state, whether or not it is attached to that session.
+   *
+   * Broadcast rather than sent to the attached, because the strip shows a row per session and
+   * plan 002 is explicit that it must be able to say "this one needs you" without attaching to
+   * every session at once. A state frame that only reached attached clients would make the status
+   * of an unlooked-at tab arrive on the next poll, and there is no poll.
+   */
+  pushState: (sessionId: string, state: SessionState, exitCode?: number) => void;
+}
+
+export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle => {
   // noServer, so the upgrade is authenticated before any WebSocket exists. Letting `ws` handle
   // the upgrade would mean a socket that opens and then closes, which a client cannot tell from
   // a network problem.
@@ -545,6 +559,16 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     close: () => {
       clearInterval(heartbeat);
       wss.close();
+    },
+    pushState: (sessionId, state, exitCode) => {
+      for (const client of clients) {
+        send(client.socket, {
+          t: "state",
+          sessionId,
+          state,
+          ...(exitCode === undefined ? {} : { exitCode }),
+        });
+      }
     },
   };
 };

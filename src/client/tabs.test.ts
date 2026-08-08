@@ -6,7 +6,13 @@ import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 
-const session = (id: string, agent: string, state: SessionState, exitCode?: number): Session => ({
+const session = (
+  id: string,
+  agent: string,
+  state: SessionState,
+  exitCode?: number,
+  waitingDetectionLost?: true,
+): Session => ({
   id,
   name: id,
   cwd: `/work/${id}`,
@@ -14,6 +20,7 @@ const session = (id: string, agent: string, state: SessionState, exitCode?: numb
   state,
   startedAt: 0,
   ...(exitCode === undefined ? {} : { exitCode }),
+  ...(waitingDetectionLost === undefined ? {} : { waitingDetectionLost }),
 });
 
 const agent = (id: string, detectsWaiting: boolean): AgentSummary => ({
@@ -71,6 +78,37 @@ void describe("detectsWaiting: false is a supported configuration, not a defect"
     // direction; a wrong one is the failure the other.
     const [tab] = toTabs([session("a", "gone", "waiting")], []);
     assert.equal(tab?.needsYou, false);
+  });
+});
+
+void describe("a session whose waiting detection died", () => {
+  void test("is visibly distinct from a healthy one, not identical to it", () => {
+    const [healthy, deaf] = toTabs(
+      [session("a", "claude", "working"), session("b", "claude", "working", undefined, true)],
+      [agent("claude", true)],
+    );
+    // The whole point: two tabs in the same state must not render the same when one of them will
+    // never again tell the user it needs them.
+    assert.equal(healthy?.waitingDetectionLost, false);
+    assert.equal(deaf?.waitingDetectionLost, true);
+    assert.notDeepEqual(healthy, deaf);
+  });
+
+  void test("an agent that never detected waiting is not reported as having lost it", () => {
+    // Nothing died here - this is the supported configuration. Saying "no waiting alerts" on
+    // every shell tab is noise, and noise on every tab is how a real warning stops being read.
+    const [tab] = toTabs(
+      [session("a", "shell", "working", undefined, true)],
+      [agent("shell", false)],
+    );
+    assert.equal(tab?.waitingDetectionLost, false);
+  });
+
+  void test("an exited session does not carry it", () => {
+    // A finished process is not going to need anybody. The question the flag answers is not being
+    // asked about this tab.
+    const [tab] = toTabs([session("a", "claude", "exited", 0, true)], [agent("claude", true)]);
+    assert.equal(tab?.waitingDetectionLost, false);
   });
 });
 

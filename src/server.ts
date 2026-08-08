@@ -12,7 +12,7 @@ import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
-import { Tmux } from "./tmux.ts";
+import { type SessionState, Tmux } from "./tmux.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
@@ -281,7 +281,19 @@ export const main = async (): Promise<void> => {
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
-  const hub = new Hub({ tmux, registry, socket });
+  // Assigned once the socket server exists, which is after the hub it announces for. `state` is
+  // pushed rather than polled (plan 002), and the two sources of a state change - the hub's
+  // inference and an agent's own hook - both go out through this one funnel.
+  let broadcastState: (id: string, state: SessionState, exitCode?: number) => void = () =>
+    undefined;
+  const hub = new Hub({
+    tmux,
+    registry,
+    socket,
+    onState: (id, state, exitCode) => {
+      broadcastState(id, state, exitCode);
+    },
+  });
 
   // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
   // finish, or did I lose it", and expiring it after five minutes puts the question back.
@@ -319,6 +331,9 @@ export const main = async (): Promise<void> => {
         origin: process.env["AGENTDECK_ORIGIN"],
         probe: async () => await probeTmux(socket),
         streamFor: (id) => hub.streamFor(id),
+        onStateDeclared: (id, state) => {
+          hub.announce(id, state);
+        },
       }),
       CLIENT_DIR,
     ),
@@ -334,6 +349,7 @@ export const main = async (): Promise<void> => {
     sendInput: (id, data) => hub.sendInput(id, data),
     applyPaneSize: (id, cols, rows) => hub.applyPaneSize(id, cols, rows),
   });
+  broadcastState = ws.pushState;
 
   // Attach to whatever tmux already has before serving, so the first request sees real state
   // rather than an empty list that fills in a moment later.

@@ -8,6 +8,7 @@ import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
 import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
+import type { SessionState } from "./tmux.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
 
 // A terminal server is remote code execution by design. MulmoTerminal binds loopback for exactly
@@ -39,6 +40,11 @@ export interface HttpDeps {
    * a session tmux has but nothing is attached to still gets its state through the registry.
    */
   streamFor?: (sessionId: string) => SessionStream | undefined;
+  /**
+   * Called with the state a hook just declared, so the strip hears it now rather than at the next
+   * sync. Plan 002: `state` is pushed, not polled, and a hook exists to arrive AT the transition.
+   */
+  onStateDeclared?: (sessionId: string, state: SessionState) => void;
 }
 
 interface Handled {
@@ -112,6 +118,9 @@ export const createHandler = (deps: HttpDeps) => {
       // next GET /api/sessions carries it, rather than the one after the hub's next sync.
       deps.streamFor?.(id)?.declare(state);
       deps.registry.setState(id, state);
+      // And out to every open socket, at the transition. This is the one path that can be fast:
+      // the agent said so itself, so there is nothing to infer and nothing to wait for.
+      deps.onStateDeclared?.(id, state);
       return { status: 200, body: { ok: true, state } };
     }
 

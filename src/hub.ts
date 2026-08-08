@@ -1,7 +1,7 @@
 import { SessionPty } from "./pty.ts";
 import type { Registry } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
-import type { Tmux } from "./tmux.ts";
+import type { SessionState, Tmux } from "./tmux.ts";
 
 // Owns one live attachment per session, and keeps that set equal to what tmux actually has.
 //
@@ -32,6 +32,15 @@ export interface HubOptions {
   /** Injected so a test of the repaint does not have to spend a real second on it. */
   repaintQuietMs?: number;
   repaintMaxMs?: number;
+  /**
+   * Called when a session's state CHANGES, so the strip is told rather than asked.
+   *
+   * Plan 002: `state` is pushed, not polled. Without this the only state frame a client ever saw
+   * was the one answering its own `attach`, so a tab that was not being looked at - or one whose
+   * agent changed state after the attach - showed whatever the last full session list said, until
+   * something else made the client fetch one. That is a poll waiting to be written.
+   */
+  onState?: (sessionId: string, state: SessionState, exitCode?: number) => void;
 }
 
 export class Hub {
@@ -42,8 +51,12 @@ export class Hub {
   #ptys = new Map<string, SessionPty>();
   #repaintQuietMs: number;
   #repaintMaxMs: number;
+  #onState: ((sessionId: string, state: SessionState, exitCode?: number) => void) | undefined;
+  /** The last state each live session was announced with, so a repeat is not sent. */
+  #announced = new Map<string, SessionState>();
 
   constructor(options: HubOptions) {
+    this.#onState = options.onState;
     this.#tmux = options.tmux;
     this.#registry = options.registry;
     this.#socket = options.socket;
@@ -118,6 +131,31 @@ export class Hub {
     for (const [id, pty] of this.#ptys) {
       this.#registry.setState(id, pty.stream.state());
     }
+
+    // And tell the clients, which is the half that makes the strip pushed rather than polled. A
+    // session with no attachment - one that has exited - is announced with what the registry says,
+    // because that is the only reading of it there is.
+    for (const session of live) {
+      const stream = this.#ptys.get(session.id)?.stream;
+      this.announce(session.id, stream?.state() ?? session.state, session.exitCode);
+    }
+    for (const id of this.#announced.keys()) {
+      if (!liveIds.has(id)) this.#announced.delete(id);
+    }
+  }
+
+  /**
+   * Say a session's state once, and only when it is news.
+   *
+   * The single funnel for both sources: this sync's inference, and an agent's own hook statement
+   * arriving over HTTP (src/http.ts), which is announced the moment it lands rather than at the
+   * next sync - the difference between a transition seen in milliseconds and one seen in up to a
+   * sync interval.
+   */
+  announce(sessionId: string, state: SessionState, exitCode?: number): void {
+    if (this.#announced.get(sessionId) === state) return;
+    this.#announced.set(sessionId, state);
+    this.#onState?.(sessionId, state, exitCode);
   }
 
   streamFor(sessionId: string): SessionStream | undefined {
