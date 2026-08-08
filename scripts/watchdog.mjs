@@ -22,20 +22,19 @@ const STOP_GRACE_MS = 10_000;
 // system directories ahead of every user-writable one (audit.md).
 const LSOF = "/usr/sbin/lsof";
 
-// The checkout holding src/server.ts: the script's parent when run from the repository, and
-// AGENTDECK_REPO when the script has been copied out of it, which is the supported install.
+// The checkout holding src/server.ts: the script's parent, or AGENTDECK_REPO once the script has
+// been copied out of it, which is the supported install.
 const repoRoot = process.env.AGENTDECK_REPO ?? fileURLToPath(new URL("..", import.meta.url));
 const port = process.env.AGENTDECK_PORT ?? "7777";
 const statePath =
   process.env.AGENTDECK_WATCHDOG_STATE ?? join(homedir(), ".agentdeck", "watchdog-state.json");
-// Where the SERVER this pass starts writes its output. The watchdog's own lines go to launchd's
-// StandardOutPath; this is the other half, and without it a refusal to boot is a closed fd.
+// Where the SERVER this pass starts writes its output; the watchdog's own lines go to launchd's
+// StandardOutPath.
 const serverLogPath =
   process.env.AGENTDECK_SERVER_LOG ?? join(homedir(), "Library", "Logs", "agentdeck-server.log");
 
-const stamp = () => new Date().toISOString();
 const log = (message) => {
-  console.log(`${stamp()} agentdeck-watchdog: ${message}`);
+  console.log(`${new Date().toISOString()} agentdeck-watchdog: ${message}`);
 };
 
 // -----------------------------------------------------------------------------------------
@@ -43,8 +42,7 @@ const log = (message) => {
 // -----------------------------------------------------------------------------------------
 
 // `failures` is the consecutive-unhealthy streak, `restarts` the recoveries since the last healthy
-// pass, `startRefused` the once-only latch on the misconfiguration banner. A missing or truncated
-// file is a first run rather than an error: starting from zero beats refusing to supervise.
+// pass, `startRefused` the once-only latch on the misconfiguration banner.
 const emptyState = {
   failures: 0,
   restarts: 0,
@@ -54,6 +52,8 @@ const emptyState = {
   startRefused: false,
 };
 
+/** The state this pass starts from. A missing or truncated file is a first run, not an error:
+ *  starting from zero beats refusing to supervise. */
 const readState = () => {
   try {
     return { ...emptyState, ...JSON.parse(readFileSync(statePath, "utf8")) };
@@ -86,8 +86,8 @@ const notify = async (message) => {
   });
 };
 
-/** A modal for giving up. Detached with `giving up after`, so an undismissed dialog outlives
- *  this pass without holding it open or surviving into the next tick. */
+/** A modal for giving up, detached so an undismissed dialog outlives this pass without holding
+ *  it open. */
 const alert = (message) => {
   const script =
     `display alert ${JSON.stringify(NOTIFY_TITLE)} message ${JSON.stringify(message)} ` +
@@ -169,16 +169,13 @@ const probe = async () => {
 // Starting and restarting
 // -----------------------------------------------------------------------------------------
 
-/**
- * What the server may not be started without: no mounts is an empty allowlist, no profiles is
- * nothing startable, no origin is the Origin check off on every /api route and /ws upgrade. Each
- * would make the recovered server emptier or less protected than the one it replaced.
- */
+// What the server may not be started without: no mounts is an empty allowlist, no profiles is
+// nothing startable, no origin is the Origin check off on every /api route and /ws upgrade.
 const REQUIRED_ENV = ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"];
 const missingEnv = () => REQUIRED_ENV.filter((name) => (process.env[name] ?? "") === "");
 
-/** Start the server detached so it outlives this pass, with its output in a 0600 file: it can
- *  carry a first run's token, and the one line a refusal to boot prints is the whole diagnosis. */
+/** Start the server detached so it outlives this pass. The log is 0600 because it can carry a
+ *  first run's token. */
 const startServer = () => {
   let out = "ignore";
   try {
@@ -196,7 +193,7 @@ const startServer = () => {
   return child.pid ?? null;
 };
 
-/** SIGTERM, wait, SIGKILL. Never `tmux kill-server`: that is every session at once (plan 006). */
+// SIGTERM, wait, SIGKILL. Never `tmux kill-server`: that is every session at once (plan 006).
 const stopServer = async (pid) => {
   try {
     process.kill(pid, "SIGTERM");
@@ -220,7 +217,7 @@ const stopServer = async (pid) => {
 // -----------------------------------------------------------------------------------------
 
 /** Whether `tailscale serve` still points at the port. Detect and report only - re-applying is
- *  m4/tailscale-serve's command and that item is blocked (plan 006). */
+ *  m4/tailscale-serve's, and that item is blocked (plan 006). */
 const serveConfigured = async () =>
   await new Promise((resolve) => {
     execFile(
@@ -238,7 +235,7 @@ const serveConfigured = async () =>
   });
 
 /** Reports it, and only notifies for "was configured last pass and is gone" - never configured is
- *  the expected state of an unbuilt milestone and must not train anyone to ignore the alerts. */
+ *  the expected state of an unbuilt milestone (plan 006). */
 const checkServe = async (state) => {
   const configured = await serveConfigured();
   if (configured) {
