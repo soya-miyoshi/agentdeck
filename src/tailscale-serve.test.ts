@@ -20,6 +20,9 @@ const DNS_NAME = "example-host.tailXXXXXX.ts.net";
 let dir = "";
 let stub = "";
 let argvLog = "";
+// Written by the stub's `serve --bg` branch, so `serve status` can answer differently once the
+// proxy has been applied - which is the only way to test the post-apply checks.
+let applied = "";
 
 /** A `tailscale` whose three subcommands each print what this test wants. `serveDelay` is the
  *  hang: with Serve disabled the real CLI blocks instead of exiting. */
@@ -29,6 +32,7 @@ const stubTailscale = (options: {
   rawStatus?: string;
   serveDelay?: number;
   serveStatus?: string;
+  serveStatusAfter?: string;
   serveExit?: number;
 }): void => {
   const status =
@@ -38,6 +42,7 @@ const stubTailscale = (options: {
       CertDomains: options.certDomains === null ? null : [options.certDomains],
     });
   writeFileSync(argvLog, "");
+  rmSync(applied, { force: true });
   writeFileSync(
     stub,
     `#!/bin/sh
@@ -49,11 +54,16 @@ if [ "$1" = "status" ]; then
 fi
 if [ "$1" = "serve" ] && [ "$2" = "--bg" ]; then
   echo "Serve is not enabled on your tailnet. https://login.tailscale.com/f/serve?node=abc"
+  : > '${applied}'
   sleep ${String(options.serveDelay ?? 0)}
   exit ${String(options.serveExit ?? 0)}
 fi
 if [ "$1" = "serve" ] && [ "$2" = "status" ]; then
-  echo '${options.serveStatus ?? "No serve config"}'
+  if [ -f '${applied}' ]; then
+    echo '${options.serveStatusAfter ?? options.serveStatus ?? "No serve config"}'
+  else
+    echo '${options.serveStatus ?? "No serve config"}'
+  fi
   exit 0
 fi
 exit 1
@@ -99,6 +109,7 @@ void describe("the operator's serve command", () => {
     dir = mkdtempSync(join(tmpdir(), "agentdeck-serve-"));
     stub = join(dir, "tailscale");
     argvLog = join(dir, "argv.log");
+    applied = join(dir, "applied");
   });
 
   /** Every argument list the stub was invoked with, one per line: what the script actually ran, as
@@ -131,12 +142,36 @@ void describe("the operator's serve command", () => {
       serveStatus: `https://${DNS_NAME} (tailnet only) |-- / proxy http://127.0.0.1:7798`,
     });
     run("7798");
+    // Asserted on the argv log only: the script must MENTION funnel (it refuses when Funnel is on),
+    // so "the source never says funnel" would forbid the check that enforces this.
     assert.doesNotMatch(invocations(), /funnel/);
-    const code = readFileSync(script, "utf8")
-      .split("\n")
-      .filter((line) => !line.trimStart().startsWith("//"))
-      .join("\n");
-    assert.doesNotMatch(code, /funnel/);
+  });
+
+  void test("Funnel already on: it refuses BEFORE running serve", async () => {
+    const { server, port } = await healthResponder();
+    stubTailscale({
+      certDomains: DNS_NAME,
+      serveStatus: `https://${DNS_NAME} (Funnel on) |-- / proxy http://127.0.0.1:${port}`,
+    });
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
+    assert.notEqual(status, 0);
+    assert.match(out, /Funnel is ON/);
+    assert.match(out, new RegExp(`tailscale funnel ${port} off`));
+    assert.doesNotMatch(out, /putting tailscale serve in front of/);
+    assert.doesNotMatch(invocations(), /--bg/);
+  });
+
+  void test("no server on the port: serve is never applied", () => {
+    stubTailscale({
+      certDomains: DNS_NAME,
+      serveStatus: `https://${DNS_NAME} (tailnet only) |-- / proxy http://127.0.0.1:7799`,
+    });
+    const { status, out } = run("7799");
+    assert.notEqual(status, 0);
+    assert.match(out, /server is not answering on 127\.0\.0\.1:7799/);
+    assert.match(out, /nothing was exposed/);
+    assert.doesNotMatch(invocations(), /--bg/);
   });
 
   void test("no tailscale binary is a named refusal, not a stack trace", () => {
@@ -169,39 +204,55 @@ void describe("the operator's serve command", () => {
     assert.match(out, /no MagicDNS name/);
   });
 
-  void test("serve that never exits is killed and the enable link is reported", () => {
+  void test("serve that never exits is killed, and the run says what is live now", async () => {
+    const { server, port } = await healthResponder();
     stubTailscale({ certDomains: DNS_NAME, serveDelay: 30 });
     const started = Date.now();
-    const { status, out } = run("7777");
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
     assert.notEqual(status, 0);
     assert.ok(Date.now() - started < 20_000, "it waited on the hang instead of timing out");
     assert.match(out, /did not exit within 1500ms and was killed/);
     assert.match(out, /login\.tailscale\.com\/f\/serve/);
+    // It ran the command, so it must not claim nothing was left running - it must report and
+    // name the undo.
+    assert.doesNotMatch(out, /Nothing was left running/);
+    assert.match(out, /tailscale serve reset/);
   });
 
-  void test("serve exiting non-zero is reported rather than treated as configured", () => {
+  void test("serve exiting non-zero still reports what serve status says is live", async () => {
+    const { server, port } = await healthResponder();
     stubTailscale({ certDomains: DNS_NAME, serveExit: 1 });
-    const { status, out } = run("7777");
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
     assert.notEqual(status, 0);
     assert.match(out, /failed/);
+    assert.match(out, /tailscale serve reset/);
   });
 
-  void test("serve status that does not mention the port fails the run", () => {
+  void test("serve status that does not mention the port fails the run and names the undo", async () => {
+    const { server, port } = await healthResponder();
     stubTailscale({ certDomains: DNS_NAME, serveStatus: "No serve config" });
-    const { status, out } = run("7777");
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
     assert.notEqual(status, 0);
-    assert.match(out, /does not mention port 7777/);
+    assert.match(out, new RegExp(`does not mention port ${port}`));
+    assert.match(out, /tailscale serve reset/);
   });
 
-  void test("a proxy in place with no server behind it says so, rather than blaming the proxy", () => {
+  void test("Funnel turned on by the apply is caught after the fact, not certified green", async () => {
+    const { server, port } = await healthResponder();
     stubTailscale({
       certDomains: DNS_NAME,
-      serveStatus: `https://${DNS_NAME} (tailnet only) |-- / proxy http://127.0.0.1:7799`,
+      serveStatus: "No serve config",
+      serveStatusAfter: `https://${DNS_NAME} (Funnel on) |-- / proxy http://127.0.0.1:${port}`,
     });
-    const { status, out } = run("7799");
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
     assert.notEqual(status, 0);
-    assert.match(out, /proxies to 127\.0\.0\.1:7799/);
-    assert.match(out, /server is not answering on 127\.0\.0\.1:7799/);
+    assert.match(out, /public internet/);
+    assert.match(out, new RegExp(`tailscale funnel ${port} off`));
+    assert.doesNotMatch(out, /is up\. Open it on the phone/);
   });
 
   void test("with the server up, the last thing it cannot do is the ts.net fetch", async () => {
