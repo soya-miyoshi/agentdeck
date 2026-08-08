@@ -25,8 +25,12 @@
   GUI session, within 60 seconds and again after every reboot, with no human action - and the same
   edit chooses the command line the watchdog then spawns as the server. To keep the review gating
   what it says it gates, copy the script out of the checkout (`~/.agentdeck/bin/watchdog.mjs`) and
-  point ProgramArguments there. README.md's "Installing it" says the same. That narrows the
-  surface rather than closing it: the watchdog still spawns `src/server.ts` FROM the checkout, so
+  point ProgramArguments there. README.md's "Installing it" says the same. THE COPY BUYS REVIEW
+  SCOPE, NOT WRITE PROTECTION: ~/.agentdeck/bin and the mise node named below are both writable by
+  this uid, so anything running as you can still rewrite the script and the interpreter - and
+  outside the checkout, `git status` / `git diff` cannot see that edit either. Only a root-owned
+  script and a root-owned interpreter close it, and neither is installed here.
+  The watchdog also still spawns `src/server.ts` FROM the checkout, so
   a recovery executes agent-writable code as you either way. Only running the server from a
   checkout an agent cannot write closes it, and that is not this item's to build (audit.md).
   The copy does not move ~/.agentdeck/watchdog-state.json either, which is same-uid data with no

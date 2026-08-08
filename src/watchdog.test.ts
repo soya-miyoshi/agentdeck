@@ -513,6 +513,26 @@ void describe("a give-up latch nobody has heard about is not silent", () => {
   });
 });
 
+void describe("a planted future alert stamp does not buy the latch permanent silence", () => {
+  // `gaveUpAlertedAt` comes from the same unauthenticated, same-uid file as the latch itself, so a
+  // year-2100 stamp made `since` negative and the hourly re-alert never fired again.
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("future-stamp");
+    seedState({ failures: 3, restarts: 2, gaveUp: true, gaveUpAlertedAt: 4_102_444_800_000 });
+  });
+
+  void test("a stamp in the future is read as never alerted, so the alert still lands", async () => {
+    const planted = pass(port);
+    assert.equal(planted.status, 1);
+    const seen = await notifiedEventually(/display alert/);
+    assert.match(seen, /STOPPED restarting/, "a future stamp silenced the give-up alert forever");
+    assert.ok(state().gaveUpAlertedAt <= Date.now(), "the future stamp was kept");
+  });
+});
+
 void describe("tailscale serve: not configured is not an outage", () => {
   // "Never configured" is an unbuilt milestone, "was configured and is gone" is the reboot case
   // (plan 006); a stub `tailscale` drives both, because the real one can only produce the first.
@@ -697,6 +717,45 @@ void describe("an answer that is not a healthy one", () => {
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200 in \d+ms$/m);
     assert.equal(state().failures, 0, "two failures then a healthy pass did not reset the streak");
+  });
+});
+
+void describe("a planted negative streak cannot disable recovery", () => {
+  // The sibling of the planted give-up latch: `failures: -999999` grew by one per pass, so an
+  // unhealthy server was never restarted, never latched and never said anything at all.
+  let stub: ReturnType<typeof spawn>;
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("negative-streak");
+    stub = await startStub(
+      "unhealthy stub",
+      port,
+      `require("node:http").createServer((req, res) => {` +
+        `res.writeHead(503, {"content-type": "application/json"});` +
+        `res.end(JSON.stringify({ ok: false }));` +
+        `}).listen(${port}, "127.0.0.1");`,
+    );
+    seedState({ failures: -999_999, restarts: -5 });
+  });
+
+  after(() => {
+    stub.kill("SIGKILL");
+    killListener(port);
+  });
+
+  void test("the counters are clamped on read, so the 503 is restarted at the third pass", () => {
+    for (const expected of [1, 2]) {
+      const outcome = pass(port);
+      assert.equal(outcome.status, 0, outcome.stderr);
+      assert.equal(state().failures, expected, "a planted negative streak survived the read");
+    }
+    const acting = pass(port);
+    assert.equal(acting.status, 0, acting.stderr);
+    assert.match(acting.stdout, /started the server/, "an unhealthy server was never recovered");
+    assert.equal(state().restarts, 1);
+    assert.match(notified(), /Restarted the agentdeck server/);
   });
 });
 
@@ -1022,6 +1081,21 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
     assert.match(installing, /AGENTDECK_REPO/);
     // And the script can actually be run from that copy, which is the half a document cannot do.
     assert.match(readFileSync(watchdog, "utf8"), /process\.env\.AGENTDECK_REPO/);
+  });
+
+  void test("and every place that prescribes the copy says it is not write protection", () => {
+    // Both files launchd executes - the copy and the mise node in ProgramArguments[0] - stay
+    // writable by this uid, and the copy is outside what `git diff` can review. Claiming otherwise
+    // is the residual being asserted closed.
+    const honest = (text: string): boolean =>
+      /buys\s+review\s+scope,\s+not\s+write\s+protection/i.test(text) && /interpreter/.test(text);
+    for (const [what, text] of [
+      ["README.md", readFileSync(join(repoRoot, "README.md"), "utf8")],
+      ["the plist", readFileSync(plist, "utf8")],
+      ["plan 005", readFileSync(join(repoRoot, "plans", "005-containment.md"), "utf8")],
+    ] as const) {
+      assert.ok(honest(text), `${what} still claims the copy puts the script out of reach`);
+    }
   });
 });
 

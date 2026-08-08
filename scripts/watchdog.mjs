@@ -55,11 +55,23 @@ const emptyState = {
   startRefused: false,
 };
 
+/** A counter as read from the file, clamped into [0, limit]: a planted or hand-edited value may
+ *  only make the watchdog act sooner, never later (a negative streak never reaches the threshold). */
+const counter = (value, limit) =>
+  Number.isInteger(value) ? Math.min(Math.max(value, 0), limit) : 0;
+
 /** The state this pass starts from. A missing or truncated file is a first run, not an error:
  *  starting from zero beats refusing to supervise. */
 const readState = () => {
   try {
-    return { ...emptyState, ...JSON.parse(readFileSync(statePath, "utf8")) };
+    const parsed = JSON.parse(readFileSync(statePath, "utf8"));
+    const raw = typeof parsed === "object" && parsed !== null ? parsed : {};
+    return {
+      ...emptyState,
+      ...raw,
+      failures: counter(raw.failures, FAIL_THRESHOLD),
+      restarts: counter(raw.restarts, MAX_RESTARTS),
+    };
   } catch {
     return { ...emptyState };
   }
@@ -281,7 +293,10 @@ if (state.gaveUp) {
   if (latched.kind === "answered" && latched.ok) {
     log("the server is answering, but the give-up latch is set - clear the state file to resume");
   } else {
-    const since = Date.now() - (Number(state.gaveUpAlertedAt) || 0);
+    // Unusable or in the future means "never alerted": a planted stamp may not buy silence.
+    const last = Number(state.gaveUpAlertedAt);
+    const usable = Number.isFinite(last) && last > 0 && last <= Date.now();
+    const since = usable ? Date.now() - last : Number.POSITIVE_INFINITY;
     if (since >= GIVE_UP_REALERT_MS) {
       state.gaveUpAlertedAt = Date.now();
       writeState(state);

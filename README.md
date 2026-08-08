@@ -382,8 +382,12 @@ Origin check. Add `AGENTDECK_TOKEN_FILE` and
 repository, which agents working here can write — as you, every 60 seconds, with no human action.
 Everywhere else `scripts/` is executed by a command a person types after the review under
 [Toolchain](#toolchain); a timer is not. So copy the script out of the checkout and point
-`ProgramArguments` at the copy, which keeps the supervision policy — what gets killed, what gets
-spawned, what you are told — out of an agent's reach. It does not close the whole hole: the
+`ProgramArguments` at the copy. **The copy buys review scope, not write protection.** Both files
+launchd executes stay writable by this uid — `~/.agentdeck/bin/watchdog.mjs` and the mise node
+named as `ProgramArguments[0]` — so anything running as you can still rewrite the script and the
+interpreter, and because the copy lives outside the checkout that edit is one `git status` and
+`git diff` cannot see. Only a root-owned script and a root-owned interpreter would close it, and
+this repository does not install either. It does not close the whole hole elsewhere either: the
 watchdog still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable code
 as you either way, and only running the server from a checkout an agent cannot write closes that
 (audit.md). Nor does the copy move `~/.agentdeck/watchdog-state.json`: that file is part of the

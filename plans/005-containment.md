@@ -25,8 +25,13 @@
 > `scripts/watchdog.mjs` run on a TIMER, as the user, in their GUI session, every 60 seconds and
 > after every reboot, with no human action, and the same file chooses the command line spawned as
 > the server. The install is therefore specified to copy the script out of the checkout and point
-> `ProgramArguments` at the copy (README, "Installing it"), so what launchd runs unattended is not
-> a file an agent can rewrite between reviews. The agent profiles file `AGENTDECK_PROFILES`
+> `ProgramArguments` at the copy (README, "Installing it").
+> **That copy buys review scope, not write protection**:
+> `~/.agentdeck/bin` and the mise node named as `ProgramArguments[0]` are both
+> writable by this uid, so anything running as you can still rewrite the script and the
+> interpreter — and being outside the checkout, that edit is one `git status` / `git diff` cannot
+> see either. Only a root-owned script and a root-owned interpreter would close it, and that is
+> not built. The agent profiles file `AGENTDECK_PROFILES`
 > names belongs in that enumeration and was missing from it: `command` and `args` go unmodified
 > into `tmux new-session -- command args` and run as the human, so it is a more direct execution
 > surface than any config the toolchain evaluates. Since 2026-08-07 the server refuses to start
