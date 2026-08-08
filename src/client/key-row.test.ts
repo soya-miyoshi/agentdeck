@@ -215,6 +215,43 @@ void describe("the row as it is wired into the page", () => {
     assert.match(keyRow, /\.cap\.latched\s*\{/);
   });
 
+  void test("the terminal's own replies do not spend the latch", async () => {
+    // xterm raises `onData` for what the TERMINAL owes the application as well as for keystrokes:
+    // the DSR/DA/DECRQM answers a TUI in the pane asks for. Those reach `send` by the same route a
+    // typed character does, and a `send` that cleared the latch unconditionally let an agent's own
+    // output disarm Ctrl - so the operator's following `c` arrived as the letter `c` and no SIGINT
+    // was sent, silently, with the cap un-highlighted as if the interrupt had been delivered.
+    const send = /const send = \(data: string\): void => \{([\s\S]*?)\n\};/.exec(app)?.[1] ?? "";
+    assert.notEqual(send, "", "App.vue has no send()");
+    assert.doesNotMatch(
+      send,
+      /^\s*ctrlLatched\.value = false;\s*$/m,
+      "send() clears the latch unconditionally, so a terminal reply spends it",
+    );
+    // The condition itself, run rather than read: only a lone character - which no CSI or SS3
+    // report ever is - may spend a latch.
+    const predicate = /const spendable = \(data: string\): boolean =>([\s\S]*?);\n/.exec(app)?.[1];
+    assert.ok(predicate !== undefined, "App.vue has no spendable()");
+    // Imported as a module built from the page's own expression rather than restated here: a copy
+    // of the rule in the test is a copy that stays green when the page's copy is loosened.
+    const module: unknown = await import(
+      `data:text/javascript,${encodeURIComponent(`export const spendable = (data) => ${predicate};`)}`
+    );
+    const { spendable } = module as { spendable: (data: string) => boolean };
+    // What the operator meant: Ctrl and then `c`.
+    assert.equal(spendable("c"), true);
+    // What the agent's TUI writes back through the same emit. A cursor-position report, the two
+    // device-attribute answers, and a mode report - none may disarm the one control the phone has.
+    for (const reply of ["\u001b[24;1R", "\u001b[?1;2c", "\u001b[>0;10;1c", "\u001b[?2004;2$y"]) {
+      assert.equal(spendable(reply), false, `a terminal reply spent the latch: ${reply}`);
+    }
+    // A cap's own sequence is not a character either, so an arrow pressed with Ctrl on leaves the
+    // latch armed rather than throwing it away on a byte `withCtrl` cannot modify.
+    assert.equal(spendable(keyBytes("up", false)), false);
+    assert.equal(spendable(keyBytes("up", true)), false);
+    assert.equal(spendable(keyBytes("esc", false)), false);
+  });
+
   void test("the row is not a side channel: its bytes go through Connection.input", () => {
     // `Connection.input` chunks and paces, because `ws` enforces its 64 KiB frame limit before the
     // message event ever fires (see end-to-end.test.ts). A row that wrote to a socket itself would

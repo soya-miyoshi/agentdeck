@@ -140,16 +140,24 @@ const select = (id: string): void => {
 };
 
 // Ctrl latches rather than being held: there is one thumb, and the second press is a separate
-// event. The latch is spent by the next thing sent from this tab, whether that comes from a cap on
-// the row or from a character typed on the soft keyboard - which is what makes Ctrl+C reachable by
-// pressing Ctrl and then `c`.
+// event. The latch is spent by the next single character sent from this tab, whether that comes
+// from a cap on the row or from a character typed on the soft keyboard - which is what makes
+// Ctrl+C reachable by pressing Ctrl and then `c`.
 const ctrlLatched = ref(false);
+
+// Only data a latch can actually act on may spend it. xterm raises `onData` for the terminal's own
+// replies as well as keystrokes - the DSR/DA/DECRQM answers a TUI in the pane asks for - and those
+// are always multi-byte CSI or SS3 sequences. A latch spent on one of them un-highlights the Ctrl
+// cap and delivers the operator's following `c` as the letter, so the interrupt is silently lost;
+// an agent emitting `ESC[6n` in a loop would eat every latch armed from the phone.
+const spendable = (data: string): boolean => [...data].length === 1 && data !== "\u001b";
 
 const send = (data: string): void => {
   const id = active.value;
   if (id === undefined || data === "") return;
-  const bytes = ctrlLatched.value ? withCtrl(data) : data;
-  ctrlLatched.value = false;
+  const spend = ctrlLatched.value && spendable(data);
+  const bytes = spend ? withCtrl(data) : data;
+  if (spend) ctrlLatched.value = false;
   // Straight through `Connection.input`, which chunks and paces: the key row is not a side channel.
   connection.value?.input(id, bytes);
 };
