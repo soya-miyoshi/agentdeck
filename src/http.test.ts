@@ -414,6 +414,35 @@ void describe("a hook that authenticates routes its event into the session's sta
     });
     assert.equal(response.status, 400);
   });
+
+  void test("a loop is bounded, and told why, rather than fanning out per POST", async () => {
+    // The strip is pushed, so every accepted hook POST costs a frame to every open socket. This is
+    // the one route not behind the user's token - the per-session secret is readable by any
+    // same-uid process - and the announce dedupe is defeated by construction, by alternating two
+    // events that map to different states. So the bound is on the route rather than on the
+    // caller's manners.
+    const [session] = await hookRegistry.list();
+    assert.ok(session);
+    const statuses: number[] = [];
+    for (let i = 0; i < 60; i++) {
+      const response = await fetch(`${hookBase}/api/hooks/${session.id}`, {
+        method: "POST",
+        headers: { "x-agentdeck-secret": "anything", "content-type": "application/json" },
+        body: JSON.stringify({
+          hook_event_name: i % 2 === 0 ? "Stop" : "PreToolUse",
+          tool_name: "Bash",
+        }),
+      });
+      statuses.push(response.status);
+    }
+    assert.ok(
+      statuses.includes(429),
+      "sixty posts in a tight loop were all accepted, so nothing bounds the fan-out",
+    );
+    // Not the whole burst: the tests above share this session's budget, which is the point of
+    // keeping it per session. Enough to show a real agent's transitions are not being refused.
+    assert.ok(statuses.filter((status) => status === 200).length >= 10, "the burst was too small");
+  });
 });
 
 // The push is a broadcast to every open socket, so a POST that can move a tab without proving it

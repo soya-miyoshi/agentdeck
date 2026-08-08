@@ -330,6 +330,18 @@ export const main = async (): Promise<void> => {
         probe: async () => await probeTmux(socket),
         streamFor: (id) => hub.streamFor(id),
         onStateDeclared: (id, state) => {
+          // `POST /api/hooks/:id` is the one route not behind the user's token - it is
+          // authenticated by the per-session secret, which `Registry.secretMatches` checks against
+          // `#meta` alone. A `#meta` entry outlives the session's membership of `Registry.list()`:
+          // a session recreated by hand at a path off the allowlist is dropped by `list()` on every
+          // call, so neither `close()` nor `reap()` ever removes its metadata and its secret keeps
+          // authenticating forever. Without this check that id could put a state frame for an
+          // off-allowlist session onto every socket, which makes this a second place the cwd
+          // boundary is decided - the thing `Registry.list` is documented as being the only one of.
+          //
+          // The hub holds a stream only for what `sync()` adopted through that filtered list, and a
+          // hook POST comes from a running agent, so "attached" is exactly the right set.
+          if (!hub.attached(id)) return;
           hub.announce(id, state);
         },
       }),

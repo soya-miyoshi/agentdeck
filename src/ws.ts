@@ -127,8 +127,25 @@ interface Client {
   toldAboutRate: boolean;
 }
 
+/**
+ * How much a single socket may have waiting to go out before it is treated as gone.
+ *
+ * A stalled client - a phone that has lost signal but not yet closed - accepts frames into
+ * `bufferedAmount` forever, and this server pushes to every socket on every state change. Without
+ * a ceiling that buffer is the only thing that grows, on a process nothing restarts. Well above a
+ * snapshot, so a slow client is not dropped for being slow at something legitimate.
+ */
+export const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+
 const send = (socket: WebSocket, message: ServerMessage): void => {
-  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
+  if (socket.readyState !== socket.OPEN) return;
+  if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+    // Terminated rather than closed: `close()` is a handshake, and the reason this socket is over
+    // the ceiling is that nothing it is sent is going anywhere. The client's ladder brings it back.
+    socket.terminate();
+    return;
+  }
+  socket.send(JSON.stringify(message));
 };
 
 export interface WsHandle {

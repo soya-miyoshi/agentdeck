@@ -169,6 +169,11 @@ export class Hub {
    * next sync - the difference between a transition seen in milliseconds and one seen in up to a
    * sync interval.
    */
+  /** Whether this hub currently holds a stream for a session, which only `sync()` sets up. */
+  attached(sessionId: string): boolean {
+    return this.#ptys.has(sessionId);
+  }
+
   announce(sessionId: string, state: SessionState, exitCode?: number): void {
     const last = this.#announced.get(sessionId);
     if (last?.state === state && last.exitCode === exitCode) return;

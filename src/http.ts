@@ -75,7 +75,41 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value !== "" ? value : undefined;
 
+/**
+ * Hook POSTs allowed per session per second, and the burst above that.
+ *
+ * `POST /api/hooks/:id` is the one route not behind the user's token, and since the tab strip is
+ * pushed rather than polled every accepted POST fans out a frame to every open socket. The secret
+ * that authenticates it is readable by any same-uid process (`tmux show-environment -t`, see
+ * m0/host-boundary), and the route is reachable over the tailnet rather than loopback-only because
+ * `tailscale serve` fronts the whole port. So the cost of a POST has to be bounded by something
+ * other than the caller's good behaviour: an agent looping on two events that map to different
+ * states defeats the announce dedupe by construction.
+ *
+ * A real agent's transitions are human-paced. Ten a second per session is far above that and far
+ * below what a loop produces.
+ */
+const HOOKS_PER_SECOND = 10;
+const HOOK_BURST = 20;
+
 export const createHandler = (deps: HttpDeps) => {
+  // Per session, refilled by elapsed time rather than on a timer: no interval to clean up, and a
+  // session that stops posting costs one map entry until the process ends.
+  const hookBudget = new Map<string, { tokens: number; at: number }>();
+  const hookAllowed = (id: string, now: number): boolean => {
+    const bucket = hookBudget.get(id) ?? { tokens: HOOK_BURST, at: now };
+    const refilled = Math.min(
+      HOOK_BURST,
+      bucket.tokens + ((now - bucket.at) / 1000) * HOOKS_PER_SECOND,
+    );
+    if (refilled < 1) {
+      hookBudget.set(id, { tokens: refilled, at: now });
+      return false;
+    }
+    hookBudget.set(id, { tokens: refilled - 1, at: now });
+    return true;
+  };
+
   const handle = async (req: IncomingMessage, url: URL): Promise<Handled> => {
     const method = req.method ?? "GET";
     const path = url.pathname;
@@ -97,6 +131,11 @@ export const createHandler = (deps: HttpDeps) => {
       const secret = req.headers["x-agentdeck-secret"];
       if (typeof secret !== "string" || !deps.registry.secretMatches(id, secret)) {
         return { status: 401, body: { error: "bad session secret" } };
+      }
+      if (!hookAllowed(id, Date.now())) {
+        // Answered rather than dropped, so a legitimate agent that briefly outruns the budget can
+        // see why. Nothing is declared and nothing is announced.
+        return { status: 429, body: { error: "too many hook posts for this session" } };
       }
       let payload: unknown;
       try {
