@@ -40,7 +40,7 @@ import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type SocketLike } from "./connection.ts";
-import { keyBytes, type KeyName, withCtrl } from "./key-row.ts";
+import { type KeyName, keyBytes, withCtrl } from "./key-row.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { type Tab, toTabs } from "./tabs.ts";
 

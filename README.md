@@ -237,10 +237,10 @@ the two pieces that need a DOM.
 A soft keyboard has no Escape, no Tab, no arrows and no Ctrl, and those are precisely the keys an
 agent's permission prompt is answered with. The row of text caps along the bottom of the app is
 those keys: Esc, Tab, Left, Down, Up, Right, Enter and Ctrl. They are bytes to a pty rather than DOM
-key events — `0x1b`, `0x09`, `0x0d` (CR, not LF: the pty's line
-discipline is what turns it into a line), `ESC [ A` or `ESC O A` depending on the terminal's
-application-cursor-keys mode (DECCKM), which `src/client/key-row.ts` reads off xterm rather than
-guessing — and they go out through the same paced `Connection.input` every other keystroke uses.
+key events — `0x1b`, `0x09`, `0x0d` (CR, not LF: the pty's line discipline is what turns it into a
+line), `ESC [ A` or `ESC O A` depending on the terminal's application-cursor-keys mode (DECCKM),
+which `src/client/key-row.ts` reads off xterm rather than guessing — and they go out through the
+same paced `Connection.input` every other keystroke uses.
 
 **Ctrl latches rather than being held.** There is one thumb, so the second press is a separate
 event: tap Ctrl, and the next thing sent from that tab — a cap on the row, or a character typed on

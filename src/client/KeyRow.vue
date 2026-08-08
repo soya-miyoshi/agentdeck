@@ -33,7 +33,7 @@ defineEmits<{ key: [key: KeyName] }>();
       {{ cap.label }}
     </button>
     <button
-      class="cap ctrl"
+      class="cap"
       :class="{ latched: ctrlLatched }"
       type="button"
       :aria-pressed="ctrlLatched"

@@ -63,9 +63,10 @@ export const keyBytes = (key: KeyName, applicationCursorKeys: boolean): string =
  * Ctrl+C - the one a person needs most, and 0x03 - reachable at all.
  *
  * The control code is the ASCII rule rather than a table: bytes 0x40-0x5f with bit 6 cleared, which
- * is what a real keyboard's controller does. Anything outside that range is passed through
- * unchanged - a latch spent on a key that has no control form sends the key, which is a visible
- * result rather than a swallowed keystroke.
+ * is what a real keyboard's controller does, plus the two a keyboard also sends and the rule does
+ * not reach: Ctrl+Space is NUL and Ctrl+? is DEL. Anything else is passed through unchanged - a
+ * latch spent on a key that has no control form sends the key, which is a visible result rather
+ * than a swallowed keystroke.
  */
 export const withCtrl = (data: string): string => {
   if (data.length !== 1) return data;
