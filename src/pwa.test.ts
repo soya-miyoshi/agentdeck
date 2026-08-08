@@ -11,9 +11,10 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -222,6 +223,33 @@ void describe("the service worker, and what it provably cannot do", () => {
   void test("the shell it would have cached is still the server's to invalidate", async () => {
     const res = await fetch(`${base}/`);
     assert.match(res.headers.get("cache-control") ?? "", /no-cache|no-store|max-age=0/);
+  });
+
+  void test("deleting it from the build 404s, which is what evicts it from the phone", async () => {
+    // The kill switch for shipped worker code is `rm public/sw.mjs`, rebuild, restart. It only
+    // works if the server then 404s: a browser keeps a registered worker running when the update
+    // check for its script URL answers 200 with a non-JavaScript body, so the history fallback
+    // handing back `index.html` here would make the registration unrecallable from the server.
+    const root = mkdtempSync(join(tmpdir(), "agentdeck-nosw-"));
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>deck</title>");
+    const bare = createServer(withClient(api, root));
+    await new Promise<void>((ready) => bare.listen(0, "127.0.0.1", ready));
+    try {
+      const at = `http://127.0.0.1:${String((bare.address() as AddressInfo).port)}`;
+      for (const path of ["/sw.mjs", "/manifest.webmanifest", "/icons/icon-192.png"]) {
+        const res = await fetch(`${at}${path}`);
+        const body = await res.text();
+        assert.equal(res.status, 404, `${path} is absent and was answered ${String(res.status)}`);
+        assert.doesNotMatch(body, /<!doctype html>/i, `${path} was answered with the SPA shell`);
+      }
+      // And a real client route still is the shell, which is the whole point of the fallback.
+      const route = await fetch(`${at}/sessions/abc`);
+      assert.equal(route.status, 200);
+      assert.match(route.headers.get("content-type") ?? "", /text\/html/);
+    } finally {
+      bare.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

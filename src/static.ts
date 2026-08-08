@@ -174,6 +174,23 @@ const locate = async (
   return { file: real };
 };
 
+/**
+ * Whether the request names a concrete file rather than a client route.
+ *
+ * The history fallback must not answer these. A browser evicts a registered service worker only
+ * when the update check for its script URL comes back 404 (or another error status); a 200 that
+ * is `text/html` is an update FAILURE, and the old worker keeps running. So a build that shipped
+ * a bad `/sw.mjs` could never be recalled by deleting the file and rebuilding - the phone, which
+ * is the one device nobody can open a devtools window on, would keep the worker forever. Anything
+ * whose last segment carries an extension this file knows how to serve is a file: absent, it is
+ * 404, which is the response that makes the eviction happen.
+ */
+const namesAFile = (urlPath: string): boolean => {
+  if (urlPath.startsWith("/assets/")) return true;
+  const last = urlPath.split(/[/]/).pop() ?? "";
+  return extname(last).toLowerCase() in CONTENT_TYPES;
+};
+
 /** Containment against an already-real root, so no `..` and no symlink survives it. */
 const contains = (root: string, candidate: string): boolean =>
   candidate === root || candidate.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
@@ -217,13 +234,13 @@ const createStaticHandler = (
       }
 
       // History fallback. An unknown path that is not a file is a client route, so the SPA gets
-      // to decide what it means - except under `assets/`, where a miss is a genuinely absent
-      // build artifact and answering it with HTML would give the browser a script that is a
-      // document.
+      // to decide what it means - except where the request NAMES a file, where a miss is a
+      // genuinely absent build artifact and answering it with HTML would give the browser a
+      // script that is a document.
       const target =
         "file" in found
           ? found.file
-          : urlPath.startsWith("/assets/")
+          : namesAFile(urlPath)
             ? undefined
             : await locate(root, "/index.html").then((r) => ("file" in r ? r.file : undefined));
       if (target === undefined) {

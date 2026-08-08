@@ -236,6 +236,14 @@ chrome. To confirm the remaining half, on an iPhone:
    show one worker for the origin, scope `/`, and no storage under Caches. If anything appears
    under Caches, something other than `public/sw.mjs` put it there.
 
+### Removing a worker that should not be running
+
+Delete `src/client/public/sw.mjs`, run `pnpm build`, and restart the server. `/sw.mjs` then answers
+404 — the static handler never falls back to `index.html` for a path that names a file — and 404 is
+the one response that makes a browser drop the registration on its next update check, so reloading
+the page on the phone unregisters the worker. A 200 with HTML would not: the browser reads that as
+a failed update and keeps running the worker it already has. `src/pwa.test.ts` holds the 404.
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of
