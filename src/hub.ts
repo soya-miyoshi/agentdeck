@@ -23,6 +23,9 @@ const DEFAULT_ROWS = 40;
 const REPAINT_QUIET_MS = 120;
 const REPAINT_MAX_MS = 1000;
 
+/** What the hub calls when a session's state is news. `src/server.ts` wires this to the sockets. */
+export type StateListener = (sessionId: string, state: SessionState, exitCode?: number) => void;
+
 export interface HubOptions {
   tmux: Tmux;
   registry: Registry;
@@ -40,7 +43,7 @@ export interface HubOptions {
    * agent changed state after the attach - showed whatever the last full session list said, until
    * something else made the client fetch one. That is a poll waiting to be written.
    */
-  onState?: (sessionId: string, state: SessionState, exitCode?: number) => void;
+  onState?: StateListener;
 }
 
 export class Hub {
@@ -51,15 +54,15 @@ export class Hub {
   #ptys = new Map<string, SessionPty>();
   #repaintQuietMs: number;
   #repaintMaxMs: number;
-  #onState: ((sessionId: string, state: SessionState, exitCode?: number) => void) | undefined;
+  #onState: StateListener | undefined;
   /** The last state each live session was announced with, so a repeat is not sent. */
   #announced = new Map<string, SessionState>();
 
   constructor(options: HubOptions) {
-    this.#onState = options.onState;
     this.#tmux = options.tmux;
     this.#registry = options.registry;
     this.#socket = options.socket;
+    this.#onState = options.onState;
     this.#repaintQuietMs = options.repaintQuietMs ?? REPAINT_QUIET_MS;
     this.#repaintMaxMs = options.repaintMaxMs ?? REPAINT_MAX_MS;
     this.#createPty =
@@ -127,16 +130,13 @@ export class Hub {
     }
 
     // Push inferred state back so GET /api/sessions reports what the stream observed rather than
-    // a default. This is the field the tab UI exists to show.
-    for (const [id, pty] of this.#ptys) {
-      this.#registry.setState(id, pty.stream.state());
-    }
-
-    // And tell the clients, which is the half that makes the strip pushed rather than polled. A
-    // session with no attachment - one that has exited - is announced with what the registry says,
-    // because that is the only reading of it there is.
+    // a default. This is the field the tab UI exists to show - and telling the clients is the half
+    // that makes the strip pushed rather than polled. A session with no attachment - one that has
+    // exited - is announced with what the registry says, because that is the only reading of it
+    // there is, and there is nothing inferred to write back for it.
     for (const session of live) {
       const stream = this.#ptys.get(session.id)?.stream;
+      if (stream !== undefined) this.#registry.setState(session.id, stream.state());
       this.announce(session.id, stream?.state() ?? session.state, session.exitCode);
     }
     for (const id of this.#announced.keys()) {

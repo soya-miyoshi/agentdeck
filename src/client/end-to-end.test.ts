@@ -384,10 +384,11 @@ const buildStrip = async (): Promise<Strip> => {
   // requests nobody in the test asked for.
   const http: string[] = [];
   const realFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = ((input: string | URL, init?: RequestInit) => {
-    http.push(`${init?.method ?? "GET"} ${input.toString()}`);
-    return realFetch(input, init);
-  }) as typeof globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const target = input instanceof Request ? input.url : String(input);
+    http.push(`${init?.method ?? "GET"} ${target}`);
+    return await realFetch(input, init);
+  };
 
   const base = `http://127.0.0.1:${String(port)}`;
   const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };

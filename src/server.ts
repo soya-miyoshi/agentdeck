@@ -12,7 +12,7 @@ import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
-import { type SessionState, Tmux } from "./tmux.ts";
+import { Tmux } from "./tmux.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
@@ -281,17 +281,15 @@ export const main = async (): Promise<void> => {
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
-  // Assigned once the socket server exists, which is after the hub it announces for. `state` is
-  // pushed rather than polled (plan 002), and the two sources of a state change - the hub's
-  // inference and an agent's own hook - both go out through this one funnel.
-  let broadcastState: (id: string, state: SessionState, exitCode?: number) => void = () =>
-    undefined;
   const hub = new Hub({
     tmux,
     registry,
     socket,
+    // `state` is pushed rather than polled (plan 002), and the two sources of a state change - the
+    // hub's inference and an agent's own hook - both go out through this one funnel. `ws` is
+    // declared below, after the hub it announces for; nothing syncs before it exists.
     onState: (id, state, exitCode) => {
-      broadcastState(id, state, exitCode);
+      ws.pushState(id, state, exitCode);
     },
   });
 
@@ -349,7 +347,6 @@ export const main = async (): Promise<void> => {
     sendInput: (id, data) => hub.sendInput(id, data),
     applyPaneSize: (id, cols, rows) => hub.applyPaneSize(id, cols, rows),
   });
-  broadcastState = ws.pushState;
 
   // Attach to whatever tmux already has before serving, so the first request sees real state
   // rather than an empty list that fills in a moment later.
