@@ -48,7 +48,10 @@ defineEmits<{ select: [id: string] }>();
   display: flex;
   gap: 0.25rem;
   overflow-x: auto;
-  padding: 0.25rem;
+  /* Top edge of the app: the row is pushed clear of the notch and the status bar, while the
+     strip's own background still runs underneath them. */
+  padding: calc(0.25rem + var(--safe-top)) calc(0.25rem + var(--safe-right)) 0.25rem
+    calc(0.25rem + var(--safe-left));
   background: #14161a;
   border-bottom: 1px solid #2a2e35;
 }
@@ -57,8 +60,10 @@ defineEmits<{ select: [id: string] }>();
   align-items: center;
   gap: 0.4rem;
   flex: 0 0 auto;
-  /* Touch target rather than a pointer target: this is driven from a phone. */
-  min-height: 44px;
+  /* Touch target rather than a pointer target: this is driven from a phone, one-handed, and a
+     mis-hit here switches which agent's terminal the next keystroke goes to. */
+  min-height: var(--touch-target);
+  min-width: var(--touch-target);
   padding: 0 0.75rem;
   border: 1px solid #2a2e35;
   border-radius: 6px;

@@ -194,6 +194,10 @@ if (token.value !== undefined) start(token.value);
   position: relative;
   flex: 1;
   min-height: 0;
+  /* Bottom edge of the app. Without this the last rows of the terminal - which is where a
+     permission prompt and the cursor are - sit under the home indicator. */
+  padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+  box-sizing: border-box;
 }
 .banner {
   margin: 0;

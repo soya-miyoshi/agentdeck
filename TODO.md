@@ -388,6 +388,22 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 - [ ] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
       **Done when:** it installs to the home screen and launches without browser chrome.
+      **Built, and the install is NOT demonstrated.** Everything checkable from the Mac is checked
+      by `src/pwa.test.ts` against the real build served by the real server: the manifest parses
+      and is served `application/manifest+json`, declares `display: standalone` and scope `/`,
+      every icon it names exists at the size it claims, the worker is served from the root as
+      JavaScript with `no-cache`, and the safe-area insets and 44px touch targets survive into the
+      built CSS. The home-screen install needs a phone — the only other tailnet device has been
+      offline — and it also needs `m4/tailscale-serve` first, because iOS will not register a
+      worker or offer the install outside a secure context. The steps to confirm it are in the
+      README under "Installing to the home screen".
+      **The service worker caches nothing, deliberately.** This is a live view of other machines'
+      processes; a cache in front of `/api` or `/ws` is a cache of authenticated responses and of
+      a session list that was true a minute ago, and a cached shell would undo the `no-cache` the
+      server deliberately puts on `index.html` — on the one device nobody can open devtools on.
+      So `public/sw.mjs` has no `respondWith` and no `caches` use at all: `/api` and `/ws` are not
+      special-cased because there is no code path that could treat anything specially. It exists
+      for installability, and to `skipWaiting`/`claim` so it can never sit a version behind.
 
 - [ ] **`m4/token-qr`** — QR printed to the terminal on first run beside the URL, paste field in
       the client, `localStorage`, and the rejected-token path from M2 wired to it.
