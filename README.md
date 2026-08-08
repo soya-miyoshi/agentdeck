@@ -372,17 +372,21 @@ binary, both script paths and the log path against your own checkout, since laun
 environment, so under launchd the plist *is* the server's environment and nothing you exported in
 the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
 Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
-protected than the one it replaced. `AGENTDECK_MOUNTS` and `AGENTDECK_PROFILES` are the two the
-watchdog refuses to start a server without — it logs it and puts a banner up instead of quietly
-producing a server with an empty allowlist and no agents. Add `AGENTDECK_TOKEN_FILE` and
+protected than the one it replaced. Those three — `AGENTDECK_MOUNTS`, `AGENTDECK_PROFILES` and
+`AGENTDECK_ORIGIN` — are the ones the watchdog refuses to start a server without: it logs it and
+puts a banner up instead of quietly producing a server with an empty allowlist, no agents or no
+Origin check. Add `AGENTDECK_TOKEN_FILE` and
 `AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults.
 
 **Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
 repository, which agents working here can write — as you, every 60 seconds, with no human action.
 Everywhere else `scripts/` is executed by a command a person types after the review under
 [Toolchain](#toolchain); a timer is not. So copy the script out of the checkout and point
-`ProgramArguments` at the copy, which is what keeps what launchd runs unattended out of an agent's
-reach:
+`ProgramArguments` at the copy, which keeps the supervision policy — what gets killed, what gets
+spawned, what you are told — out of an agent's reach. It does not close the whole hole: the
+watchdog still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable code
+as you either way, and only running the server from a checkout an agent cannot write closes that
+(audit.md).
 
 ```sh
 mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs

@@ -109,7 +109,20 @@ The rule the health branch settled on, which the plan above left as "N consecuti
 - **Refused is down**, and skips the streak: nothing is listening, so there is no socket to drop
   and no snapshot to lose, and waiting three minutes buys nothing.
 
-Install as a `LaunchAgent` with `RunAtLoad` plus `StartInterval`. Logs to a file so a restart is
+**A recovery may not hand back a weaker server than the one it replaced.** The watchdog spawns the
+server with its own environment, which under launchd is exactly what the plist declares — so
+anything the operator exported in the shell they normally start the server from and did not repeat
+in the plist is absent from the replacement. Three of those change what the server *is* rather
+than how it is configured: no `AGENTDECK_MOUNTS` is an empty allowlist, no `AGENTDECK_PROFILES` is
+nothing startable, and no `AGENTDECK_ORIGIN` is the Origin check off on every `/api` route and
+every `/ws` upgrade. The watchdog refuses to start a server without any of them, says so in the
+log and once to a person, and stops nothing — a server that is at least configured, however wedged,
+beats one replaced by a server that cannot list a session or check an Origin.
+
+Install as a `LaunchAgent` with `RunAtLoad` plus `StartInterval`, and **no `KeepAlive`**: every
+deliberate refusal above exits non-zero, and `KeepAlive` would have launchd relaunch each of them
+every `ThrottleInterval` — the crash-loop the give-up exists to prevent, one layer below where the
+give-up can see it. Logs to a file so a restart is
 never something you discover by finding sessions missing.
 
 **It cannot fight a sleeping Mac.** If the lid is shut, nothing runs. `caffeinate`, or the Energy

@@ -1,24 +1,9 @@
-// m4/launchd-watchdog, executed rather than asserted about.
+// m4/launchd-watchdog, executed rather than asserted about: each test runs one pass of
+// scripts/watchdog.mjs as launchd would, against a real server and a real tmux socket.
 //
-// This is the first thing in the repository that supervises the node process, and it is the
-// answer to m0/supervisor-crash-test - which measured, and still measures, what an unattended
-// crash looks like with nothing watching: tmux keeps every agent, nothing answers the port, and
-// a person has to open a terminal. The tests below run `scripts/watchdog.mjs` as launchd would,
-// one pass at a time, against a REAL server and a REAL tmux socket, and assert that the person
-// is no longer required.
-//
-// WHAT THESE TESTS DO NOT COVER, said plainly rather than implied by absence: launchd. The
-// LaunchAgent in scripts/com.agentdeck.watchdog.plist is deliberately NOT installed on this
-// machine, so the plist being loaded, the 60s timer firing, RunAtLoad, and recovery after a
-// reboot are all UNDEMONSTRATED. What is demonstrated is every decision the script makes when
-// something runs it. `plutil -lint` on the plist is the only claim made about the plist itself.
-//
-// The third case is the one a naive watchdog gets wrong. /api/health does a hard-timed
-// `tmux list-sessions` round trip, so a busy machine, a big capture or a wedged tmux can make a
-// perfectly healthy server slow. Restarting it destroys no work - tmux is a daemon of its own -
-// but it drops every phone's socket and every tab's snapshot, and a watchdog that does that on
-// load spikes is worse than no watchdog. So "answered slowly" and "did not answer" are separated
-// here, and the slow server gets three passes to prove it is never touched.
+// launchd itself is NOT covered - the LaunchAgent is deliberately not installed on this machine,
+// so the timer, RunAtLoad and reboot recovery are undemonstrated. Why each decision below is the
+// decision it is, and what this cannot see, are in audit.md's m4/launchd-watchdog entry.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -30,6 +15,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer as createSocketServer, type AddressInfo } from "node:net";
@@ -52,14 +38,12 @@ const stubs = temp("agentdeck-watchdog-stubs-");
 
 const statePath = join(conf, "state.json");
 const profiles = join(conf, "agents.json");
-// Where the SERVER the watchdog starts writes its output. Under launchd the watchdog's own lines
-// go to StandardOutPath and the server's used to go to /dev/null, which is where the sentence
-// explaining a refusal to boot went with them.
+// Where the SERVER the watchdog starts writes its output - a different file from the watchdog's
+// own lines, which under launchd go to StandardOutPath.
 const serverLog = join(conf, "server.log");
 
-// Each suite gets its OWN transcript of what the watchdog told the user. One shared file was not
-// enough: the give-up alert is spawned detached on purpose, so it can land after the pass that
-// sent it has exited, and a later suite would then read somebody else's notification as its own.
+// Each suite gets its OWN transcript: the give-up alert is detached on purpose, so it can land
+// after the pass that sent it exited and a later suite would read it as its own.
 let notifications = "";
 
 writeFileSync(
@@ -75,9 +59,8 @@ const putStub = (name: string, script: string): void => {
   chmodSync(join(stubs, name), 0o755);
 };
 
-// The notifier, captured. `osascript` is what the watchdog uses to tell a person what it did -
-// there is no push (m5/push is unbuilt) and the dependency budget is spent - so the assertion
-// that a person is told is an assertion about this file's contents.
+// The notifier, captured. `osascript` is the only way the watchdog tells a person anything, so
+// "a person is told" is an assertion about this file's contents.
 const RECORDING_NOTIFIER = `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AGENTDECK_TEST_NOTIFY"\nexit 0\n`;
 putStub("osascript", RECORDING_NOTIFIER);
 
@@ -122,11 +105,8 @@ const alive = (pid: number): boolean => {
   }
 };
 
-/**
- * The transcript, once it matches. The critical alert is deliberately detached - a dialog nobody
- * dismisses must not hold a pass open - so it is written asynchronously and has to be waited for
- * rather than read once.
- */
+/** The transcript, once it matches. The critical alert is detached, so it lands asynchronously
+ *  and has to be waited for rather than read once. */
 const notifiedEventually = async (pattern: RegExp): Promise<string> => {
   for (let i = 0; i < 100; i++) {
     const seen = notified();
@@ -142,11 +122,8 @@ const freshTranscript = (name: string): void => {
   rmSync(notifications, { force: true });
 };
 
-/**
- * One launchd tick, run synchronously so a test can reason about passes in order. `overrides` is
- * how a test says what the plist did or did not declare: `undefined` REMOVES a variable, which is
- * the failure the environment tests are about.
- */
+/** One launchd tick, run synchronously so a test can reason about passes in order. `undefined` in
+ *  `overrides` REMOVES a variable, which is what the environment tests are about. */
 const pass = (
   port: string,
   overrides: Record<string, string | undefined> = {},
@@ -160,6 +137,7 @@ const pass = (
     TMUX_SOCKET: socket,
     AGENTDECK_MOUNTS: work,
     AGENTDECK_PROFILES: profiles,
+    AGENTDECK_ORIGIN: "https://stub.example.ts.net",
     AGENTDECK_WATCHDOG_STATE: statePath,
     AGENTDECK_SERVER_LOG: serverLog,
     AGENTDECK_TEST_NOTIFY: notifications,
@@ -188,9 +166,8 @@ const panes = (): string[] => {
   }
 };
 
-// Every port this file ever hands out, because the watchdog's whole job is to start a detached
-// server on a port nobody is answering - so any port used here can end a test with a server on
-// it that is not a child of this process. The teardown sweeps all of them.
+// Every port this file hands out. The watchdog starts DETACHED servers, so a port used here can
+// end a test with a server on it that is not a child of this process; the teardown sweeps all.
 const usedPorts: string[] = [];
 
 const freePort = async (): Promise<string> => {
@@ -228,12 +205,8 @@ const listenerPid = (port: string): number | null => {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 };
 
-/**
- * A stand-in for the server, as a CHILD PROCESS rather than a listener in this process. That is
- * not a detail: the watchdog finds what to stop with `lsof` on the port, so an in-process
- * listener would have it SIGTERM the test runner - and each pass is run with `spawnSync`, which
- * blocks this event loop, so a listener living here could not answer a probe at all.
- */
+/** A stand-in for the server, as a CHILD PROCESS: the watchdog stops what `lsof` reports on the
+ *  port, so an in-process listener would have it SIGTERM the test runner. */
 const startStub = async (
   what: string,
   port: string,
@@ -365,12 +338,9 @@ void describe("a killed node process is recovered, and the tmux sessions are not
 });
 
 void describe("a slow-but-alive server is not restarted", () => {
-  // The clause a naive check gets wrong. This server answers 200 with `ok: true` after six
-  // seconds - twice what /api/health gives its own tmux round trip and twice what
-  // scripts/healthcheck.mjs allows, so every simpler check on this machine calls it dead.
-  //
-  // It records each request in a file, because being a child process (see `startStub`) leaves
-  // that as the only channel back to the assertions.
+  // The clause a naive check gets wrong: 200 with `ok: true` after six seconds, which every
+  // simpler check on this machine calls dead (audit.md). Requests go to a file because the stub
+  // is a child process.
   const DELAY_MS = 6_000;
   let slow: ReturnType<typeof spawn>;
   let port = "";
@@ -500,15 +470,9 @@ void describe("it stops and notifies rather than crash-looping", () => {
 });
 
 void describe("tailscale serve: not configured is not an outage", () => {
-  // The watchdog is specified to check it (plan 006) and does. It cannot pass today -
-  // m4/tailscale-serve is blocked on two admin-console switches - so the check has to tell
-  // "never configured" apart from "was configured and is gone", and only the second is worth
-  // waking anyone for. Both branches are driven with a stub `tailscale` on PATH, because the
-  // real one on this Mac can only produce the first.
-  //
-  // The passes run against a stub that answers /api/health healthily and at once, so that the
-  // serve check is the only thing being read - and so that no pass here has a reason to start a
-  // server, which would leave one running on the machine after the file finished.
+  // "Never configured" is an unbuilt milestone, "was configured and is gone" is the reboot case
+  // (plan 006); a stub `tailscale` drives both, because the real one can only produce the first.
+  // The healthy stub keeps any pass here from having a reason to start a real server.
   let port = "";
   let healthy: ReturnType<typeof spawn>;
 
@@ -572,6 +536,24 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
     assert.doesNotMatch(text, /<string>~/);
   });
 
+  void test("no KeepAlive: launchd must not relaunch the passes that exit non-zero on purpose", () => {
+    // Giving up and refusing to start a misconfigured server both `exit(1)`. Under KeepAlive
+    // launchd relaunches each of them every ThrottleInterval, which reinstates the crash-loop the
+    // give-up exists to prevent, one layer below where it can see it.
+    assert.doesNotMatch(readFileSync(plist, "utf8"), /<key>KeepAlive<\/key>/);
+  });
+
+  void test("PATH puts the system directories ahead of every user-writable one", () => {
+    // `osascript` and `tailscale` are resolved on this PATH. The mise node directory and
+    // /opt/homebrew/bin are writable by this user, which is who an agent in a session runs as, so
+    // ahead of /usr/bin either is a file an agent drops and a timer executes as the operator.
+    const text = readFileSync(plist, "utf8");
+    const path = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
+    assert.ok(path, "the plist declares no PATH, so launchd gives the job its own minimal one");
+    const dirs = path.split(":");
+    assert.deepEqual(dirs.slice(0, 4), ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
+  });
+
   void test("nothing loaded it: this repository installs no LaunchAgent", () => {
     // The hard constraint on this item. The operator installs it; an agent does not. If this
     // fails, something has been left behind that survives a reboot.
@@ -594,14 +576,9 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
 });
 
 void describe("an answer that is not a healthy one", () => {
-  // The fourth outcome, and the quietest. `answered` is proof the event loop turned, which is what
-  // the check tests - but a 503, or a 200 whose body says `ok: false`, is the server telling you
-  // itself that it cannot do its job. That is a failure and it takes the streak, exactly like a
-  // wedge: the plan asks for consecutive failures over a meaningful window rather than a single
-  // miss, and there is no reason a self-reported bad pass deserves less patience than silence.
-  //
-  // Only two passes are run here on purpose. A third would restart, and a restart on this port
-  // would leave a real detached server behind on a port the stub owns.
+  // The fourth outcome: answered, but the server saying itself that it cannot do its job. It
+  // takes the same streak as a wedge (audit.md). Two passes only - a third would restart and
+  // leave a real detached server on the stub's port.
   let stub: ReturnType<typeof spawn>;
   let port = "";
   let mode = "";
@@ -750,10 +727,8 @@ void describe("what the watchdog is forbidden to do", () => {
   const source = readFileSync(watchdog, "utf8");
 
   void test("it never reaches for `tmux kill-server`", () => {
-    // Plan 006 names this as the one thing that stays expensive on the host: it is every session
-    // at once, and no watchdog should ever reach for it. The recovery test proves the panes
-    // survive one particular restart; this proves the command is not in the script to be reached
-    // by a path no test happens to take.
+    // Every session at once, the one thing plan 006 says stays expensive. The recovery test
+    // proves the panes survive one restart; this proves the command is not in the script at all.
     const code = source
       .split("\n")
       .filter((line) => !/^(\/\/|\/\*|\*)/.test(line.trim()))
@@ -763,11 +738,8 @@ void describe("what the watchdog is forbidden to do", () => {
   });
 
   void test("every external command it runs carries a timeout, so it cannot join the pile", () => {
-    // audit.md's second known gap: there is no execFile timeout on the SERVER's tmux path, so a
-    // wedged tmux accumulates children nothing reaps - and that state is precisely what this
-    // script exists to notice. A watchdog that also hangs on a wedged tmux, once a minute,
-    // forever, would be adding to the pile it was written to see. Every child it spawns is either
-    // given a timeout or explicitly detached and unref'd.
+    // A wedged tmux piles up unreaped children (audit.md's second gap), and that pile is what
+    // this script exists to notice - so it may not join it. Timed out, or detached and unref'd.
     const calls = source.match(/execFile\(/g) ?? [];
     assert.ok(calls.length >= 3, "no execFile calls found; this test is reading the wrong file");
     const timeouts = source.match(/\{ timeout: TOOL_TIMEOUT_MS \}|timeout: TOOL_TIMEOUT_MS/g) ?? [];
@@ -800,12 +772,9 @@ void describe("what the watchdog is forbidden to do", () => {
 });
 
 void describe("the environment the recovered server gets is the plist's, and it has to be enough", () => {
-  // The watchdog spawns the server with its own environment, which under launchd is exactly what
-  // the plist declares. The operator's documented way to run the server is `AGENTDECK_MOUNTS=...
-  // AGENTDECK_PROFILES=... pnpm start` from a shell, so a plist that declares neither replaces
-  // their server at 3am with one whose allowlist is empty (every live session filtered out of
-  // /api/sessions, every create refused) and which can start no agent - under a banner saying the
-  // sessions were kept. Refusing is the only honest answer, and it has to be audible.
+  // The server's environment IS the plist's, so what the plist omits the recovered server does
+  // not have - an empty allowlist, no agents, or the Origin check off. Refusing is the only
+  // honest answer and it has to be audible (audit.md).
   let port = "";
 
   before(async () => {
@@ -841,11 +810,21 @@ void describe("the environment the recovered server gets is the plist's, and it 
     assert.equal(notified(), before, "a banner a minute is the crash-loop in another medium");
   });
 
+  void test("no AGENTDECK_ORIGIN: it refuses too, rather than recover to a weaker server", async () => {
+    // The protection the first round of this branch missed: mounts and profiles make the server
+    // emptier, no AGENTDECK_ORIGIN makes it less PROTECTED - Origin off on /api and /ws.
+    seedState();
+    const outcome = pass(port, { AGENTDECK_ORIGIN: undefined });
+    assert.equal(outcome.status, 1);
+    assert.match(outcome.stdout, /refusing to start the server: AGENTDECK_ORIGIN not set/);
+    assert.doesNotMatch(outcome.stdout, /started the server/);
+    assert.equal(listenerPid(port), null, "it started a server with the Origin check off");
+    assert.match(await notifiedEventually(/AGENTDECK_ORIGIN/), /less protected/);
+  });
+
   void test("the plist declares the whole server environment, not only the port and socket", () => {
-    // The file this is really about. Whatever is not in this block is not set on the server the
-    // watchdog starts - and AGENTDECK_ORIGIN missing is the Origin check on every /api route and
-    // every /ws upgrade silently off, which is a protection the operator configured being removed
-    // by the recovery.
+    // The file this is really about: whatever is not in this block is not set on the recovered
+    // server, and the watchdog can only refuse for what it knows to look for.
     const text = readFileSync(plist, "utf8");
     for (const name of ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"]) {
       assert.match(
@@ -866,11 +845,8 @@ void describe("the environment the recovered server gets is the plist's, and it 
 });
 
 void describe("the server the watchdog starts logs somewhere", () => {
-  // `stdio: "ignore"` sent every word the recovered server said to /dev/null: the one line a
-  // refusal to boot prints before exiting, the boot warning that the Origin check is off, every
-  // `sync failed`, a first run's token and QR. The watchdog would then log "started the server",
-  // notify that it had, and three minutes later put a critical dialog up saying it was still
-  // unhealthy - with the diagnosis written to a closed fd.
+  // `stdio: "ignore"` sent the one line a refusal to boot prints to /dev/null, so the watchdog
+  // reported "started" and the diagnosis went to a closed fd.
   let port = "";
 
   before(async () => {
@@ -889,10 +865,20 @@ void describe("the server the watchdog starts logs somewhere", () => {
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /started the server/);
     assert.ok(await waitForHealth(port), "the server never became healthy");
-    // The boot warning src/server.ts prints whenever AGENTDECK_ORIGIN is unset, which is exactly
-    // the sentence audit.md recorded as having no log destination.
-    for (let i = 0; i < 40 && !/AGENTDECK_ORIGIN/.test(logged()); i++) await sleep(50);
-    assert.match(logged(), /AGENTDECK_ORIGIN is not set/, "the server's output went nowhere");
+    // The boot lines src/server.ts prints, which are the sentences audit.md recorded as having
+    // no log destination at all.
+    for (let i = 0; i < 40 && !/listening on/.test(logged()); i++) await sleep(50);
+    assert.match(
+      logged(),
+      /agentdeck: listening on 127\.0\.0\.1/,
+      "the server's output went nowhere",
+    );
+  });
+
+  void test("the log is 0600: a first run's token and QR can go through it", () => {
+    // stdout is not a TTY here, so src/qr.ts prints no QR - but it does print the token file's
+    // path, and the mode is what stops the next thing to change that branch from being a leak.
+    assert.equal(statSync(serverLog).mode & 0o777, 0o600);
   });
 });
 
@@ -932,11 +918,9 @@ void describe("a remembered pid is not a licence to kill", () => {
   });
 
   void test("a pid of -1 in the state file is not believed, because kill(-1) is everything", () => {
-    // A truncated or hand-edited state file. `kill(-1, ...)` signals every process this user owns
-    // and `kill(0, ...)` the watchdog's own group, and both answer signal 0 happily - so the pid
-    // has to be validated where it is read, not trusted because a probe did not throw. The port
-    // here HAS a healthy listener, so this asserts on what the pass believes rather than by
-    // letting an unfixed script signal the test runner's group.
+    // A truncated or hand-edited state file: `kill(-1)` is every process this user owns. The port
+    // has a healthy listener, so this asserts on what the pass believes rather than by letting an
+    // unfixed script signal the runner's group.
     const held = listenerPid(port);
     assert.notEqual(held, null);
     seedState({ pid: -1 });
@@ -949,12 +933,9 @@ void describe("a remembered pid is not a licence to kill", () => {
 });
 
 void describe("installing the LaunchAgent changes what `scripts/` is, and that is written down", () => {
-  // `scripts/` is enumerated as agent-writable-and-host-executed in plan 005, in the README's
-  // toolchain exception and in src/containment.test.ts - with the trigger stated as pnpm's root
-  // postinstall or being run by hand, i.e. something a PERSON does, which is what makes the
-  // prescribed `git status` / `git diff` review a control at all. A loaded LaunchAgent makes the
-  // trigger a 60-second timer instead. If that is not said where the claim is made, the review is
-  // still described as gating something it no longer gates.
+  // Every place that calls `scripts/` host-executed states the trigger as something a PERSON
+  // does, which is what makes the prescribed diff review a control. A loaded LaunchAgent makes it
+  // a 60-second timer, and that has to be said where the claim is made.
   const mentionsTimer = (text: string): boolean =>
     /60 seconds|60-second/.test(text) && /unattended|no human action|timer/i.test(text);
 

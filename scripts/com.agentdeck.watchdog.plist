@@ -25,7 +25,10 @@
   GUI session, within 60 seconds and again after every reboot, with no human action - and the same
   edit chooses the command line the watchdog then spawns as the server. To keep the review gating
   what it says it gates, copy the script out of the checkout (`~/.agentdeck/bin/watchdog.mjs`) and
-  point ProgramArguments there. README.md's "Installing it" says the same.
+  point ProgramArguments there. README.md's "Installing it" says the same. That narrows the
+  surface rather than closing it: the watchdog still spawns `src/server.ts` FROM the checkout, so
+  a recovery executes agent-writable code as you either way. Only running the server from a
+  checkout an agent cannot write closes it, and that is not this item's to build (audit.md).
 
   It cannot fight a sleeping Mac (plan 006). With the lid shut nothing here runs, and the answer
   is Energy Saver or `caffeinate`, decided deliberately rather than discovered.
@@ -57,7 +60,9 @@
                             start a server without it and notifies instead.
         AGENTDECK_PROFILES  absent, nothing is startable. Same refusal.
         AGENTDECK_ORIGIN    absent, the Origin check on every /api route and every /ws upgrade is
-                            OFF. Set it to the tailnet origin you set it to by hand.
+                            OFF. Same refusal - a recovery is not allowed to hand back a server
+                            with a protection the one it replaced had. Set it to the tailnet
+                            origin you set it to by hand.
 
       AGENTDECK_TOKEN_FILE and AGENTDECK_AGENT_STATE_DIR belong here too if you moved them off
       their defaults, and AGENTDECK_REPO if you followed the README and pointed ProgramArguments at
@@ -71,8 +76,12 @@
     -->
     <key>EnvironmentVariables</key>
     <dict>
+      <!-- The system directories FIRST. `osascript` and `tailscale` are looked up on this PATH,
+           and both the mise directory and /opt/homebrew/bin are writable by this user - which is
+           who an agent in a tmux session runs as. Ahead of /usr/bin either of them is a file an
+           agent can drop to be executed by a timer, as the operator, within 60 seconds. -->
       <key>PATH</key>
-      <string>/Users/you/.local/share/mise/installs/node/22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+      <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/you/.local/share/mise/installs/node/22/bin:/opt/homebrew/bin</string>
       <key>AGENTDECK_PORT</key>
       <string>7777</string>
       <key>TMUX_SOCKET</key>
@@ -86,7 +95,12 @@
     </dict>
 
     <!-- Once at load, then every 60s. A wedge needs three consecutive failures, so acting on one
-         takes three minutes; a dead process is acted on at the first pass that sees it. -->
+         takes three minutes; a dead process is acted on at the first pass that sees it.
+
+         NO KeepAlive, deliberately. Every deliberate refusal this script makes exits non-zero -
+         it gave up, or it will not start a misconfigured server - and under KeepAlive launchd
+         would relaunch each of those at ThrottleInterval, which is the crash-loop plan 006 says
+         to avoid, one layer below the give-up that was built to avoid it. -->
     <key>RunAtLoad</key>
     <true/>
     <key>StartInterval</key>
