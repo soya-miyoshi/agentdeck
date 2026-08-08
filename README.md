@@ -323,6 +323,71 @@ the one response that makes a browser drop the registration on its next update c
 the page on the phone unregisters the worker. A 200 with HTML would not: the browser reads that as
 a failed update and keeps running the worker it already has. `src/pwa.test.ts` holds the 404.
 
+## The watchdog
+
+Nothing on this Mac supervises the node process. tmux is a daemon of its own, so a crash leaves
+every agent alive and the server gone: the work survives, the phone gets nothing, and the recovery
+is a person opening a terminal (`src/supervisor-crash.test.ts` is the measurement of exactly that).
+`scripts/watchdog.mjs` is the answer, and `scripts/com.agentdeck.watchdog.plist` is the LaunchAgent
+that runs it every 60 seconds.
+
+One pass does three things: finds the node process holding the port, probes
+`http://127.0.0.1:<port>/api/health`, and checks whether `tailscale serve` is still configured for
+it. What it does about the answer:
+
+| It sees | It does |
+| --- | --- |
+| A 200, however slow | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict. |
+| Nothing listening | Starts the server at once. There is no socket to drop and no snapshot to lose. |
+| Accepted and silent for 15s, or a 503 | Counts it. Three consecutive passes — three minutes — before it restarts anything. |
+| Still unhealthy after two restarts | Stops. Marks the state file `gaveUp` and puts a critical dialog on the screen. A server that is down and known to be down beats one killed every minute. |
+| `tailscale serve` never configured | Says so and carries on. That is `m4/tailscale-serve`, which is not built. |
+| `tailscale serve` configured last pass and gone now | Notifies. That is the reboot case, and it is an outage. |
+
+The 15-second probe timeout is five times what the server gives its own `tmux list-sessions` round
+trip. That gap is the whole point: a busy machine, a large capture or a wedged tmux makes a healthy
+server slow, and restarting it drops every phone's socket and every tab's snapshot for nothing.
+
+A restart is announced, never silent — `osascript` puts a banner up saying the tmux sessions were
+kept, because a restart notification that does not say so is one you learn to fear. State between
+passes lives in `~/.agentdeck/watchdog-state.json`; the log is
+`~/Library/Logs/agentdeck-watchdog.log`.
+
+It cannot fight a sleeping Mac. With the lid shut nothing runs, and Energy Saver or `caffeinate` is
+the only answer.
+
+### Installing it
+
+**The repository does not install this.** Nothing has run `launchctl` on this machine and no plist
+has been copied into `~/Library/LaunchAgents`, so none of the launchd half — the timer firing,
+`RunAtLoad`, recovery after a reboot — has been demonstrated. Read the plist first: check the node
+binary, both script paths and the log path against your own checkout, since launchd expands neither
+`~` nor `$PATH`.
+
+```sh
+cp scripts/com.agentdeck.watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
+launchctl kickstart -p gui/$(id -u)/com.agentdeck.watchdog   # run one pass now
+launchctl print gui/$(id -u)/com.agentdeck.watchdog          # is it loaded, what did it exit
+tail -f ~/Library/Logs/agentdeck-watchdog.log
+```
+
+To take it away again, which also leaves the machine as it is today:
+
+```sh
+launchctl bootout gui/$(id -u)/com.agentdeck.watchdog
+rm ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
+```
+
+After it has given up, it stays given up until you say otherwise: `rm
+~/.agentdeck/watchdog-state.json`, then `launchctl kickstart`.
+
+You can run a pass by hand at any time without launchd, which is how the logic was demonstrated:
+
+```sh
+AGENTDECK_WATCHDOG_STATE=/tmp/watchdog-state.json node scripts/watchdog.mjs
+```
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of

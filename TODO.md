@@ -445,13 +445,37 @@ Agent-agnostic signals first, so the generic path is the proven one.
       claim `--touch-target`; `src/pwa.test.ts` holds both against the built CSS. Text labels on
       the caps, never glyphs.
 
-- [ ] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
+- [x] **`m4/launchd-watchdog`** — host-side, on a timer: the node process running, `/api/health`
       reachable, `tailscale serve` still configured. Restarts the server after consecutive
       failures, then stops and notifies rather than crash-looping. This is also what finally
       answers `m0/supervisor-crash-test`: nothing supervises node before it.
       **Done when:** killing the node process results in automatic recovery with a notification,
       the tmux sessions still alive with the same ids afterwards, **and a deliberately
       slow-but-alive server is not restarted.**
+      `scripts/watchdog.mjs` is one pass; `scripts/com.agentdeck.watchdog.plist` is the
+      LaunchAgent that runs it every 60s. `src/watchdog.test.ts` drives the script exactly as
+      launchd would, against a real server, a real tmux socket and a captured `osascript`: a
+      SIGKILLed server is started again on the next pass and the surviving session is still there
+      with the same id and the same pane pid; a server that answers 200 after six seconds is
+      probed three times and never touched; a socket that accepts and never answers takes three
+      consecutive passes before anything is stopped; and two spent recoveries produce a critical
+      `display alert` and then silence rather than a loop. The notification is `osascript` —
+      a banner for a restart, saying the sessions were kept, and a dismiss-me dialog for giving
+      up. No new dependency: six of six, unchanged.
+      **NOT DEMONSTRATED, and not by oversight: launchd itself.** The plist is written, `plutil`
+      validates it, and it is deliberately NOT installed — nothing was loaded, nothing was copied
+      into `~/Library/LaunchAgents`, and a test asserts both, because the operator installs it
+      themselves. So the timer firing, `RunAtLoad`, and recovery after a reboot are untested
+      claims. README's "The watchdog" has the exact `launchctl bootstrap` / `bootout` commands.
+      **Known blind spots, both already in `audit.md` and neither fixed here:** `/api/health`
+      answers 200 for the locale failure class of `m0/create-500`, because `probeTmux` bypasses
+      `baseEnv` — so a green watchdog pass means the event loop turns, not that creates work; and
+      the server's tmux path still has no `execFile` timeout, so a wedged tmux accumulates
+      children, which is the state the wedge branch exists to notice and restart out of.
+      **Deviation from plan 006, recorded in the plan:** the `tailscale serve` check reports
+      rather than re-applies, and tells "never configured" apart from "was configured and is
+      gone". Re-applying belongs to `m4/tailscale-serve`, which is blocked on two admin-console
+      switches.
 
 ---
 

@@ -90,7 +90,24 @@ What it does, on a timer (say every 60s):
 2. Can the host reach `http://127.0.0.1:<port>/api/health`? If it fails N consecutive checks,
    restart the server, with backoff, a give-up threshold, and a macOS notification via `osascript`
    saying what it did and that the sessions were kept.
-3. Is `tailscale serve` still configured for the port? Re-apply if not; it is idempotent.
+3. Is `tailscale serve` still configured for the port? **Built as detect-and-report, not
+   re-apply.** The two are told apart: "never configured" is the expected state of an unbuilt
+   `m4/tailscale-serve` — reported, and neither a failure of the pass nor a reason to notify —
+   while "was configured last pass and is gone now" is the reboot case and does notify. The
+   re-apply is left to `m4/tailscale-serve`, which owns the command and is blocked on two admin
+   console switches; issuing it from the watchdog would be building that item in the wrong file
+   with the switches still off. Once it exists, the watchdog re-applies here, idempotently.
+
+The rule the health branch settled on, which the plan above left as "N consecutive checks":
+
+- **Answered slowly is alive.** `/api/health` includes a hard-timed `tmux list-sessions` round
+  trip, so a busy machine or a large capture makes a healthy server slow. An answer at all proves
+  the event loop turned, which is the property being tested; latency is not a health verdict. A
+  slow 200 is logged as slow and never counts toward a restart.
+- **Silent for 15s is wedged** — five times what the server gives its own tmux round trip. Three
+  consecutive such passes, three minutes at a 60s interval, before anything is restarted.
+- **Refused is down**, and skips the streak: nothing is listening, so there is no socket to drop
+  and no snapshot to lose, and waiting three minutes buys nothing.
 
 Install as a `LaunchAgent` with `RunAtLoad` plus `StartInterval`. Logs to a file so a restart is
 never something you discover by finding sessions missing.

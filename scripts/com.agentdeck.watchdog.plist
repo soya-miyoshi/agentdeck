@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  m4/launchd-watchdog: the LaunchAgent that runs scripts/watchdog.mjs on a timer.
+
+  THIS FILE IS NOT INSTALLED. It lives in the repository and nothing on this Mac loads it. The
+  operator installs it themselves; the exact commands are in README.md under "The watchdog".
+  Copying it into ~/Library/LaunchAgents is what makes it survive a logout and a reboot, and that
+  is deliberately a person's decision rather than an agent's.
+
+  A LaunchAgent, not a LaunchDaemon: it must run as the user, in the user's GUI session. tmux is
+  a daemon of this user's, `osascript` needs a session to draw a notification in, and a daemon
+  running as root would share neither.
+
+  EVERY PATH BELOW IS ABSOLUTE AND MACHINE-SPECIFIC, because launchd expands nothing - not `~`,
+  not `$HOME`, not a login shell's PATH. The four to check against your own checkout are the node
+  binary, the two script paths, and the log path.
+
+  It cannot fight a sleeping Mac (plan 006). With the lid shut nothing here runs, and the answer
+  is Energy Saver or `caffeinate`, decided deliberately rather than discovered.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.agentdeck.watchdog</string>
+
+    <!-- mise's node, by absolute path: launchd gets no shell and therefore no shims. -->
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/you/.local/share/mise/installs/node/22/bin/node</string>
+      <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck/scripts/watchdog.mjs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck</string>
+
+    <!--
+      The watchdog spawns the server with its own environment, so this block is also the server's
+      environment: what is not here is not set. `/opt/homebrew/bin` is here for `tailscale`, and
+      the node directory so the spawned server finds the same runtime.
+
+      No LANG and no LC_*, on purpose. The locale-less environment launchd hands a job is exactly
+      what broke every create in m0/create-500, and it is fixed at its cause in `baseEnv` rather
+      than papered over here - so this plist is also the test of that fix.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/Users/you/.local/share/mise/installs/node/22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+      <key>AGENTDECK_PORT</key>
+      <string>7777</string>
+      <key>TMUX_SOCKET</key>
+      <string>agentdeck</string>
+    </dict>
+
+    <!-- Once at load, then every 60s. A wedge needs three consecutive failures, so acting on one
+         takes three minutes; a dead process is acted on at the first pass that sees it. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <!-- A restart must never be something you discover by finding sessions missing (plan 006):
+         every pass writes a timestamped line here whether it acted or not. -->
+    <key>StandardOutPath</key>
+    <string>/Users/you/Library/Logs/agentdeck-watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/you/Library/Logs/agentdeck-watchdog.log</string>
+  </dict>
+</plist>
