@@ -104,6 +104,16 @@ report and nothing more — agentdeck does not run `tailscale serve` itself. Exp
 decision a person makes on the host, in one place, exactly as plan 001 has it, and a server that
 reconfigured the proxy on every boot would be a second place.
 
+Putting serve in place is still one decision a person makes, and it is now one command:
+`scripts/tailscale-serve.mjs`. It is not a second place exposure is decided — it is the operator
+running the same `tailscale serve --bg <port>` with the two things a person cannot do by hand
+reliably. It reads the JSON above and **refuses before running anything** when either switch is
+off, because that is the state in which the command hangs; every call it makes is timed out, and a
+hang is reported as the enable link rather than waited on. Having applied the proxy it verifies it
+— `serve status` names the port, `/api/health` answers over loopback and over the `ts.net` URL —
+and exits non-zero if any of that is untrue, so one green run is the demonstration. Nothing in the
+server or the watchdog invokes it.
+
 `AGENTDECK_ORIGIN` is **recommended, not set**. This is the first code that knows what the origin
 is (`https://` plus the MagicDNS name without its trailing dot), so the boot warning names that
 value rather than a placeholder. It is not applied automatically: setting it would turn the check
@@ -145,7 +155,7 @@ The rule the health branch settled on, which the plan above left as "N consecuti
 **A recovery may not hand back a weaker server than the one it replaced.** The watchdog spawns the
 server with its own environment, which under launchd is exactly what the plist declares — so
 anything the operator exported in the shell they normally start the server from and did not repeat
-in the plist is absent from the replacement. Three of those change what the server *is* rather
+in the plist is absent from the replacement. Three of those change what the server _is_ rather
 than how it is configured: no `AGENTDECK_MOUNTS` is an empty allowlist, no `AGENTDECK_PROFILES` is
 nothing startable, and no `AGENTDECK_ORIGIN` is the Origin check off on every `/api` route and
 every `/ws` upgrade. The watchdog refuses to start a server without any of them, says so in the

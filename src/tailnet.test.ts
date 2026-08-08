@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
-import { ADMIN_DNS_PAGE, parseTailnetStatus, tailnetAdvice } from "./tailnet.ts";
+import { ADMIN_DNS_PAGE, parseTailnetStatus, tailnetAdvice, tailscaleBinary } from "./tailnet.ts";
 
 const certsOff = {
   Self: { DNSName: "example-host.tailXXXXXX.ts.net." },
@@ -38,6 +38,23 @@ void describe("tailnet status", () => {
   void test("no MagicDNS name means no origin rather than a broken one", () => {
     const tailnet = parseTailnetStatus({ Self: {}, CertDomains: null });
     assert.equal(tailnet.origin, undefined);
+  });
+});
+
+void describe("which tailscale is executed", () => {
+  void test("AGENTDECK_TAILSCALE wins, and only if it exists", () => {
+    const previous = process.env["AGENTDECK_TAILSCALE"];
+    try {
+      process.env["AGENTDECK_TAILSCALE"] = "/bin/sh";
+      assert.equal(tailscaleBinary(), "/bin/sh");
+      // A named binary that is not there is undefined rather than a PATH fallback: PATH order
+      // buys nothing when the only copy lives in a directory this uid can write (watchdog audit).
+      process.env["AGENTDECK_TAILSCALE"] = "/nowhere/tailscale";
+      assert.equal(tailscaleBinary(), undefined);
+    } finally {
+      if (previous === undefined) delete process.env["AGENTDECK_TAILSCALE"];
+      else process.env["AGENTDECK_TAILSCALE"] = previous;
+    }
   });
 });
 

@@ -432,8 +432,23 @@ place remote exposure is decided; it puts a real certificate on the machine's `t
 proxies to the loopback port. Never `tailscale funnel` — that is the public internet, and nothing
 here is built to survive it.
 
+With the server already running, one command does it and checks its own work:
+
 ```
-tailscale serve --bg 7777
+AGENTDECK_PORT=7777 node scripts/tailscale-serve.mjs
+```
+
+It reads `tailscale status --json` first and **refuses** if either switch below is off, because
+running `tailscale serve --bg` in that state hangs rather than fails; every call it makes has a
+timeout, and a hang is reported with the enable link the CLI printed. Then it applies the proxy,
+checks `tailscale serve status` names the port, fetches `/api/health` over loopback and again over
+the `ts.net` URL, and finishes by printing the exact `AGENTDECK_ORIGIN=` line to restart with. It
+exits non-zero on any of those, so a green run is the whole verification.
+
+By hand, the same thing:
+
+```
+tailscale serve --bg 7777       # with a timeout: it blocks forever if Serve is not enabled
 tailscale serve status          # what is configured, and the https:// URL
 tailscale serve reset           # take it down again
 ```
@@ -442,9 +457,10 @@ tailscale serve reset           # take it down again
 are at <https://login.tailscale.com/admin/dns>, and agentdeck reports at boot which of them this
 machine is missing, by name, along with the URL and the exact `AGENTDECK_ORIGIN` value:
 
-- **Serve**, for the tailnet. Without it `tailscale serve --bg` prints an enable link and then
-  **never exits** — it blocks waiting for someone to click it, so a script or a `launchd` job
-  hangs rather than fails. Run it with a timeout.
+- **Serve**, for the tailnet. Without it `tailscale serve --bg` prints an enable link
+  (`https://login.tailscale.com/f/serve?node=…`) and then **never exits** — it blocks waiting for
+  someone to click it, so a script or a `launchd` job hangs rather than fails. Run it with a
+  timeout.
 - **HTTPS Certificates**. Without them there is no certificate for the `ts.net` name at all;
   `tailscale cert <name>` answers `your Tailscale account does not support getting TLS certs`, and
   `tailscale status --json` reports a null `CertDomains`, which is what agentdeck reads.
@@ -457,7 +473,13 @@ actually be on. Set it to the value the boot log names:
 AGENTDECK_ORIGIN=https://<host>.tailXXXXXX.ts.net pnpm start
 ```
 
-agentdeck never sets that itself and never runs `tailscale serve` itself. Turning the check on
+**Neither half of this is demonstrated on this Mac** (2026-08-09): both switches are still off, so
+`tailscale serve` has never been in place here and the `ts.net` URL has never loaded. What is
+tested is everything up to the switches — the refusals, the hang, the reports — against a stubbed
+`tailscale`.
+
+The agentdeck _server_ never sets that variable itself and never runs `tailscale serve` itself; the
+script above is a thing you run, not something a boot does. Turning the check on
 from ambient machine state rather than from your intent would 403 the loopback and Vite flows the
 same server serves, and re-applying the proxy on every boot would make exposure two decisions
 instead of one.

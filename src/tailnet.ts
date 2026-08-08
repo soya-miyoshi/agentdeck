@@ -15,9 +15,25 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+
+/** Where the CLI actually is, both installers' locations; PATH is never consulted. */
+const TAILSCALE_CANDIDATES = [
+  "/opt/homebrew/bin/tailscale",
+  "/usr/local/bin/tailscale",
+  "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+];
+
+/** The binary to run: `AGENTDECK_TAILSCALE` if set (the tests set it to a stub), else the first
+ *  installed candidate, else undefined - which every caller reports rather than falling back. */
+export const tailscaleBinary = (): string | undefined => {
+  const named = process.env["AGENTDECK_TAILSCALE"];
+  if (named !== undefined && named !== "") return existsSync(named) ? named : undefined;
+  return TAILSCALE_CANDIDATES.find((path) => existsSync(path));
+};
 
 /** Long enough for a busy `tailscaled`, short enough that a wedged one cannot delay a boot. */
 const STATUS_TIMEOUT_MS = 3000;
@@ -59,8 +75,10 @@ export const parseTailnetStatus = (raw: unknown): Tailnet => {
  * this, so the timeout is hard and no failure propagates.
  */
 export const readTailnet = async (): Promise<Tailnet | undefined> => {
+  const binary = tailscaleBinary();
+  if (binary === undefined) return undefined;
   try {
-    const { stdout } = await run("tailscale", ["status", "--json"], {
+    const { stdout } = await run(binary, ["status", "--json"], {
       timeout: STATUS_TIMEOUT_MS,
     });
     return parseTailnetStatus(JSON.parse(stdout));
