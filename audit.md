@@ -1361,7 +1361,7 @@ operator**, not as a script.
   operator to point `ProgramArguments` at `~/.agentdeck/bin/watchdog.mjs` so that launchd is not
   running a file an agent can rewrite. `AGENTDECK_REPO` then points the copy back at the checkout,
   and `startServer` spawns `<repo>/src/server.ts`. So the timer still runs agent-writable code as
-  the operator on every recovery; what the copy buys is that the *supervision policy* - what to
+  the operator on every recovery; what the copy buys is that the _supervision policy_ - what to
   kill, what to spawn, what to tell the person - is no longer agent-writable, which is the larger
   half. Status: RECORDED, not fixed. Closing it means running the server from a checkout an agent
   cannot write, which is a change to how agentdeck is deployed and is not this item's. The claim
@@ -1409,4 +1409,65 @@ operator**, not as a script.
   without cwd, agent or hook secret, so a surviving claude session never reports `waiting` again
   until it is recreated. Filed alongside `m0/supervisor-crash-test`, not solved here.
 - **The recovery runs agent-writable `src/server.ts`**, per the finding above.
+- **Same-uid**, unchanged.
+
+---
+
+## m4/launchd-watchdog - final whole-codebase pass - 2026-08-09
+
+A launchd job on a 60s timer: the node process running, `/api/health` reachable, `tailscale serve`
+still configured. Restarts after three consecutive failures, then gives up and alerts rather than
+crash-looping. **Written and demonstrated, deliberately NOT installed** - the operator chose to run
+`launchctl` themselves, and nothing on this machine was loaded or left behind. So the launchd half
+of the done-when - the timer firing, recovery after a reboot - is NOT demonstrated; the watchdog
+logic is, directly and completely.
+
+### Findings
+
+- [medium] scripts/watchdog.mjs:155 - **Health was decided by port ownership alone.** Any listener
+  answering 200 with `{ok:true}` on `/api/health` was believed, and that route is unauthenticated
+  by design and reproducible in about thirty lines. A same-uid process - which the threat model
+  assumes - could SIGKILL the server, bind the port with a stub, and buy permanent silence from the
+  only thing watching it: every later pass logs a green result, resets the counters, and never
+  notifies. Once `m4/tailscale-serve` lands, that impostor is what the phone reaches and what
+  receives its bearer token. Status: FIXED in 4a2f719. The listener's argv must name this node and
+  this repo's `src/server.ts`.
+
+- [medium] scripts/watchdog.mjs:309 - **The same gap, pointing outward: it would kill anything.**
+  `stopServer` signalled whatever `lsof` reported on the port, with no identity test, and the plist
+  hardcodes 7777. An operator who moves agentdeck and leaves the plist as shipped - or any other
+  tool of theirs that binds 7777 - gets SIGTERM then SIGKILL from an unattended timer three minutes
+  after it starts listening. Status: FIXED in the same change. A squatter is logged and alerted,
+  and explicitly neither killed nor believed: "something else owns your port" is an operator
+  decision.
+
+- [medium] scripts/com.agentdeck.watchdog.plist:103 - **A wrong-but-present value was invisible.**
+  `AGENTDECK_ORIGIN` shipped as `https://mac.example.ts.net` while `missingEnv` tested only for
+  empty, so a missed edit gives a server that answers 403 to every browser request and every socket
+  upgrade while `/api/health` - answered before the origin check - returns 200. The watchdog would
+  log a green pass every 60 seconds against a server the phone cannot use at all. `AGENTDECK_MOUNTS`
+  shipped as the ghq OWNER directory rather than a repository, so a recovery would hand back a
+  broader allowlist than the one it replaced - which plan 006 says a recovery must not do. Status:
+  FIXED: both are `REPLACE_ME` sentinels and refused exactly like an absent value.
+
+### Found while verifying, not by the gate
+
+`src/watchdog.test.ts` took over ten minutes and presented as a hang. The cause was not the real
+timers it waits on: `waitForHealth` called `fetch` with no timeout against a wedged listener - one
+that accepts the connection and never answers - which waits forever rather than slowly. Bounded now
+with `AbortSignal.timeout`, and the probe timeout, slow threshold and stop grace are env-overridable
+so the tests drive milliseconds. **The file is 14 seconds and the whole suite is 20.** The
+production defaults are asserted separately, so shrinking them in tests cannot hide a changed
+default.
+
+Also recorded because it cost time: the first attempt at that speed-up was reverted. Rescaling the
+constants without noticing an assertion that pinned the literal `15000ms` broke the failure-counting
+tests, and the real problem was the unbounded fetch underneath.
+
+### Open after this iteration
+
+- **The launchd half is not demonstrated**, by the operator's decision. `launchctl bootstrap
+gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist` is theirs to run.
+- **`/api/health` is blind to the failure class that broke every create** (`probeTmux` does not use
+  `baseEnv`), so the watchdog trusts a probe that cannot see it. Recorded, not fixed.
 - **Same-uid**, unchanged.
