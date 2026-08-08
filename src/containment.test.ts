@@ -48,7 +48,11 @@ const readDoc = async (name: string): Promise<string> =>
 // `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm always runs the ROOT
 // project's own lifecycle scripts - the pnpm 9 gating caveat above covers dependencies only. So
 // `pnpm install --frozen-lockfile` executes a file in this tree no matter what the lockfile says,
-// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides.
+// and `scripts/healthcheck.mjs` and `scripts/restart-survival.mjs` are run by hand besides. Every
+// one of those triggers is one a PERSON pulls, which is what makes the review a control; installing
+// the LaunchAgent from m4/launchd-watchdog would make `scripts/watchdog.mjs` a 60-second UNATTENDED
+// trigger instead, which is why the install is specified to copy it out of the checkout first.
+// `src/watchdog.test.ts` holds the documents to that.
 const hostExecutedFiles = [
   "package.json",
   "scripts/",

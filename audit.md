@@ -1257,3 +1257,217 @@ holding a phone.
 - **A hand-attached client on this socket has no tmux bindings.** The deliberate cost of the fix
   above, stated rather than discovered.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/launchd-watchdog - final whole-codebase pass - 2026-08-08
+
+One pass of a supervisor (`scripts/watchdog.mjs`) and the LaunchAgent that would run it every 60s
+(`scripts/com.agentdeck.watchdog.plist`). **Nothing is installed**: no plist in
+`~/Library/LaunchAgents`, nothing in `launchctl list`, no server and no tmux session left running,
+and `src/watchdog.test.ts` asserts all of that on every run. The operator installs it themselves
+and the exact `launchctl` lines are in the README. Everything launchd itself does - the timer
+firing, `RunAtLoad`, recovery after a reboot - is therefore UNDEMONSTRATED; what is demonstrated is
+every decision the script makes when something runs one pass of it.
+
+The item is read as **a thing that runs commands on the Mac on a timer, unattended, as the
+operator**, not as a script.
+
+### Why it decides what it decides
+
+- **Answered slowly is ALIVE.** `/api/health` does a hard-timed `tmux list-sessions` round trip
+  from the event loop that serves the app, so a busy machine or a large capture makes a HEALTHY
+  server slow. An answer at all is proof the loop turned, which is the property under test;
+  latency is not a health verdict. `PROBE_TIMEOUT_MS` is 15s - five times the server's own 3s
+  budget and five times what `scripts/healthcheck.mjs` allows a person. A `curl -f`-shaped check
+  collapses this into "dead" and drops every phone's socket and every tab's snapshot on a load
+  spike. Held by mutation, not only by passing: making a slow 200 unhealthy fails the suite.
+- **Silent is the wedge**, because a blocked event loop still accepts connections; three
+  consecutive such passes (three minutes) before acting.
+- **Refused skips the streak.** Nothing is listening, so there is no socket to drop and no
+  snapshot to lose, and patience only buys a minute of being unreachable.
+- **A 503, or a 200 whose body says `ok: false`, is a failure** and takes the same streak. Dropping
+  the body test from the probe reads the second as healthy forever.
+- **Give up rather than crash-loop.** After `MAX_RESTARTS` recoveries with no healthy pass the
+  state file is latched `gaveUp` and every later pass only says so, once loudly via a critical
+  `osascript` alert and then quietly in the log. A server that is down and known to be down beats
+  one killed every minute.
+- **What a restart costs**, which is what licenses acting on this evidence: tmux is a daemon of the
+  user's, so no agent is touched - same sessions, same ids, same pane pids. It costs a reconnect,
+  a new epoch, a repaint, and the hook secret of any session that outlives the process. Cheap, not
+  free. `tmux kill-server` is every session at once and appears nowhere in the script; a test
+  asserts its absence rather than leaving it to a path no test happens to take.
+
+### Findings
+
+- [high] scripts/watchdog.mjs:177 - **A recovery could hand back a server with the Origin check
+  OFF.** The watchdog spawns the server with its own environment, which under launchd is exactly
+  what the plist declares. `b95d072` closed the emptier half of this - it refuses to start without
+  `AGENTDECK_MOUNTS` (empty allowlist: every live session filtered out of `/api/sessions`, every
+  create refused) or `AGENTDECK_PROFILES` (nothing startable) - but **not the less-protected half**:
+  with `AGENTDECK_ORIGIN` unset, `src/http.ts` disables the Origin check on every `/api` route and
+  every `/ws` upgrade, so any page a browser visits can drive the API with a token it has. The
+  recovery would do that at 3am, unattended, under a banner saying the sessions were kept.
+  Status: FIXED - `AGENTDECK_ORIGIN` joins `REQUIRED_ENV`, so the same refusal, log line and
+  once-only banner cover it, and a test drives the refusal. Rejected: an opt-out env for operators
+  who deliberately run without an Origin check - `""` is not usable as "off" (`src/http.ts` treats
+  a defined-but-empty origin as an allowlist of one, which rejects everything), and a flag whose
+  only effect is to re-enable a downgrade is a flag that gets set once and forgotten.
+- [medium] scripts/com.agentdeck.watchdog.plist:PATH - **The PATH the plist declared put two
+  user-writable directories ahead of `/usr/bin`** (the mise node directory and
+  `/opt/homebrew/bin`). `osascript` and `tailscale` are resolved on that PATH, and "this user" is
+  who an agent in a tmux session runs as - so an agent dropping `osascript` in either directory has
+  it executed by a timer, as the operator, within 60 seconds, with no human action. Status: FIXED -
+  `/usr/bin:/bin:/usr/sbin:/sbin` first, the writable directories after, asserted by a test.
+  Rejected: absolute `/usr/bin/osascript` in the script. It is the stronger control, but PATH
+  interposition is the only seam by which the suite proves a person is actually told what the
+  watchdog did, and losing every notification assertion to gain a second lock on the same door is
+  a bad trade. `lsof` is called by absolute path.
+- [medium] scripts/watchdog.mjs:tailscale - **PATH order bought nothing for `tailscale`, the one
+  PATH-resolved command with no copy in a system directory.** On this Mac `tailscale` resolves only
+  to `/opt/homebrew/bin/tailscale`, `drwxrwxr-x soya:admin` - writable by the uid every agent in a
+  session runs as - and `serveConfigured` runs it on every pass, healthy ones included, so an agent
+  replacing that symlink (or its Cellar target) has its file executed by launchd as the operator
+  within 60 seconds, at every RunAtLoad and after every reboot. Status: FIXED - `TAILSCALE` is
+  `/usr/local/bin/tailscale` (root:wheel here), overridable only by `AGENTDECK_TAILSCALE` for the
+  suite's stub, and when that path is absent the serve check is skipped with a log line rather than
+  falling back to PATH; a test drives the skip and asserts the PATH copy was not run. Residual,
+  RECORDED: the recovered server inherits this PATH and resolves `tmux` (`probeTmux`, `src/tmux.ts`)
+  from `/opt/homebrew/bin`, so the same drop owns every session a recovery creates - the same class
+  as the already-recorded agent-writable `src/server.ts`, and closed by the same deployment change.
+- [medium] scripts/watchdog.mjs:gaveUp - **The give-up latch disarmed supervision permanently and
+  silently, out of a file any agent can write.** `readState` trusts
+  `~/.agentdeck/watchdog-state.json`, and the first thing a pass did was exit on `state.gaveUp`
+  before probing and without notifying - sound only if the watchdog set it. It is same-uid data
+  with no integrity check, so `{"gaveUp":true}` plus a kill left the machine unsupervised across
+  reboots with only a log line; and the latch is reachable with no credential at all, since
+  unauthenticated `/api/health` forks `tmux list-sessions` per request and sustained tailnet
+  pressure spends both restarts and then latches. Copying the script out of the checkout does not
+  move this file. Status: FIXED - a latched pass still probes, and while the server is not
+  answering it re-alerts on a bounded cadence (`GIVE_UP_REALERT_MS`, one hour, stamped in
+  `gaveUpAlertedAt`), which keeps the anti-crash-loop property while making a planted latch
+  audible; a test plants one and asserts both the alert and the quiet hour after it. `startRefused`
+  is left as-is: its worst case is a suppressed banner about a misconfiguration that every pass
+  still logs and that stops nothing from running. README and the plist now say what the copy does
+  and does not put out of an agent's reach.
+- [medium] scripts/watchdog.mjs:180 - The recovered server's log is where the server's own words
+  go, including a first run's token block (`m4/token-qr`). It was created at the umask default.
+  `src/qr.ts` does not print the QR when stdout is not a TTY - which is always, under launchd -
+  and prints only the token file's path, so no token has been observed in that file. Status: FIXED
+  anyway, `0600` with a `0700` parent, because the mode is what stops the next change to that
+  branch from being a leak; a test asserts the mode.
+- [medium] scripts/watchdog.mjs:186 - **The recovery executes agent-writable code as the operator,
+  and copying the script out of the checkout does not close it.** The README and the plist tell the
+  operator to point `ProgramArguments` at `~/.agentdeck/bin/watchdog.mjs` so that launchd is not
+  running a file an agent can rewrite. `AGENTDECK_REPO` then points the copy back at the checkout,
+  and `startServer` spawns `<repo>/src/server.ts`. So the timer still runs agent-writable code as
+  the operator on every recovery; what the copy buys is that the _supervision policy_ - what to
+  kill, what to spawn, what to tell the person - is no longer agent-writable, which is the larger
+  half. Status: RECORDED, not fixed. Closing it means running the server from a checkout an agent
+  cannot write, which is a change to how agentdeck is deployed and is not this item's. The claim
+  in the plist and the README is corrected to say what the copy does and does not buy.
+- [low] scripts/com.agentdeck.watchdog.plist - `KeepAlive` is absent and must stay absent. Both of
+  the script's deliberate refusals (`gaveUp`, `missingEnv`) exit non-zero, and under `KeepAlive`
+  launchd relaunches a failed job every `ThrottleInterval` - reinstating the crash-loop the give-up
+  was written to prevent, one layer below where the give-up can see it. `StartInterval` alone
+  gives a fixed 60s cadence and no respawn-on-exit, and launchd will not start a second instance
+  while one is running, so a pass that takes 15s does not overlap the next. Status: asserted by a
+  test so a later edit has to argue with it.
+- [low] scripts/watchdog.mjs:137 - Restarting into a SECOND server beside a live one: not reachable
+  through `stopServer`, which takes the pid `lsof` reports as the listener this pass rather than a
+  remembered one, and there is a narrow window where a server still booting reads as `refused` and
+  a second is spawned - the loser gets `EADDRINUSE` and exits, and `MAX_RESTARTS` bounds the
+  repetition at two. Accepted.
+- [low] scripts/watchdog.mjs:105 - The state file is JSON on disk that a crash can truncate and a
+  hand can edit, and `state.pid` is what `stopServer` sends SIGTERM then SIGKILL to. `kill(0, ...)`
+  signals the watchdog's whole group and `kill(-1, ...)` every process this user owns. Validated
+  where it is read (`Number.isInteger(pid) && pid > 1`) and cross-checked against `lsof` every pass,
+  so a recycled pid is not a signal aimed at a stranger. Both covered by tests.
+- [low] **The health check the watchdog trusts is partly blind, and that is worth stating.**
+  `/api/health` answers 200 for exactly the locale failure that broke every create in
+  `m0/create-500`, because `src/server.ts`'s `probeTmux` does not go through `baseEnv` and so has
+  its own locale (recorded above, still OPEN). A 200 here means the event loop turns, not that the
+  server works, so this watchdog cannot see that class of failure at all and will report a server
+  that creates nothing as healthy forever. Fixing it is a change to `src/server.ts` and belongs to
+  its own item. The second gap - no `execFile` timeout on the server's tmux path, so a wedged tmux
+  piles up children nothing reaps - is precisely what the watchdog sees as `silent`, and restarting
+  is what reaps them. Every `execFile` the watchdog itself makes carries a timeout, so it cannot
+  join the pile it exists to notice; a test reads the source and asserts that.
+
+### Open after this iteration
+
+- **launchd is undemonstrated.** Nothing has loaded the plist on this Mac, by the operator's
+  decision. The timer, `RunAtLoad` and reboot recovery are claims, not measurements.
+- **It cannot fight a sleeping Mac** (plan 006). With the lid shut nothing runs; Energy Saver or
+  `caffeinate` is the answer, decided deliberately rather than discovered.
+- **`tailscale serve` is detect-and-report, not re-apply.** Re-applying is `m4/tailscale-serve`,
+  blocked on two admin-console switches. "Never configured" is the expected state of that unbuilt
+  item and must not fail a pass or notify - a watchdog that reports a milestone as an outage is one
+  whose alerts are ignored by the time the outage is real. "Was configured last pass and is gone"
+  is the reboot case and does notify.
+- **A restart still loses the telling-you-about-it** (plan 006): surviving sessions come back
+  without cwd, agent or hook secret, so a surviving claude session never reports `waiting` again
+  until it is recreated. Filed alongside `m0/supervisor-crash-test`, not solved here.
+- **The recovery runs agent-writable `src/server.ts`**, per the finding above.
+- **Same-uid**, unchanged.
+
+---
+
+## m4/launchd-watchdog - final whole-codebase pass - 2026-08-09
+
+A launchd job on a 60s timer: the node process running, `/api/health` reachable, `tailscale serve`
+still configured. Restarts after three consecutive failures, then gives up and alerts rather than
+crash-looping. **Written and demonstrated, deliberately NOT installed** - the operator chose to run
+`launchctl` themselves, and nothing on this machine was loaded or left behind. So the launchd half
+of the done-when - the timer firing, recovery after a reboot - is NOT demonstrated; the watchdog
+logic is, directly and completely.
+
+### Findings
+
+- [medium] scripts/watchdog.mjs:155 - **Health was decided by port ownership alone.** Any listener
+  answering 200 with `{ok:true}` on `/api/health` was believed, and that route is unauthenticated
+  by design and reproducible in about thirty lines. A same-uid process - which the threat model
+  assumes - could SIGKILL the server, bind the port with a stub, and buy permanent silence from the
+  only thing watching it: every later pass logs a green result, resets the counters, and never
+  notifies. Once `m4/tailscale-serve` lands, that impostor is what the phone reaches and what
+  receives its bearer token. Status: FIXED in 4a2f719. The listener's argv must name this node and
+  this repo's `src/server.ts`.
+
+- [medium] scripts/watchdog.mjs:309 - **The same gap, pointing outward: it would kill anything.**
+  `stopServer` signalled whatever `lsof` reported on the port, with no identity test, and the plist
+  hardcodes 7777. An operator who moves agentdeck and leaves the plist as shipped - or any other
+  tool of theirs that binds 7777 - gets SIGTERM then SIGKILL from an unattended timer three minutes
+  after it starts listening. Status: FIXED in the same change. A squatter is logged and alerted,
+  and explicitly neither killed nor believed: "something else owns your port" is an operator
+  decision.
+
+- [medium] scripts/com.agentdeck.watchdog.plist:103 - **A wrong-but-present value was invisible.**
+  `AGENTDECK_ORIGIN` shipped as `https://mac.example.ts.net` while `missingEnv` tested only for
+  empty, so a missed edit gives a server that answers 403 to every browser request and every socket
+  upgrade while `/api/health` - answered before the origin check - returns 200. The watchdog would
+  log a green pass every 60 seconds against a server the phone cannot use at all. `AGENTDECK_MOUNTS`
+  shipped as the ghq OWNER directory rather than a repository, so a recovery would hand back a
+  broader allowlist than the one it replaced - which plan 006 says a recovery must not do. Status:
+  FIXED: both are `REPLACE_ME` sentinels and refused exactly like an absent value.
+
+### Found while verifying, not by the gate
+
+`src/watchdog.test.ts` took over ten minutes and presented as a hang. The cause was not the real
+timers it waits on: `waitForHealth` called `fetch` with no timeout against a wedged listener - one
+that accepts the connection and never answers - which waits forever rather than slowly. Bounded now
+with `AbortSignal.timeout`, and the probe timeout, slow threshold and stop grace are env-overridable
+so the tests drive milliseconds. **The file is 14 seconds and the whole suite is 20.** The
+production defaults are asserted separately, so shrinking them in tests cannot hide a changed
+default.
+
+Also recorded because it cost time: the first attempt at that speed-up was reverted. Rescaling the
+constants without noticing an assertion that pinned the literal `15000ms` broke the failure-counting
+tests, and the real problem was the unbounded fetch underneath.
+
+### Open after this iteration
+
+- **The launchd half is not demonstrated**, by the operator's decision. `launchctl bootstrap
+gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist` is theirs to run.
+- **`/api/health` is blind to the failure class that broke every create** (`probeTmux` does not use
+  `baseEnv`), so the watchdog trusts a probe that cannot see it. Recorded, not fixed.
+- **Same-uid**, unchanged.
