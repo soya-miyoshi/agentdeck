@@ -10,7 +10,8 @@
 // See the sentence at the bottom of this file and the README section it points at.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -19,8 +20,8 @@ import { fileURLToPath } from "node:url";
 
 import { withClient } from "./static.ts";
 
-const clientDir = fileURLToPath(new URL("../dist/client", import.meta.url));
-const built = existsSync(join(clientDir, "index.html"));
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const clientDir = join(repoRoot, "dist/client");
 
 let server: Server;
 let base = "";
@@ -31,6 +32,17 @@ const api = (_req: IncomingMessage, res: ServerResponse): void => {
 };
 
 void before(async () => {
+  // The build is what is under test, so an absent one is built rather than skipped over. Gating
+  // these suites on `existsSync(index.html)` instead would turn the one item whose whole
+  // deliverable is build OUTPUT into a green tick for nothing on any machine that had not run
+  // `pnpm build` first - which is every fresh clone and every CI job that runs `pnpm test` alone.
+  // `de-containerise.test.ts` forbids that repository-wide; `serve-client.test.ts` does this.
+  try {
+    readFileSync(join(clientDir, "index.html"));
+  } catch {
+    execFileSync("pnpm", ["build"], { cwd: repoRoot, stdio: "inherit", timeout: 300_000 });
+  }
+
   server = createServer(withClient(api, clientDir));
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
   base = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
@@ -56,7 +68,7 @@ interface Manifest {
   icons: { src: string; sizes: string; type: string; purpose?: string }[];
 }
 
-void describe("the manifest, as the server actually serves it", { skip: !built }, () => {
+void describe("the manifest, as the server actually serves it", () => {
   void test("it is served with the type that makes a browser read it, and it parses", async () => {
     const res = await fetch(`${base}/manifest.webmanifest`);
     assert.equal(res.status, 200);
@@ -105,13 +117,40 @@ void describe("the manifest, as the server actually serves it", { skip: !built }
     assert.equal(res.headers.get("content-type"), "image/png");
   });
 
+  void test("it is not cached hard either, so a changed manifest reaches the phone", async () => {
+    // An installed app re-reads the manifest to pick up a new name, icon or display mode. Served
+    // `immutable` it would be the manifest of the deploy the phone first saw, permanently.
+    const cache = (await fetch(`${base}/manifest.webmanifest`)).headers.get("cache-control") ?? "";
+    assert.doesNotMatch(cache, /immutable/);
+    assert.match(cache, /no-cache|no-store|max-age=0/);
+  });
+
+  void test("the CSP the server sends does not forbid the worker or the manifest", async () => {
+    // `src/static.ts` sets `default-src 'self'`, which is what `worker-src` and `manifest-src`
+    // fall back to, so both are allowed today. This asserts that a later tightening of that
+    // header cannot silently un-install the app: a `worker-src`/`manifest-src` added without
+    // `'self'` breaks registration in the browser and nothing on this machine would notice.
+    const csp = (await fetch(`${base}/`)).headers.get("content-security-policy") ?? "";
+    assert.match(csp, /default-src 'self'/);
+    for (const directive of ["worker-src", "manifest-src", "child-src"]) {
+      const declared = new RegExp(`${directive}([^;]*)`).exec(csp)?.[1];
+      if (declared !== undefined) {
+        assert.match(declared, /'self'/, `${directive} is declared without 'self'`);
+      }
+    }
+  });
+
   void test("no emoji anywhere in what gets installed", () => {
-    const text = readFileSync(join(clientDir, "manifest.webmanifest"), "utf8");
-    assert.doesNotMatch(text, /\p{Extended_Pictographic}/u);
+    // The manifest is the visible one - its name goes under the home-screen icon - but the page
+    // and the worker are installed alongside it and the rule is repository-wide.
+    for (const file of ["manifest.webmanifest", "index.html", "sw.mjs"]) {
+      const text = readFileSync(join(clientDir, file), "utf8");
+      assert.doesNotMatch(text, /\p{Extended_Pictographic}/u, `${file} contains an emoji`);
+    }
   });
 });
 
-void describe("the service worker, and what it provably cannot do", { skip: !built }, () => {
+void describe("the service worker, and what it provably cannot do", () => {
   void test("it is served from the root, as JavaScript, so its scope is the whole app", async () => {
     const res = await fetch(`${base}/sw.mjs`);
     assert.equal(res.status, 200);
@@ -150,6 +189,18 @@ void describe("the service worker, and what it provably cannot do", { skip: !bui
     // And it takes over immediately rather than sitting a version behind until every tab closes.
     assert.match(source, /skipWaiting/);
     assert.match(source, /clients\.claim/);
+    // The two ways the checks above could be true of this file and false of what actually runs:
+    // code pulled in from somewhere else, or a response manufactured here to hand back later.
+    assert.doesNotMatch(source, /importScripts|\bimport\s*\(/);
+    assert.doesNotMatch(source, /new Response\b/);
+  });
+
+  void test("the worker is the whole of it - no second worker is registered anywhere", async () => {
+    // `respondWith` being absent from `sw.mjs` only bounds what THAT file does. If the bundle
+    // registered a second worker as well, this file's argument would cover none of it.
+    const bundle = await (await fetch(`${base}/assets/${assetName(".js")}`)).text();
+    const registrations = bundle.match(/serviceWorker\s*\.\s*register\s*\(/g) ?? [];
+    assert.equal(registrations.length, 1, "exactly one worker is registered, and it is sw.mjs");
   });
 
   void test("the shell it would have cached is still the server's to invalidate", async () => {
@@ -158,7 +209,7 @@ void describe("the service worker, and what it provably cannot do", { skip: !bui
   });
 });
 
-void describe("the phone layout, in the built CSS", { skip: !built }, () => {
+void describe("the phone layout, in the built CSS", () => {
   void test("the insets are declared and used on the edges that have hardware", async () => {
     const css = await (await fetch(`${base}/assets/${assetName(".css")}`)).text();
     for (const side of ["top", "right", "bottom", "left"]) {
