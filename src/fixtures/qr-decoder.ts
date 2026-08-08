@@ -76,8 +76,9 @@ const functionMap = (size: number, version: number): boolean[][] => {
   // Timing patterns.
   block(6, 0, 1, size);
   block(0, 6, size, 1);
-  for (const r of ALIGNMENT[version] ?? []) {
-    for (const c of ALIGNMENT[version] ?? []) {
+  const centres = ALIGNMENT[version] ?? [];
+  for (const r of centres) {
+    for (const c of centres) {
       const nearFinder =
         (r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8);
       if (nearFinder) continue;
@@ -186,11 +187,13 @@ export const gridFromLines = (lines: readonly string[]): boolean[][] => {
     }
     rows.push(top, bottom);
   }
-  const width = rows[0]?.length ?? 0;
+  // The padded code is square, so one bound trims both axes. It is taken from a row rather than
+  // from `rows.length` because the last text line carries a module row that is past the bottom
+  // edge whenever the padded size is odd, which it always is: 4 * version + 17 + 8.
+  const padded = rows[0]?.length ?? 0;
   return rows
-    .slice(QUIET_MODULES, width - QUIET_MODULES)
-    .map((row) => row.slice(QUIET_MODULES, width - QUIET_MODULES))
-    .filter((row) => row.length > 0);
+    .slice(QUIET_MODULES, padded - QUIET_MODULES)
+    .map((row) => row.slice(QUIET_MODULES, padded - QUIET_MODULES));
 };
 
 /** The lines a terminal was given, decoded back to the string that was encoded. */

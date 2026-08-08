@@ -93,8 +93,9 @@ void describe("qr", () => {
   });
 
   void test("renders half a module row per line, with the quiet zone", () => {
-    const lines = qrLines("x".repeat(43));
-    const width = qrModules("x".repeat(43)).length + 8;
+    const text = "x".repeat(43);
+    const lines = qrLines(text);
+    const width = qrModules(text).length + 8;
     assert.equal(lines.length, Math.ceil(width / 2));
     // One character per module column, each preceded by its own colour escape, and one reset at
     // the end of the line.
@@ -196,10 +197,9 @@ void describe("qr", () => {
     // so quietly - nothing else in this repo would notice. Optional and peer dependencies count:
     // both install by default with pnpm's defaults for the peer case, and both are code that ships.
     const root = join(import.meta.dirname, "..");
-    const manifest: unknown = JSON.parse(
+    const pkg = JSON.parse(
       readFileSync(join(root, "node_modules", "qrcode-generator", "package.json"), "utf8"),
-    );
-    const pkg = manifest as {
+    ) as {
       version: string;
       license?: string;
       dependencies?: Record<string, string>;
@@ -218,12 +218,14 @@ void describe("qr", () => {
     assert.match(lock, /\n {2}qrcode-generator@2\.0\.4: \{\}\n/);
   });
 
-  void test("it is the sixth runtime dependency, and it is the last", () => {
-    const pkg: unknown = JSON.parse(
+  void test("it is declared as a runtime dependency, which is what the budget counts", () => {
+    // The ceiling itself belongs to `src/toolchain.test.ts`, which owns the guardrail for every
+    // package rather than for this one. What is this file's to say is that the encoder is on the
+    // runtime side of the manifest and so is counted there at all - a QR encoder that had landed
+    // in `devDependencies` would ship to nobody and be checked by nothing.
+    const pkg = JSON.parse(
       readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"),
-    );
-    const runtime = Object.keys((pkg as { dependencies: Record<string, string> }).dependencies);
-    assert.ok(runtime.includes("qrcode-generator"));
-    assert.equal(runtime.length, 6, `the budget is six: ${runtime.join(", ")}`);
+    ) as { dependencies: Record<string, string> };
+    assert.ok(Object.keys(pkg.dependencies).includes("qrcode-generator"));
   });
 });
