@@ -4,6 +4,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
+import { decodeGrid, decodeLines, qrBlockLines, readFormat } from "./fixtures/qr-decoder.ts";
 import { clientUrl, firstRunLines, qrLines, qrModules } from "./qr.ts";
 import { generateToken } from "./token.ts";
 
@@ -12,197 +13,41 @@ import { generateToken } from "./token.ts";
 // interesting bug in this area - a mask applied twice, a transposed grid, a missing quiet zone,
 // an off-by-one in the zig-zag walk - produces a square that looks perfect and scans as nothing.
 //
-// So this file contains a decoder, written from the spec rather than from the encoder, and it
-// shares no code with the encoder: it reads the format information out of the grid to learn which
-// mask was used, rebuilds the function-module map itself, walks the data region and reassembles
-// the bytes. It does not do error correction, which means it also proves that the data codewords
-// are right on their own rather than being repaired on the way out.
-
-const MASKS: readonly ((row: number, col: number) => boolean)[] = [
-  (i, j) => (i + j) % 2 === 0,
-  (i) => i % 2 === 0,
-  (_, j) => j % 3 === 0,
-  (i, j) => (i + j) % 3 === 0,
-  (i, j) => (Math.floor(i / 2) + Math.floor(j / 3)) % 2 === 0,
-  (i, j) => ((i * j) % 2) + ((i * j) % 3) === 0,
-  (i, j) => (((i * j) % 2) + ((i * j) % 3)) % 2 === 0,
-  (i, j) => (((i + j) % 2) + ((i * j) % 3)) % 2 === 0,
-];
-
-// Alignment pattern centre coordinates, versions 1 to 6. Beyond version 6 the grid also carries
-// version information blocks, which this decoder does not read - so it asserts the version
-// instead of silently mis-decoding one it does not handle.
-const ALIGNMENT: readonly (readonly number[])[] = [
-  [],
-  [],
-  [6, 18],
-  [6, 22],
-  [6, 26],
-  [6, 30],
-  [6, 34],
-];
-
-// Blocks and data codewords per block at error correction level M, versions 1 to 6. The data is
-// not laid down block by block: it is interleaved codeword-wise, so that a burst of damage across
-// the printed code is spread over every block instead of destroying one of them. A 43-character
-// token needs 45 data codewords, which is version 4 - two blocks - so this is not a corner the
-// tests could skip. Every version up to 6 has equal-sized blocks, which is why one pair suffices.
-const BLOCKS_M: readonly (readonly [blocks: number, dataPerBlock: number])[] = [
-  [0, 0],
-  [1, 16],
-  [1, 28],
-  [1, 44],
-  [2, 32],
-  [2, 43],
-  [4, 27],
-];
-
-const at = (grid: readonly (readonly boolean[])[], row: number, col: number): boolean => {
-  const value = grid[row]?.[col];
-  assert.notEqual(value, undefined, `module ${String(row)},${String(col)} is off the grid`);
-  return value === true;
-};
-
-/** Which modules are structure rather than data, and so are skipped by the walk. */
-const functionMap = (size: number, version: number): boolean[][] => {
-  const reserved = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
-  const block = (top: number, left: number, height: number, width: number): void => {
-    for (let r = top; r < top + height; r += 1)
-      for (let c = left; c < left + width; c += 1) (reserved[r] as boolean[])[c] = true;
-  };
-  // The three finder patterns with their separators, each of which also covers the format
-  // information strip beside it.
-  block(0, 0, 9, 9);
-  block(0, size - 8, 9, 8);
-  block(size - 8, 0, 8, 9);
-  // Timing patterns.
-  block(6, 0, 1, size);
-  block(0, 6, size, 1);
-  for (const r of ALIGNMENT[version] ?? []) {
-    for (const c of ALIGNMENT[version] ?? []) {
-      const nearFinder =
-        (r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8);
-      if (nearFinder) continue;
-      block(r - 2, c - 2, 5, 5);
-    }
-  }
-  return reserved;
-};
-
-/** The 15-bit format information, from the copy that runs down column 8 and along row 8. */
-const readMask = (grid: readonly (readonly boolean[])[], size: number): number => {
-  let bits = 0;
-  for (let i = 0; i < 15; i += 1) {
-    const row = i < 6 ? i : i < 8 ? i + 1 : size - 15 + i;
-    if (at(grid, row, 8)) bits |= 1 << i;
-  }
-  // The format information is masked with 0x5412 before it is written, so that an all-zero format
-  // is not an all-light region. Unmasking is the whole of reading it back.
-  const data = (bits ^ 0x5412) >> 10;
-  // The low three bits are the mask pattern; the high two are the error correction level, in the
-  // spec's own order where M is 0. src/qr.ts asks for M, so this doubles as a check that the
-  // level reached the grid.
-  assert.equal(data >> 3, 0, "error correction level in the format information is not M");
-  return data & 7;
-};
-
-const decode = (grid: readonly (readonly boolean[])[]): string => {
-  const size = grid.length;
-  assert.equal((size - 17) % 4, 0, "grid is not a whole number of versions across");
-  const version = (size - 17) / 4;
-  assert.ok(version >= 1 && version <= 6, `version ${String(version)} is outside this decoder`);
-  for (const row of grid) assert.equal(row.length, size, "grid is not square");
-
-  const mask = readMask(grid, size);
-  const masked = MASKS[mask] as (row: number, col: number) => boolean;
-  const reserved = functionMap(size, version);
-
-  // The zig-zag: two-module-wide columns from the right, alternating upwards and downwards, with
-  // column 6 skipped because the vertical timing pattern lives there.
-  const bits: boolean[] = [];
-  let upward = true;
-  for (let col = size - 1; col > 0; col -= 2) {
-    if (col === 6) col -= 1;
-    for (let step = 0; step < size; step += 1) {
-      const row = upward ? size - 1 - step : step;
-      for (const c of [col, col - 1]) {
-        if ((reserved[row] as boolean[])[c] === true) continue;
-        bits.push(at(grid, row, c) !== masked(row, c));
-      }
-    }
-    upward = !upward;
-  }
-
-  // Bits back into codewords, then codewords back out of the interleave.
-  const stream: number[] = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) {
-    let value = 0;
-    for (let b = 0; b < 8; b += 1) value = (value << 1) | (bits[i + b] === true ? 1 : 0);
-    stream.push(value);
-  }
-  const [blocks, dataPerBlock] = BLOCKS_M[version] as readonly [number, number];
-  const data: number[] = [];
-  for (let block = 0; block < blocks; block += 1)
-    for (let i = 0; i < dataPerBlock; i += 1) data.push(stream[i * blocks + block] as number);
-
-  const message = data.flatMap((byte) => [7, 6, 5, 4, 3, 2, 1, 0].map((bit) => (byte >> bit) & 1));
-  let cursor = 0;
-  const take = (count: number): number => {
-    let value = 0;
-    for (let i = 0; i < count; i += 1) value = (value << 1) | (message[cursor++] ?? 0);
-    return value;
-  };
-
-  assert.equal(take(4), 0b0100, "mode indicator is not byte mode");
-  // Byte mode length is eight bits up to version 9.
-  const length = take(8);
-  const bytes = Buffer.from(Array.from({ length }, () => take(8)));
-  return bytes.toString("latin1");
-};
+// The decoder lives in `src/fixtures/qr-decoder.ts`, written from the spec rather than from the
+// encoder, sharing no code with it and doing no error correction.
 
 void describe("qr", () => {
   void test("a generated token decodes back out of the grid it was encoded into", () => {
     const token = generateToken();
-    assert.equal(decode(qrModules(token)), token);
+    assert.equal(decodeGrid(qrModules(token)), token);
   });
 
   void test("the printed lines decode back, not just the grid behind them", () => {
-    // What a phone photographs is the terminal, not the array. So this reads the rendered lines
-    // back the way a camera would - each half block is two module rows, foreground on top,
-    // background underneath - strips the quiet zone off again, and decodes that. It is the check
-    // that catches an off-by-one in the quiet zone or a swapped foreground and background, both
-    // of which leave `qrModules` perfectly correct.
+    // What a phone photographs is the terminal, not the array. This reads the rendered lines back
+    // the way a camera would and decodes those, which is the check that catches an off-by-one in
+    // the quiet zone or a swapped foreground and background - both of which leave `qrModules`
+    // perfectly correct.
     const token = generateToken();
-    const lines = firstRunLines(token, "http://127.0.0.1:7777", "/tmp/token").filter((line) =>
-      line.includes("["),
+    const lines = qrBlockLines(
+      firstRunLines(token, "http://127.0.0.1:7777", "/tmp/token").join("\n"),
     );
-    const rows: boolean[][] = [];
-    for (const line of lines) {
-      const cells = line.split("[").slice(1, -1);
-      const top: boolean[] = [];
-      const bottom: boolean[] = [];
-      for (const cell of cells) {
-        const [fg, bg] = (cell.split("m")[0] ?? "").split(";");
-        top.push(fg === "30");
-        bottom.push(bg === "40");
-      }
-      rows.push(top, bottom);
-    }
-    const size = rows[0]?.length ?? 0;
-    const inner = rows
-      .slice(4, size - 4)
-      .map((row) => row.slice(4, size - 4))
-      .filter((row) => row.length > 0);
-    assert.equal(decode(inner), token);
+    assert.equal(decodeLines(lines), token);
   });
 
   void test("decodes tokens from many runs, not one lucky grid", () => {
     // The mask is chosen per code by a penalty search, and the version by length, so a single
     // sample exercises one mask out of eight. Fifty random tokens is enough to see several.
+    const seen = new Set<number>();
     for (let i = 0; i < 50; i += 1) {
       const token = generateToken();
-      assert.equal(decode(qrModules(token)), token);
+      const grid = qrModules(token);
+      seen.add(readFormat(grid).mask);
+      assert.equal(decodeGrid(grid), token);
     }
+    // And the decoder really did have to read the mask rather than assume one: more than one turned
+    // up across the sample. If this ever fails because the encoder fixed its mask, the decoder is
+    // still correct - it is the assumption that would have become safe, not the code that broke.
+    assert.ok(seen.size > 1, `only mask ${[...seen].join(",")} appeared in fifty codes`);
   });
 
   void test("the decoder is not a mirror of the encoder: a flipped module breaks it", () => {
@@ -215,7 +60,7 @@ void describe("qr", () => {
     (grid[last] as boolean[])[last] = !(grid[last] as boolean[])[last];
     let decoded: string | undefined;
     try {
-      decoded = decode(grid);
+      decoded = decodeGrid(grid);
     } catch {
       // A flip in the mode indicator makes the stream unreadable rather than merely different.
       decoded = undefined;
@@ -223,18 +68,56 @@ void describe("qr", () => {
     assert.notEqual(decoded, token);
   });
 
+  void test("every character the token alphabet can produce survives the round trip", () => {
+    // Reading the dependency turned up that its `stringToBytes` is `charCodeAt(i) & 0xff` - latin-1,
+    // not UTF-8 - so any character above U+00FF is silently truncated to a different byte and the
+    // code still scans, as something else. The claim that this cannot bite rests entirely on the
+    // token alphabet, so the alphabet is what is tested: every base64url character at once, and
+    // then the generator itself held to that alphabet.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    assert.equal(decodeGrid(qrModules(alphabet)), alphabet);
+    for (let i = 0; i < 20; i += 1) {
+      assert.match(
+        generateToken(),
+        /^[A-Za-z0-9_-]+$/,
+        "the token left the alphabet the latin-1 encoder is safe for",
+      );
+    }
+  });
+
+  void test("a character outside latin-1 would be truncated, which is why none is encoded", () => {
+    // Not a wish: the truncation is demonstrated, so that the constraint on what may be handed to
+    // this encoder is written down as a failing round trip rather than as a comment. If a future
+    // caller passes a URL with a non-ASCII host, this is the behaviour it will get.
+    assert.notEqual(decodeGrid(qrModules("é中")), "é中");
+  });
+
   void test("renders half a module row per line, with the quiet zone", () => {
-    const modules = qrModules(generateToken());
     const lines = qrLines("x".repeat(43));
     const width = qrModules("x".repeat(43)).length + 8;
     assert.equal(lines.length, Math.ceil(width / 2));
     // One character per module column, each preceded by its own colour escape, and one reset at
     // the end of the line.
     for (const line of lines) {
-      assert.equal(line.split("\u001b[").length - 1, width + 1);
-      assert.ok(line.endsWith("\u001b[0m"));
+      assert.equal(line.split("[").length - 1, width + 1);
+      assert.ok(line.endsWith("[0m"));
     }
-    assert.ok(modules.length >= 21);
+  });
+
+  void test("the code is drawn dark-on-light explicitly, not in the terminal's own colours", () => {
+    // An inverted code is the classic "scans on one phone and not another" bug: blocks drawn in
+    // the default foreground of a dark theme produce light-on-dark, which many scanners refuse.
+    // So both halves of every cell carry an explicit colour, and the quiet zone is light.
+    const lines = qrLines(generateToken());
+    for (const line of lines) {
+      for (const cell of line.split("[").slice(1, -1)) {
+        const [fg, bg] = (cell.split("m")[0] ?? "").split(";");
+        assert.ok(fg === "30" || fg === "97", `foreground ${String(fg)} is not black or white`);
+        assert.ok(bg === "40" || bg === "107", `background ${String(bg)} is not black or white`);
+      }
+    }
+    const first = lines[0] ?? "";
+    assert.ok(!first.includes("30;40"), "the first quiet-zone line is dark");
   });
 
   void test("the first-run block prints the URL and the token file beside the code", () => {
@@ -249,6 +132,25 @@ void describe("qr", () => {
     assert.ok(!text.includes(token));
   });
 
+  void test("the QR carries the bare token, and never a URL with the token in it", () => {
+    // The decision the item asks to be argued, held as a test rather than only as a comment. A
+    // scannable `https://host/?token=...` signs a phone in with one tap and writes the credential
+    // into browser history, into the `Referer` of every request the page makes, and into the log
+    // of anything in front of the server; a fragment avoids the wire and still lands in history.
+    // Plan 001 already refuses the token from a query string, so encoding one here would be
+    // defeating that rule from the other side.
+    const token = generateToken();
+    const carried = decodeLines(
+      qrBlockLines(firstRunLines(token, "https://deck.example.ts.net", "/tmp/token").join("\n")),
+    );
+    assert.equal(carried, token);
+    assert.ok(!carried.includes("://"), "the QR carries a URL");
+    assert.ok(
+      !carried.includes("?") && !carried.includes("#"),
+      "the QR carries a query or fragment",
+    );
+  });
+
   void test("the URL is the configured origin when there is one, and never a guessed ts.net", () => {
     assert.equal(
       clientUrl("https://host.tailXXXXXX.ts.net", 7777),
@@ -258,6 +160,19 @@ void describe("qr", () => {
     // The hostname of a tailnet this process may not be on is not derivable from here, and
     // m4/tailscale-serve has not put anything in front of the port yet.
     assert.ok(!clientUrl(undefined, 7777).includes("ts.net"));
+  });
+
+  void test("no ts.net host is hardcoded anywhere in the source", () => {
+    // The URL printed today has to be the one the operator can actually open. HTTPS is not on this
+    // tailnet and `m4/tailscale-serve` is not merged, so a `.ts.net` literal reaching the printed
+    // line would be a URL that does not answer - and would keep answering wrongly after the serve
+    // item lands on some other hostname.
+    const source = readFileSync(join(import.meta.dirname, "qr.ts"), "utf8");
+    const code = source
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("*") && !line.trimStart().startsWith("//"))
+      .join("\n");
+    assert.ok(!code.includes("ts.net"), "src/qr.ts hardcodes a tailnet hostname");
   });
 
   void test("the encoder stays out of the browser bundle", async () => {
@@ -278,15 +193,37 @@ void describe("qr", () => {
   void test("the encoder has no transitive dependencies", () => {
     // Plan 003 allows the sixth dependency on the condition that it is one that can be read. A
     // package that arrives with a tree behind it spends the budget more than once, and it would do
-    // so quietly - nothing else in this repo would notice.
+    // so quietly - nothing else in this repo would notice. Optional and peer dependencies count:
+    // both install by default with pnpm's defaults for the peer case, and both are code that ships.
+    const root = join(import.meta.dirname, "..");
     const manifest: unknown = JSON.parse(
-      readFileSync(
-        join(import.meta.dirname, "..", "node_modules", "qrcode-generator", "package.json"),
-        "utf8",
-      ),
+      readFileSync(join(root, "node_modules", "qrcode-generator", "package.json"), "utf8"),
     );
-    const deps = (manifest as { dependencies?: Record<string, string> }).dependencies ?? {};
-    assert.deepEqual(Object.keys(deps), []);
-    assert.equal((manifest as { version: string }).version, "2.0.4");
+    const pkg = manifest as {
+      version: string;
+      license?: string;
+      dependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+    };
+    assert.deepEqual(Object.keys(pkg.dependencies ?? {}), []);
+    assert.deepEqual(Object.keys(pkg.optionalDependencies ?? {}), []);
+    assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}), []);
+    assert.equal(pkg.version, "2.0.4");
+    assert.equal(pkg.license, "MIT");
+
+    // The lockfile is the second witness, and the one that would catch a dependency arriving in a
+    // later version: pnpm writes the resolved graph, and this package's snapshot entry is empty.
+    const lock = readFileSync(join(root, "pnpm-lock.yaml"), "utf8");
+    assert.match(lock, /\n {2}qrcode-generator@2\.0\.4: \{\}\n/);
+  });
+
+  void test("it is the sixth runtime dependency, and it is the last", () => {
+    const pkg: unknown = JSON.parse(
+      readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"),
+    );
+    const runtime = Object.keys((pkg as { dependencies: Record<string, string> }).dependencies);
+    assert.ok(runtime.includes("qrcode-generator"));
+    assert.equal(runtime.length, 6, `the budget is six: ${runtime.join(", ")}`);
   });
 });
