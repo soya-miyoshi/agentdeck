@@ -214,7 +214,9 @@ connect at all, which stops being true the moment `tailscale serve` is running.
   visits cannot drive the socket. **Present but off until configured:** the expected host comes
   from `AGENTDECK_ORIGIN`, and with it unset both `/api` and `/ws` accept any `Origin`. That is
   the state of an ordinary `pnpm start`, so the server says so at boot rather than letting a
-  ticked box stand in for a check that is not running.
+  ticked box stand in for a check that is not running. The warning names the value it should have
+  — `https://` plus this machine's MagicDNS name, read from `tailscale status --json` at boot — so
+  it is one paste rather than a placeholder. It is recommended and never applied: see plan 006.
 - Never `tailscale funnel`. That publishes to the internet, and nothing in this design is built
   to survive that.
 

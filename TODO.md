@@ -385,6 +385,20 @@ Agent-agnostic signals first, so the generic path is the proven one.
 - [ ] **`m4/tailscale-serve`** — `tailscale serve --bg` in front of the loopback port.
       **Done when:** the `ts.net` URL loads over HTTPS from the phone and the page reports a
       secure context.
+      **Blocked on the admin console, and the wiring is done (2026-08-08).** Measured on this Mac:
+      `tailscale serve --bg 7791` prints `Serve is not enabled on your tailnet` with an enable link
+      and then **hangs** — 20s timeout, exit 124, never exits on its own — and
+      `tailscale cert example-host.tailXXXXXX.ts.net` answers `your Tailscale account does
+      not support getting TLS certs`. Both switches are at
+      <https://login.tailscale.com/admin/dns> and neither is something this repo can turn on, so
+      `https://example-host.tailXXXXXX.ts.net/` does not connect and the HTTPS half is
+      undemonstrated. What is built is the half that made those failures opaque: `src/tailnet.ts`
+      reads `tailscale status --json` at boot and names the missing switch, the settings page, the
+      `tailscale serve` command with the real port, the URL, and the exact
+      `AGENTDECK_ORIGIN=https://<dnsname>` value — plan 001's placeholder, resolved. Plan 006 gains
+      the section this shape comes from. Nothing runs `tailscale serve` and nothing sets
+      `AGENTDECK_ORIGIN`: both stay the operator's one decision. When the two settings are on, the
+      remaining work is running the command and re-checking from a phone.
 
 - [ ] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
       **Done when:** it installs to the home screen and launches without browser chrome.

@@ -169,9 +169,11 @@ logs the names it cleared. Without that the client half bounds nothing, and empt
 
 ## Driving it from a browser
 
-The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. Nothing serves the built bundle yet
-— that is `m2/serve-client` — so today the page comes from Vite's dev server, which proxies `/api`
-and `/ws` to the server on 7777.
+The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. `pnpm build` writes it to
+`dist/client` and the server serves it from there on 7777, so the app and the API are one origin
+— that is the path the phone uses. For iterating on the client itself the page comes instead from
+Vite's dev server, which proxies `/api` and `/ws` to the server on 7777, and the two caveats below
+are about that flow only.
 
 ```
 # one terminal: the server
@@ -184,8 +186,9 @@ pnpm dev
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
 your session appears.
 
-Two things about the dev flow specifically, neither of which applies once `m2/serve-client` makes
-the app and the API one origin. **`AGENTDECK_ORIGIN` must be unset for this**, or set to the Vite
+Two things about the dev flow specifically, neither of which applies to the built bundle the
+server serves, where the app and the API are already one origin. **`AGENTDECK_ORIGIN` must be
+unset for this**, or set to the Vite
 origin: the proxy leaves the browser's `Origin` header alone, so a server configured with the
 `https://<host>.ts.net` origin answers 403 to the upgrade and to every `/api` call — and the client
 cannot tell that from a network failure, so it reconnects forever instead of saying so. And the
@@ -206,6 +209,43 @@ is no directory to start a session in and no agent to start. See the Environment
 Automated, the same path is `src/client/end-to-end.test.ts`: the real client modules against a real
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
 the two pieces that need a DOM.
+
+## From the phone: `tailscale serve`
+
+The server binds `127.0.0.1` and nothing else. `tailscale serve --bg 7777` on this Mac is the one
+place remote exposure is decided; it puts a real certificate on the machine's `ts.net` name and
+proxies to the loopback port. Never `tailscale funnel` — that is the public internet, and nothing
+here is built to survive it.
+
+```
+tailscale serve --bg 7777
+tailscale serve status          # what is configured, and the https:// URL
+tailscale serve reset           # take it down again
+```
+
+**Two tailnet settings are off by default and the CLI will not tell you which one bit you.** Both
+are at <https://login.tailscale.com/admin/dns>, and agentdeck reports at boot which of them this
+machine is missing, by name, along with the URL and the exact `AGENTDECK_ORIGIN` value:
+
+- **Serve**, for the tailnet. Without it `tailscale serve --bg` prints an enable link and then
+  **never exits** — it blocks waiting for someone to click it, so a script or a `launchd` job
+  hangs rather than fails. Run it with a timeout.
+- **HTTPS Certificates**. Without them there is no certificate for the `ts.net` name at all;
+  `tailscale cert <name>` answers `your Tailscale account does not support getting TLS certs`, and
+  `tailscale status --json` reports a null `CertDomains`, which is what agentdeck reads.
+
+Behind the proxy the page, `/api` and `/ws` are all the same origin — the `https://<host>.ts.net`
+one — so the dev-flow caveats above do not apply, and this is the run where the `Origin` check can
+actually be on. Set it to the value the boot log names:
+
+```
+AGENTDECK_ORIGIN=https://<host>.tailXXXXXX.ts.net pnpm start
+```
+
+agentdeck never sets that itself and never runs `tailscale serve` itself. Turning the check on
+from ambient machine state rather than from your intent would 403 the loopback and Vite flows the
+same server serves, and re-applying the proxy on every boot would make exposure two decisions
+instead of one.
 
 ## Non-goals
 

@@ -13,6 +13,7 @@ import { Hub } from "./hub.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
+import { readTailnet, tailnetAdvice } from "./tailnet.ts";
 import { generateToken } from "./token.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
@@ -161,6 +162,12 @@ export const main = async (): Promise<void> => {
   // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
   // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
   // than leaving a stated protection whose enable switch is invisible.
+  //
+  // The value it should have is not a placeholder any more: this is also where the tailnet is
+  // read (plan 006), so the ts.net origin, the two admin-console switches `tailscale serve`
+  // depends on, and the command itself are all reported here in sentences a person can act on -
+  // the CLI reports none of them well, and one of them it reports by hanging.
+  const tailnet = await readTailnet();
   if (process.env["AGENTDECK_ORIGIN"] === undefined) {
     console.error(
       "agentdeck: AGENTDECK_ORIGIN is not set, so the Origin check plan 001 describes is off. " +
@@ -168,6 +175,8 @@ export const main = async (): Promise<void> => {
         "https://<host>.ts.net origin the phone loads.",
     );
   }
+  for (const line of tailnetAdvice(tailnet, port, process.env["AGENTDECK_ORIGIN"]))
+    console.error(line);
 
   // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
   // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of
