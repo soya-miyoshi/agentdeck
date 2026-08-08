@@ -5,10 +5,22 @@
 // item was written against and the one the report exists for.
 
 import assert from "node:assert/strict";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { describe, test } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
-import { ADMIN_DNS_PAGE, parseTailnetStatus, tailnetAdvice, tailscaleBinary } from "./tailnet.ts";
+import {
+  ADMIN_DNS_PAGE,
+  parseTailnetStatus,
+  readTailnet,
+  tailnetAdvice,
+  tailscaleBinary,
+} from "./tailnet.ts";
 
 const certsOff = {
   Self: { DNSName: "example-host.tailXXXXXX.ts.net." },
@@ -114,5 +126,216 @@ void describe("plan 006 is where this shape is written down", () => {
     // Reporting only: nothing in agentdeck runs `tailscale serve`, and the plan has to say so
     // because the obvious next commit is the one that does it automatically.
     assert.match(plan, /agentdeck does not run `tailscale serve` itself/);
+  });
+});
+
+// --- The reader itself, and the boot that prints what it found. ---
+//
+// Everything above is pure. What follows drives `readTailnet` and then a whole `node src/server.ts`
+// against a STUB tailscale, the way src/watchdog.test.ts does: AGENTDECK_TAILSCALE names an
+// absolute path and the stub is a shell script. The real CLI is never run here - one switch is off
+// on this Mac, so the only reachable real answer is the refusal, and a stub can reach both.
+
+const serverPath = fileURLToPath(new URL("server.ts", import.meta.url));
+const run = promisify(execFile);
+
+let dir = "";
+let stub = "";
+
+/** A `tailscale` printing the given body for `status --json`, after `delay` seconds. The delay is
+ *  the wedged `tailscaled` a boot must not wait for. */
+const stubStatus = (body: string, options: { delay?: number; exit?: number } = {}): void => {
+  writeFileSync(
+    stub,
+    `#!/bin/sh
+sleep ${String(options.delay ?? 0)}
+echo 'Warning: client version mismatch' >&2
+cat <<'JSON'
+${body}
+JSON
+exit ${String(options.exit ?? 0)}
+`,
+    { mode: 0o755 },
+  );
+};
+
+const withStub = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const previous = process.env["AGENTDECK_TAILSCALE"];
+  process.env["AGENTDECK_TAILSCALE"] = stub;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env["AGENTDECK_TAILSCALE"];
+    else process.env["AGENTDECK_TAILSCALE"] = previous;
+  }
+};
+
+const sockets: string[] = [];
+
+interface Boot {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** Boot the real server against the stub and collect what it said, resolving on the listening line
+ *  or on exit so a boot that hangs fails rather than passing slowly. */
+const boot = async (env: Record<string, string>): Promise<Boot> => {
+  const socket = `agentdeck-tailnet-${String(process.pid)}-${String(sockets.length)}`;
+  sockets.push(socket);
+  const home = mkdtempSync(join(tmpdir(), "agentdeck-tailnet-home-"));
+  const child = spawn(process.execPath, [serverPath], {
+    env: {
+      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+      TMUX_SOCKET: socket,
+      HOME: home,
+      AGENTDECK_PORT: "0",
+      AGENTDECK_TAILSCALE: stub,
+      ...env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  try {
+    return await new Promise<Boot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`the server neither listened nor exited in 20s\n${stdout}\n${stderr}`));
+      }, 20_000);
+      timer.unref();
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+        if (stdout.includes("listening on")) child.kill("SIGTERM");
+      });
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => (stderr += chunk));
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout, stderr });
+      });
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+};
+
+void describe("reading the tailnet", () => {
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), "agentdeck-tailnet-"));
+    stub = join(dir, "tailscale");
+  });
+
+  after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    for (const socket of sockets) {
+      try {
+        execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+      } catch {
+        // Already gone: the desired end state.
+      }
+    }
+  });
+
+  void test("the two facts come back out of the process, warnings on stderr and all", async () => {
+    stubStatus(JSON.stringify(certsOff));
+    const tailnet = await withStub(readTailnet);
+    assert.deepEqual(tailnet, {
+      origin: "https://example-host.tailXXXXXX.ts.net",
+      httpsCertificates: false,
+    });
+  });
+
+  void test("no binary at the named path is undefined, not a throw and not a PATH search", async () => {
+    const previous = process.env["AGENTDECK_TAILSCALE"];
+    process.env["AGENTDECK_TAILSCALE"] = join(dir, "nowhere", "tailscale");
+    try {
+      assert.equal(await readTailnet(), undefined);
+    } finally {
+      if (previous === undefined) delete process.env["AGENTDECK_TAILSCALE"];
+      else process.env["AGENTDECK_TAILSCALE"] = previous;
+    }
+  });
+
+  void test("output that is not JSON is nothing known, not a crashed boot", async () => {
+    stubStatus("tailscaled is not running");
+    assert.equal(await withStub(readTailnet), undefined);
+  });
+
+  void test("a non-zero exit is nothing known", async () => {
+    stubStatus(JSON.stringify(certsOn), { exit: 1 });
+    assert.equal(await withStub(readTailnet), undefined);
+  });
+
+  void test("a tailscale that never answers is timed out, not waited on", async () => {
+    // The done-when's timeout clause on the read side: a wedged tailscaled must cost a boot a
+    // bounded few seconds, not the boot.
+    stubStatus(JSON.stringify(certsOn), { delay: 30 });
+    const started = Date.now();
+    assert.equal(await withStub(readTailnet), undefined);
+    assert.ok(Date.now() - started < 10_000, "readTailnet waited on a wedged tailscale");
+  });
+
+  void test("the boot names the missing switch, the page, and still serves loopback", async () => {
+    stubStatus(JSON.stringify(certsOff));
+    const { stdout, stderr } = await boot({});
+    assert.match(stdout, /listening on/, "a tailnet with a switch off stopped the server booting");
+    assert.match(stderr, /HTTPS certificates are DISABLED/);
+    assert.ok(stderr.includes(ADMIN_DNS_PAGE));
+  });
+
+  void test("the boot prints the AGENTDECK_ORIGIN to run behind the proxy, in full", async () => {
+    // The done-when: agentdeck knows the origin it should be run with, and says it - not a
+    // placeholder a person has to fill in from a hostname they have to go and find.
+    stubStatus(JSON.stringify(certsOn));
+    const { stderr } = await boot({});
+    assert.match(stderr, /AGENTDECK_ORIGIN=https:\/\/example-host\.tailXXXXXX\.ts\.net\b/);
+    assert.match(stderr, /tailscale serve --bg \d+/);
+  });
+
+  void test("an AGENTDECK_ORIGIN that is not this machine's is called out at boot", async () => {
+    stubStatus(JSON.stringify(certsOn));
+    const { stderr } = await boot({ AGENTDECK_ORIGIN: "https://other.tailXXXXXX.ts.net" });
+    assert.match(stderr, /403/);
+    assert.doesNotMatch(stderr, /AGENTDECK_ORIGIN is not set/);
+  });
+
+  void test("the right AGENTDECK_ORIGIN boots quietly", async () => {
+    stubStatus(JSON.stringify(certsOn));
+    const { stdout, stderr } = await boot({
+      AGENTDECK_ORIGIN: "https://example-host.tailXXXXXX.ts.net",
+    });
+    assert.match(stdout, /listening on/);
+    assert.doesNotMatch(stderr, /AGENTDECK_ORIGIN=/);
+    assert.doesNotMatch(stderr, /403/);
+  });
+
+  void test("a wedged tailscale delays the boot by seconds, it does not prevent it", async () => {
+    stubStatus(JSON.stringify(certsOn), { delay: 30 });
+    const { stdout, stderr } = await boot({});
+    assert.match(stdout, /listening on/, "a hanging tailscale took the server down with it");
+    assert.match(stderr, /could not read `tailscale status --json`/);
+  });
+});
+
+void describe("the real tailscale still reports what the parser reads", () => {
+  void test("Self.DNSName and CertDomains are the fields this version emits", async () => {
+    // Not a fixture: the field NAMES are the assumption that a tailscale upgrade could break
+    // silently, turning "certificates are off" into a permanent wrong answer. Skipped where there
+    // is no tailscale, and never mutating - `status --json` only.
+    const binary = tailscaleBinary();
+    if (binary === undefined || process.env["AGENTDECK_TAILSCALE"] !== undefined) return;
+    let raw: string;
+    try {
+      ({ stdout: raw } = await run(binary, ["status", "--json"], { timeout: 5000 }));
+    } catch {
+      return; // Not logged in, or tailscaled is down: nothing to check against.
+    }
+    const status = JSON.parse(raw) as Record<string, unknown>;
+    assert.ok("CertDomains" in status, "tailscale no longer reports CertDomains");
+    const self = status["Self"] as { DNSName?: unknown };
+    assert.equal(typeof self.DNSName, "string");
+    assert.match(self.DNSName as string, /\.$/, "DNSName lost the trailing dot the parser strips");
   });
 });

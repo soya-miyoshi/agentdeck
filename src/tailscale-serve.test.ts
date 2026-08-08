@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,23 +19,29 @@ const DNS_NAME = "example-host.tailXXXXXX.ts.net";
 
 let dir = "";
 let stub = "";
+let argvLog = "";
 
 /** A `tailscale` whose three subcommands each print what this test wants. `serveDelay` is the
  *  hang: with Serve disabled the real CLI blocks instead of exiting. */
 const stubTailscale = (options: {
   certDomains: string | null;
   dnsName?: string;
+  rawStatus?: string;
   serveDelay?: number;
   serveStatus?: string;
   serveExit?: number;
 }): void => {
-  const status = JSON.stringify({
-    Self: { DNSName: `${options.dnsName ?? DNS_NAME}.` },
-    CertDomains: options.certDomains === null ? null : [options.certDomains],
-  });
+  const status =
+    options.rawStatus ??
+    JSON.stringify({
+      Self: { DNSName: `${options.dnsName ?? DNS_NAME}.` },
+      CertDomains: options.certDomains === null ? null : [options.certDomains],
+    });
+  writeFileSync(argvLog, "");
   writeFileSync(
     stub,
     `#!/bin/sh
+echo "$@" >> '${argvLog}'
 if [ "$1" = "status" ]; then
   echo 'Warning: client version mismatch' >&2
   echo '${status}'
@@ -92,7 +98,12 @@ void describe("the operator's serve command", () => {
   before(() => {
     dir = mkdtempSync(join(tmpdir(), "agentdeck-serve-"));
     stub = join(dir, "tailscale");
+    argvLog = join(dir, "argv.log");
   });
+
+  /** Every argument list the stub was invoked with, one per line: what the script actually ran, as
+   *  opposed to what it said it ran. */
+  const invocations = (): string => readFileSync(argvLog, "utf8");
 
   after(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -105,8 +116,50 @@ void describe("the operator's serve command", () => {
     assert.match(out, /HTTPS certificates are DISABLED/);
     assert.match(out, /https:\/\/login\.tailscale\.com\/admin\/dns/);
     assert.match(out, /NOT running `tailscale serve --bg`/);
-    // The refusal is the point: it never reached the command that blocks forever.
+    // The refusal is the point: it never reached the command that blocks forever. Asserted on
+    // what the stub was CALLED with, not on what the script printed - a script that ran
+    // `serve --bg` and then printed a refusal would pass the message check and hang in practice.
     assert.doesNotMatch(out, /putting tailscale serve in front of/);
+    assert.equal(invocations().trim(), "status --json");
+  });
+
+  void test("it never runs `tailscale funnel`, on any path", () => {
+    // funnel is the public internet. Nothing in this item is authorised to reach it, and the
+    // difference from `serve` is one word in one argument list.
+    stubTailscale({
+      certDomains: DNS_NAME,
+      serveStatus: `https://${DNS_NAME} (tailnet only) |-- / proxy http://127.0.0.1:7798`,
+    });
+    run("7798");
+    assert.doesNotMatch(invocations(), /funnel/);
+    const code = readFileSync(script, "utf8")
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
+    assert.doesNotMatch(code, /funnel/);
+  });
+
+  void test("no tailscale binary is a named refusal, not a stack trace", () => {
+    const result = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+        HOME: dir,
+        AGENTDECK_TAILSCALE: join(dir, "absent", "tailscale"),
+      },
+    });
+    assert.equal(result.status, 1);
+    assert.match(`${result.stdout}${result.stderr}`, /no tailscale binary found/);
+  });
+
+  void test("status output that is not JSON refuses instead of guessing a tailnet", () => {
+    // `tailscaled` down prints prose on stdout and exits 0 often enough that a JSON.parse throw
+    // here would be the script's most likely real-world crash.
+    stubTailscale({ certDomains: null, rawStatus: "failed to connect to local tailscaled" });
+    const { status, out } = run("7777");
+    assert.equal(status, 1);
+    assert.match(out, /could not read `tailscale status --json`/);
+    assert.equal(invocations().trim(), "status --json");
   });
 
   void test("no MagicDNS name: also a refusal, naming MagicDNS rather than the certificates", () => {
