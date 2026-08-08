@@ -6,7 +6,7 @@ import type { Session } from "../registry.ts";
 import { fetchAgents, fetchSessions, UnauthorizedError, verifyToken } from "./api.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type ConnectionStatus } from "./connection.ts";
-import { type KeyName, keyBytes, withCtrl } from "./key-row.ts";
+import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 import KeyRow from "./KeyRow.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
@@ -144,13 +144,6 @@ const select = (id: string): void => {
 // from a cap on the row or from a character typed on the soft keyboard - which is what makes
 // Ctrl+C reachable by pressing Ctrl and then `c`.
 const ctrlLatched = ref(false);
-
-// Only data a latch can actually act on may spend it. xterm raises `onData` for the terminal's own
-// replies as well as keystrokes - the DSR/DA/DECRQM answers a TUI in the pane asks for - and those
-// are always multi-byte CSI or SS3 sequences. A latch spent on one of them un-highlights the Ctrl
-// cap and delivers the operator's following `c` as the letter, so the interrupt is silently lost;
-// an agent emitting `ESC[6n` in a loop would eat every latch armed from the phone.
-const spendable = (data: string): boolean => [...data].length === 1 && data !== "\u001b";
 
 const send = (data: string): void => {
   const id = active.value;

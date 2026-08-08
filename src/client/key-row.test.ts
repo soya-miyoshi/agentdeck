@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type KeyName, keyBytes, withCtrl } from "./key-row.ts";
+import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 
 const source = (name: string): string =>
   readFileSync(fileURLToPath(new URL(name, import.meta.url)), "utf8");
@@ -215,7 +215,7 @@ void describe("the row as it is wired into the page", () => {
     assert.match(keyRow, /\.cap\.latched\s*\{/);
   });
 
-  void test("the terminal's own replies do not spend the latch", async () => {
+  void test("the terminal's own replies do not spend the latch", () => {
     // xterm raises `onData` for what the TERMINAL owes the application as well as for keystrokes:
     // the DSR/DA/DECRQM answers a TUI in the pane asks for. Those reach `send` by the same route a
     // typed character does, and a `send` that cleared the latch unconditionally let an agent's own
@@ -228,16 +228,9 @@ void describe("the row as it is wired into the page", () => {
       /^\s*ctrlLatched\.value = false;\s*$/m,
       "send() clears the latch unconditionally, so a terminal reply spends it",
     );
-    // The condition itself, run rather than read: only a lone character - which no CSI or SS3
-    // report ever is - may spend a latch.
-    const predicate = /const spendable = \(data: string\): boolean =>([\s\S]*?);\n/.exec(app)?.[1];
-    assert.ok(predicate !== undefined, "App.vue has no spendable()");
-    // Imported as a module built from the page's own expression rather than restated here: a copy
-    // of the rule in the test is a copy that stays green when the page's copy is loosened.
-    const module: unknown = await import(
-      `data:text/javascript,${encodeURIComponent(`export const spendable = (data) => ${predicate};`)}`
-    );
-    const { spendable } = module as { spendable: (data: string) => boolean };
+    // The rule itself, imported from the module rather than read out of the page's source text and
+    // executed: running repository text in the test process makes whatever that text says a thing
+    // the host runs at every `pnpm test`, and App.vue is not a file the host is meant to execute.
     // What the operator meant: Ctrl and then `c`.
     assert.equal(spendable("c"), true);
     // What the agent's TUI writes back through the same emit. A cursor-position report, the two
@@ -250,6 +243,19 @@ void describe("the row as it is wired into the page", () => {
     assert.equal(spendable(keyBytes("up", false)), false);
     assert.equal(spendable(keyBytes("up", true)), false);
     assert.equal(spendable(keyBytes("esc", false)), false);
+    // The wiring the behavioural assertions above cannot see: the page asks this module rather
+    // than keeping a second copy of the rule that can be loosened on its own.
+    assert.match(app, /from "\.\/key-row\.ts";/);
+    assert.match(
+      app,
+      /\bspendable\b[^\n]*from "\.\/key-row\.ts"|import \{[\s\S]*?spendable[\s\S]*?\} from "\.\/key-row\.ts"/,
+    );
+    assert.match(send, /spendable\(data\)/);
+    assert.doesNotMatch(app, /const spendable = /, "App.vue keeps its own copy of the rule");
+    // And no test may execute text it read out of the repository: that is a second, unenumerated
+    // way for a file nobody reviews as host-executed to run with the human's privileges.
+    const self = source("key-row.test.ts");
+    assert.doesNotMatch(self, /data:text\/javascript/, "this test executes repository source text");
   });
 
   void test("the row is not a side channel: its bytes go through Connection.input", () => {

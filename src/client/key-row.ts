@@ -77,3 +77,19 @@ export const withCtrl = (data: string): string => {
   if (data === "?") return "\u007f";
   return data;
 };
+
+/**
+ * Whether what is being sent may spend an armed Ctrl latch.
+ *
+ * xterm raises `onData` for the terminal's own replies as well as for keystrokes - the DSR/DA/
+ * DECRQM answers a TUI in the pane asks for - and those are always multi-byte CSI or SS3
+ * sequences. A latch spent on one of them un-highlights the Ctrl cap and delivers the operator's
+ * following `c` as the letter, so the interrupt is silently lost; an agent emitting `ESC[6n` in a
+ * loop would eat every latch armed from the phone. Only a lone character may spend a latch, and
+ * Esc - the one single-character sequence a cap sends - is excluded.
+ *
+ * It lives here beside `withCtrl` because it is the same byte-level rule, and because the
+ * alternative - a test that reads this expression out of a component's source text and runs it -
+ * makes a browser-only component host-executed at every `pnpm test`.
+ */
+export const spendable = (data: string): boolean => [...data].length === 1 && data !== "\u001b";
