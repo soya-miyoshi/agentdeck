@@ -165,7 +165,7 @@ const alive = (pid) => {
  */
 const listenerPid = async (state) => {
   if (alive(state.pid)) return state.pid;
-  const found = await new Promise((resolve) => {
+  return await new Promise((resolve) => {
     execFile(
       "/usr/sbin/lsof",
       ["-ti", `tcp:${port}`, "-sTCP:LISTEN"],
@@ -179,7 +179,6 @@ const listenerPid = async (state) => {
       },
     );
   });
-  return found;
 };
 
 /** `answered` (with status and latency), `silent`, or `refused`. */

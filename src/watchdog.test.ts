@@ -63,14 +63,19 @@ writeFileSync(
   JSON.stringify({ shell: { command: "/bin/sh", args: ["-c", "exec sleep 100000"] } }),
 );
 
+const sleep = (ms: number): Promise<unknown> => new Promise((r) => setTimeout(r, ms));
+
+/** An executable on the stub PATH, which is ahead of the real one for every pass. */
+const putStub = (name: string, script: string): void => {
+  writeFileSync(join(stubs, name), script);
+  chmodSync(join(stubs, name), 0o755);
+};
+
 // The notifier, captured. `osascript` is what the watchdog uses to tell a person what it did -
 // there is no push (m5/push is unbuilt) and the dependency budget is spent - so the assertion
 // that a person is told is an assertion about this file's contents.
-writeFileSync(
-  join(stubs, "osascript"),
-  `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AGENTDECK_TEST_NOTIFY"\nexit 0\n`,
-);
-chmodSync(join(stubs, "osascript"), 0o755);
+const RECORDING_NOTIFIER = `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AGENTDECK_TEST_NOTIFY"\nexit 0\n`;
+putStub("osascript", RECORDING_NOTIFIER);
 
 interface State {
   failures: number;
@@ -81,6 +86,19 @@ interface State {
 }
 
 const state = (): State => JSON.parse(readFileSync(statePath, "utf8")) as State;
+
+/** The state a pass starts from, so a test says only the fields it is actually about. */
+const seedState = (overrides: Partial<State> = {}): void => {
+  const seeded: State = {
+    failures: 0,
+    restarts: 0,
+    gaveUp: false,
+    pid: null,
+    serveConfigured: false,
+    ...overrides,
+  };
+  writeFileSync(statePath, JSON.stringify(seeded));
+};
 
 const notified = (): string =>
   existsSync(notifications) ? readFileSync(notifications, "utf8") : "";
@@ -94,7 +112,7 @@ const notifiedEventually = async (pattern: RegExp): Promise<string> => {
   for (let i = 0; i < 100; i++) {
     const seen = notified();
     if (pattern.test(seen)) return seen;
-    await new Promise((r) => setTimeout(r, 50));
+    await sleep(50);
   }
   return notified();
 };
@@ -167,7 +185,7 @@ const waitForHealth = async (port: string): Promise<boolean> => {
     } catch {
       // Not listening yet.
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await sleep(250);
   }
   return false;
 };
@@ -179,6 +197,30 @@ const listenerPid = (port: string): number | null => {
   const pid = Number(out.stdout.trim().split("\n")[0]);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 };
+
+/**
+ * A stand-in for the server, as a CHILD PROCESS rather than a listener in this process. That is
+ * not a detail: the watchdog finds what to stop with `lsof` on the port, so an in-process
+ * listener would have it SIGTERM the test runner - and each pass is run with `spawnSync`, which
+ * blocks this event loop, so a listener living here could not answer a probe at all.
+ */
+const startStub = async (
+  what: string,
+  port: string,
+  source: string,
+): Promise<ReturnType<typeof spawn>> => {
+  const child = spawn(process.execPath, ["-e", source], { stdio: "ignore" });
+  for (let i = 0; i < 80 && listenerPid(port) === null; i++) await sleep(50);
+  assert.notEqual(listenerPid(port), null, `the ${what} never came up`);
+  return child;
+};
+
+/** Answers /api/health healthily and at once, so the pass turns on whatever else is under test. */
+const healthyStub = (port: string): string =>
+  `require("node:http").createServer((req, res) => {` +
+  `res.writeHead(200, {"content-type": "application/json"});` +
+  `res.end(JSON.stringify({ ok: true, version: "stub" }));` +
+  `}).listen(${port}, "127.0.0.1");`;
 
 const api = async (port: string, path: string, init: RequestInit = {}): Promise<Response> => {
   const token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
@@ -297,11 +339,8 @@ void describe("a slow-but-alive server is not restarted", () => {
   // seconds - twice what /api/health gives its own tmux round trip and twice what
   // scripts/healthcheck.mjs allows, so every simpler check on this machine calls it dead.
   //
-  // A CHILD PROCESS, like the wedged one below and for a second reason as well as the lsof one:
-  // each pass is run with `spawnSync`, which blocks this process's event loop, so a slow server
-  // living in the test runner could never answer at all and would be indistinguishable from the
-  // wedge it is here to be told apart from. It records each request in a file, because that is
-  // the only channel left.
+  // It records each request in a file, because being a child process (see `startStub`) leaves
+  // that as the only channel back to the assertions.
   const DELAY_MS = 6_000;
   let slow: ReturnType<typeof spawn>;
   let port = "";
@@ -311,23 +350,16 @@ void describe("a slow-but-alive server is not restarted", () => {
     port = await freePort();
     freshTranscript("slow");
     requests = join(conf, "slow-requests.txt");
-    slow = spawn(
-      process.execPath,
-      [
-        "-e",
-        `const fs = require("node:fs");` +
-          `require("node:http").createServer((req, res) => {` +
-          `fs.appendFileSync(${JSON.stringify(requests)}, "r");` +
-          `setTimeout(() => { res.writeHead(200, {"content-type": "application/json"});` +
-          `res.end(JSON.stringify({ ok: true, version: "slow" })); }, ${String(DELAY_MS)});` +
-          `}).listen(${port}, "127.0.0.1");`,
-      ],
-      { stdio: "ignore" },
+    slow = await startStub(
+      "slow server",
+      port,
+      `const fs = require("node:fs");` +
+        `require("node:http").createServer((req, res) => {` +
+        `fs.appendFileSync(${JSON.stringify(requests)}, "r");` +
+        `setTimeout(() => { res.writeHead(200, {"content-type": "application/json"});` +
+        `res.end(JSON.stringify({ ok: true, version: "slow" })); }, ${String(DELAY_MS)});` +
+        `}).listen(${port}, "127.0.0.1");`,
     );
-    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.notEqual(listenerPid(port), null, "the slow server never came up");
     rmSync(statePath, { force: true });
   });
 
@@ -359,29 +391,18 @@ void describe("a wedged server needs three consecutive failures, then is restart
   // Accepted and never answered: the failure the timeout exists for, and the state a wedged tmux
   // with no execFile timeout on it (audit.md) puts the server into. A single miss is not enough,
   // because a single miss is what a load spike looks like from outside.
-  //
-  // It runs as a CHILD PROCESS rather than a server in this process, and that is not a detail:
-  // the watchdog finds what to stop with `lsof` on the port, so an in-process listener would
-  // have it SIGTERM the test runner.
   let wedged: ReturnType<typeof spawn>;
   let port = "";
 
   before(async () => {
     port = await freePort();
     freshTranscript("wedged");
-    wedged = spawn(
-      process.execPath,
-      [
-        "-e",
-        `const held = [];` +
-          `require("node:net").createServer(s => held.push(s)).listen(${port}, "127.0.0.1");`,
-      ],
-      { stdio: "ignore" },
+    wedged = await startStub(
+      "wedged listener",
+      port,
+      `const held = [];` +
+        `require("node:net").createServer(s => held.push(s)).listen(${port}, "127.0.0.1");`,
     );
-    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.notEqual(listenerPid(port), null, "the wedged listener never came up");
     rmSync(statePath, { force: true });
   });
 
@@ -422,16 +443,7 @@ void describe("it stops and notifies rather than crash-looping", () => {
     // after two failed restarts.
     port = await freePort();
     freshTranscript("gave-up");
-    writeFileSync(
-      statePath,
-      JSON.stringify({
-        failures: 2,
-        restarts: 2,
-        gaveUp: false,
-        pid: null,
-        serveConfigured: false,
-      }),
-    );
+    seedState({ failures: 2, restarts: 2 });
   });
 
   void test("after two restarts that did not help it gives up, loudly and once", async () => {
@@ -471,31 +483,13 @@ void describe("tailscale serve: not configured is not an outage", () => {
   let healthy: ReturnType<typeof spawn>;
 
   const stubTailscale = (output: string, code: number): void => {
-    writeFileSync(
-      join(stubs, "tailscale"),
-      `#!/bin/sh\ncat <<'EOF'\n${output}\nEOF\nexit ${String(code)}\n`,
-    );
-    chmodSync(join(stubs, "tailscale"), 0o755);
+    putStub("tailscale", `#!/bin/sh\ncat <<'EOF'\n${output}\nEOF\nexit ${String(code)}\n`);
   };
 
   before(async () => {
     port = await freePort();
     freshTranscript("tailscale");
-    healthy = spawn(
-      process.execPath,
-      [
-        "-e",
-        `require("node:http").createServer((req, res) => {` +
-          `res.writeHead(200, {"content-type": "application/json"});` +
-          `res.end(JSON.stringify({ ok: true, version: "stub" }));` +
-          `}).listen(${port}, "127.0.0.1");`,
-      ],
-      { stdio: "ignore" },
-    );
-    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.notEqual(listenerPid(port), null, "the stub health server never came up");
+    healthy = await startStub("stub health server", port, healthyStub(port));
   });
 
   after(() => {
@@ -505,16 +499,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
 
   void test("never configured: reported, not alarming, and not a failure of the pass", () => {
     stubTailscale("no serve config", 0);
-    writeFileSync(
-      statePath,
-      JSON.stringify({
-        failures: 0,
-        restarts: 0,
-        gaveUp: false,
-        pid: null,
-        serveConfigured: false,
-      }),
-    );
+    seedState();
     const outcome = pass(port);
     assert.match(outcome.stdout, /tailscale serve is not configured for the port/);
     assert.match(outcome.stdout, /m4\/tailscale-serve is not built yet/);
@@ -523,10 +508,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
 
   void test("was configured and is gone: that one is a notification", () => {
     stubTailscale("no serve config", 0);
-    writeFileSync(
-      statePath,
-      JSON.stringify({ failures: 0, restarts: 0, gaveUp: false, pid: null, serveConfigured: true }),
-    );
+    seedState({ serveConfigured: true });
     const outcome = pass(port);
     assert.match(outcome.stdout, /WAS configured for the port and is not any more/);
     assert.match(notified(), /tailscale serve is no longer configured/);
@@ -539,16 +521,7 @@ void describe("tailscale serve: not configured is not an outage", () => {
       `https://mac.example.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:${port}`,
       0,
     );
-    writeFileSync(
-      statePath,
-      JSON.stringify({
-        failures: 0,
-        restarts: 0,
-        gaveUp: false,
-        pid: null,
-        serveConfigured: false,
-      }),
-    );
+    seedState();
     const outcome = pass(port);
     assert.match(outcome.stdout, /tailscale serve is configured for the port/);
     assert.equal(state().serveConfigured, true);
@@ -603,42 +576,22 @@ void describe("an answer that is not a healthy one", () => {
   let port = "";
   let mode = "";
 
-  const seed = (): void => {
-    writeFileSync(
-      statePath,
-      JSON.stringify({
-        failures: 0,
-        restarts: 0,
-        gaveUp: false,
-        pid: null,
-        serveConfigured: false,
-      }),
-    );
-  };
-
   before(async () => {
     port = await freePort();
     freshTranscript("unhealthy");
     mode = join(conf, "unhealthy-mode.txt");
     writeFileSync(mode, "503");
-    stub = spawn(
-      process.execPath,
-      [
-        "-e",
-        `const fs = require("node:fs");` +
-          `require("node:http").createServer((req, res) => {` +
-          `const mode = fs.readFileSync(${JSON.stringify(mode)}, "utf8").trim();` +
-          `const status = mode === "503" ? 503 : 200;` +
-          `res.writeHead(status, {"content-type": "application/json"});` +
-          `res.end(JSON.stringify({ ok: mode === "healthy", version: "stub" }));` +
-          `}).listen(${port}, "127.0.0.1");`,
-      ],
-      { stdio: "ignore" },
+    stub = await startStub(
+      "unhealthy stub",
+      port,
+      `const fs = require("node:fs");` +
+        `require("node:http").createServer((req, res) => {` +
+        `const mode = fs.readFileSync(${JSON.stringify(mode)}, "utf8").trim();` +
+        `const status = mode === "503" ? 503 : 200;` +
+        `res.writeHead(status, {"content-type": "application/json"});` +
+        `res.end(JSON.stringify({ ok: mode === "healthy", version: "stub" }));` +
+        `}).listen(${port}, "127.0.0.1");`,
     );
-    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.notEqual(listenerPid(port), null, "the unhealthy stub never came up");
   });
 
   after(() => {
@@ -648,7 +601,7 @@ void describe("an answer that is not a healthy one", () => {
 
   void test("a 503 is a failure, takes the streak, and does not restart on its own", () => {
     writeFileSync(mode, "503");
-    seed();
+    seedState();
     const held = listenerPid(port);
     for (const expected of [1, 2]) {
       const outcome = pass(port);
@@ -667,7 +620,7 @@ void describe("an answer that is not a healthy one", () => {
     // that it is not well - which is what it does when the tmux round trip inside /api/health
     // fails - and a watchdog that reads only the status code calls that healthy forever.
     writeFileSync(mode, "notok");
-    seed();
+    seedState();
     const outcome = pass(port);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200 in \d+ms - unhealthy/);
@@ -676,16 +629,7 @@ void describe("an answer that is not a healthy one", () => {
 
   void test("a healthy answer from the same server clears the streak", () => {
     writeFileSync(mode, "healthy");
-    writeFileSync(
-      statePath,
-      JSON.stringify({
-        failures: 2,
-        restarts: 0,
-        gaveUp: false,
-        pid: null,
-        serveConfigured: false,
-      }),
-    );
+    seedState({ failures: 2 });
     const outcome = pass(port);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /answered 200 in \d+ms$/m);
@@ -703,21 +647,7 @@ void describe("the watchdog survives its own surroundings", () => {
   before(async () => {
     port = await freePort();
     freshTranscript("robust");
-    stub = spawn(
-      process.execPath,
-      [
-        "-e",
-        `require("node:http").createServer((req, res) => {` +
-          `res.writeHead(200, {"content-type": "application/json"});` +
-          `res.end(JSON.stringify({ ok: true, version: "stub" }));` +
-          `}).listen(${port}, "127.0.0.1");`,
-      ],
-      { stdio: "ignore" },
-    );
-    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.notEqual(listenerPid(port), null, "the healthy stub never came up");
+    stub = await startStub("healthy stub", port, healthyStub(port));
   });
 
   after(() => {
@@ -725,11 +655,7 @@ void describe("the watchdog survives its own surroundings", () => {
     killListener(port);
     rmSync(join(stubs, "tailscale"), { force: true });
     // Put the recording notifier back, whatever this suite did to it.
-    writeFileSync(
-      join(stubs, "osascript"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AGENTDECK_TEST_NOTIFY"\nexit 0\n`,
-    );
-    chmodSync(join(stubs, "osascript"), 0o755);
+    putStub("osascript", RECORDING_NOTIFIER);
   });
 
   void test("a corrupt state file is a first run, not a refusal to supervise", () => {
@@ -753,10 +679,7 @@ void describe("the watchdog survives its own surroundings", () => {
     // The give-up branch tells the operator, in the only channel it has left, that clearing the
     // state file is how they resume. That sentence is an instruction to a person at 3am and is
     // worth being true.
-    writeFileSync(
-      statePath,
-      JSON.stringify({ failures: 3, restarts: 2, gaveUp: true, pid: null, serveConfigured: false }),
-    );
+    seedState({ failures: 3, restarts: 2, gaveUp: true });
     const stuck = pass(port);
     assert.equal(stuck.status, 1);
     const instruction = /Clear (\S+) to resume/.exec(stuck.stdout);
@@ -778,16 +701,11 @@ void describe("the watchdog survives its own surroundings", () => {
     // `osascript` can fail for reasons that have nothing to do with the server - no GUI session,
     // a TCC prompt nobody answered. Supervision must not be conditional on being able to talk
     // about it, and the failure must be logged rather than swallowed.
-    writeFileSync(join(stubs, "osascript"), `#!/bin/sh\necho "notifier unavailable" >&2\nexit 3\n`);
-    chmodSync(join(stubs, "osascript"), 0o755);
-    writeFileSync(join(stubs, "tailscale"), `#!/bin/sh\necho "no serve config"\nexit 0\n`);
-    chmodSync(join(stubs, "tailscale"), 0o755);
+    putStub("osascript", `#!/bin/sh\necho "notifier unavailable" >&2\nexit 3\n`);
+    putStub("tailscale", `#!/bin/sh\necho "no serve config"\nexit 0\n`);
     // `serveConfigured: true` with a stub that now says there is none: the regression branch, the
     // cheapest pass that has something to say to a person.
-    writeFileSync(
-      statePath,
-      JSON.stringify({ failures: 0, restarts: 0, gaveUp: false, pid: null, serveConfigured: true }),
-    );
+    seedState({ serveConfigured: true });
     const outcome = pass(port);
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /WAS configured for the port and is not any more/);
