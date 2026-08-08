@@ -1060,3 +1060,55 @@ without its fix.
 - **`resync` costs process spawns and is bounded only by the general frame budget.** This is the
   third audit to land near it. It wants its own item.
 - **Same-uid**, unchanged.
+
+---
+
+## m3/tab-strip - final whole-codebase pass - 2026-08-08
+
+Status per tab is pushed rather than polled: the server announces a state change to every open
+socket, and the strip renders what arrives on the socket the client already has. A session adopted
+after a restart carries `waitingDetectionLost`, and the strip now shows that its waiting detection
+is dead rather than rendering it identically to a healthy tab - the dependency
+`m2/session-metadata-survives-restart` left for this item.
+
+Both of the audit's mediums are consequences of pushing rather than polling, and both are fixed
+here.
+
+### Findings
+
+- [medium] src/http.ts:123 - **The one route not behind the user's token now drives an unrate-limited
+  broadcast.** `POST /api/hooks/:id` was process-local before this branch; it now fans out to every
+  client synchronously inside the request. It is authenticated by the per-session secret, which any
+  same-uid process reads with `tmux show-environment -t` (m0/host-boundary), and `tailscale serve`
+  fronts the whole port so it is tailnet-reachable rather than loopback-only. `Hub.announce`'s
+  dedupe is defeated by construction - alternate two events that map to different states - so it is
+  one full fan-out per POST, with no cap on the route and no ceiling on per-socket buffering.
+  Status: FIXED in 899beaa. A per-session token bucket, ten a second with a burst of twenty,
+  answering 429 rather than dropping; and `send()` terminates a socket whose `bufferedAmount` is
+  over a ceiling, since a phone that has lost signal but not closed buffers forever.
+
+- [medium] src/hub.ts:172 - **`Hub.announce` was a third caller of the cwd boundary and applied it
+  not at all.** The sync caller iterates an already-filtered list; the hook caller passes whatever
+  id survived `secretMatches`, which reads `#meta` alone. A `#meta` entry outlives membership of
+  `list()`: a session recreated by hand at a path off the allowlist is rejected by `list()` on every
+  call, so neither `close()` nor `reap()` ever removes its metadata and its secret authenticates
+  forever - and `sync()` prunes `#announced` for ids not in the live set, so every later POST from
+  that id was news again. Status: FIXED in 899beaa: the hook path announces only for a session the
+  hub holds a stream for, which is what `sync()` adopted through the filtered list. **Still OPEN:**
+  `Registry.secretMatches` does not fail closed for an id whose remembered cwd no longer agrees
+  with tmux, so a stranded secret still authenticates the route even though it can no longer
+  announce.
+
+- [low] src/ws.ts:218 - Opening a WebSocket now costs a `tmux list-sessions` spawn, and the
+  `clients` set has no size limit, the upgrade handler never checks `req.url`, and `Tmux.#exec` has
+  no `timeout`. Connection churn - which the reconnect ladder produces by design - becomes one
+  spawn per upgrade, each able to hang against a stalled tmux. Status: OPEN. Post-auth only, so a
+  resource footgun rather than a boundary break; the fix is a short TTL on the list, which the sync
+  timer already refreshes every 2s.
+
+### Open after this iteration
+
+- **`secretMatches` does not fail closed on a stranded `#meta` entry.**
+- **No `execFile` timeout on the tmux path**, now reachable from the upgrade handler too.
+- **No cap on concurrent WebSocket connections**, and the upgrade handler accepts any path.
+- **Same-uid**, unchanged.

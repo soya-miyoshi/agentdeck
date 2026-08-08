@@ -5,7 +5,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { buildSnapshot, planAttach } from "./attach.ts";
 import { parseClientMessage, paneSize, type ServerMessage } from "./protocol.ts";
+import type { Session } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
+import type { SessionState } from "./tmux.ts";
 import { tokenMatches } from "./token.ts";
 
 // One socket, multiplexed over every attached session. Not one per tab: phones background
@@ -81,6 +83,18 @@ export interface WsDeps {
   isAlternateScreen: (sessionId: string) => Promise<boolean>;
   /** The live screen for a cold snapshot, and the seq the bytes of it end at. */
   repaint: (sessionId: string) => Promise<{ data: string; seq: number }>;
+  /**
+   * The whole session list, sent to a socket the moment it opens.
+   *
+   * A newly-opened socket otherwise has no baseline. `pushState` reaches the sockets that are
+   * open at that instant and `Hub.announce` dedupes server-wide, so every transition a phone's
+   * socket was dropped for - which plan 002 says is the normal case - was lost to it: the state
+   * was already announced, so it was never re-announced, and the reconnect ladder only re-attaches
+   * the tabs the user had actually opened. A session that went `waiting` while the screen was off
+   * stayed `working` in the strip until a full page reload, which is the strip answering "which
+   * one needs you" with "none of them" while one does.
+   */
+  listSessions: () => Promise<Session[]>;
   /** Raw bytes the user typed, straight to the PTY. */
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
@@ -113,11 +127,41 @@ interface Client {
   toldAboutRate: boolean;
 }
 
+/**
+ * How much a single socket may have waiting to go out before it is treated as gone.
+ *
+ * A stalled client - a phone that has lost signal but not yet closed - accepts frames into
+ * `bufferedAmount` forever, and this server pushes to every socket on every state change. Without
+ * a ceiling that buffer is the only thing that grows, on a process nothing restarts. Well above a
+ * snapshot, so a slow client is not dropped for being slow at something legitimate.
+ */
+export const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+
 const send = (socket: WebSocket, message: ServerMessage): void => {
-  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
+  if (socket.readyState !== socket.OPEN) return;
+  if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+    // Terminated rather than closed: `close()` is a handshake, and the reason this socket is over
+    // the ceiling is that nothing it is sent is going anywhere. The client's ladder brings it back.
+    socket.terminate();
+    return;
+  }
+  socket.send(JSON.stringify(message));
 };
 
-export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: () => void } => {
+export interface WsHandle {
+  close: () => void;
+  /**
+   * Tell every open socket a session's state, whether or not it is attached to that session.
+   *
+   * Broadcast rather than sent to the attached, because the strip shows a row per session and
+   * plan 002 is explicit that it must be able to say "this one needs you" without attaching to
+   * every session at once. A state frame that only reached attached clients would make the status
+   * of an unlooked-at tab arrive on the next poll, and there is no poll.
+   */
+  pushState: (sessionId: string, state: SessionState, exitCode?: number) => void;
+}
+
+export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle => {
   // noServer, so the upgrade is authenticated before any WebSocket exists. Letting `ws` handle
   // the upgrade would mean a socket that opens and then closes, which a client cannot tell from
   // a network problem.
@@ -182,6 +226,20 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     socket.on("pong", () => {
       client.alive = true;
     });
+
+    // The baseline, before any frame this client sends. Everything after it is a delta, and a
+    // socket that missed deltas while it was down has no other way back to the truth: the state
+    // dedupe is server-wide, so what was announced while nobody was listening is never repeated.
+    // A failure here costs this socket its resettle, not its connection - the list is fetched over
+    // HTTP too - so it is logged rather than thrown.
+    deps
+      .listSessions()
+      .then((sessions) => {
+        send(socket, { t: "sessions", sessions });
+      })
+      .catch((error: unknown) => {
+        console.error("agentdeck: could not send the session list on connect:", error);
+      });
 
     socket.on("message", (raw: Buffer) => {
       if (!withinRate(client)) return;
@@ -545,6 +603,16 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): { close: ()
     close: () => {
       clearInterval(heartbeat);
       wss.close();
+    },
+    pushState: (sessionId, state, exitCode) => {
+      for (const client of clients) {
+        send(client.socket, {
+          t: "state",
+          sessionId,
+          state,
+          ...(exitCode === undefined ? {} : { exitCode }),
+        });
+      }
     },
   };
 };

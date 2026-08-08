@@ -19,6 +19,16 @@ export interface Tab {
   status: string;
   /** Whether to draw the needs-you indicator. Never true for an agent that cannot detect it. */
   needsYou: boolean;
+  /**
+   * This session outlived the server process and its hook secret died with it, so it will never
+   * report `waiting` again until its agent is restarted (plan 002).
+   *
+   * The tab says so rather than looking like a healthy one. A tab that quietly stops reporting
+   * waiting is the confidently wrong tab this design refuses: it is indistinguishable from an
+   * agent that is simply still working, so the one thing the strip exists to tell a person - which
+   * session needs them - is answered "none of them" forever, and nothing on screen says why.
+   */
+  waitingDetectionLost: boolean;
   exitCode?: number;
 }
 
@@ -59,6 +69,11 @@ export const toTabs = (sessions: readonly Session[], agents: readonly AgentSumma
       state,
       status: statusOf(state, session.exitCode),
       needsYou: state === "waiting",
+      // Only for an agent that would otherwise have detected waiting, and only while the session
+      // is still running. Saying "no waiting alerts" about an agent that never had them is noise
+      // on every shell tab, and saying it about an exited session answers a question nobody is
+      // asking about a process that has finished.
+      waitingDetectionLost: session.waitingDetectionLost === true && detects && state !== "exited",
     };
     if (session.exitCode !== undefined) tab.exitCode = session.exitCode;
     return tab;

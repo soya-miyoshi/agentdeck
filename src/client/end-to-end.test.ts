@@ -27,10 +27,14 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import type { AgentSummary } from "../agent-profiles.ts";
+import { hookCommand } from "../claude-hooks.ts";
 import type { Session } from "../registry.ts";
+import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type SocketLike } from "./connection.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
+import { type Tab, toTabs } from "./tabs.ts";
 
 const run = promisify(execFile);
 const serverPath = fileURLToPath(new URL("../server.ts", import.meta.url));
@@ -48,13 +52,37 @@ const work = temp("agentdeck-e2e-work-");
 const pasteWork = temp("agentdeck-e2e-paste-");
 const dropWork = temp("agentdeck-e2e-drop-");
 const restartWork = temp("agentdeck-e2e-restart-");
+// Three, because the done-when for the strip is three sessions running at once: a status that is
+// right for one tab and wrong for the other two is the failure it is written against.
+const stripWork = [
+  temp("agentdeck-e2e-strip-a-"),
+  temp("agentdeck-e2e-strip-b-"),
+  temp("agentdeck-e2e-strip-c-"),
+];
 const conf = temp("agentdeck-e2e-conf-");
 
 const profiles = join(conf, "agents.json");
 // A plain shell, which is the profile-less agent the status work is proven against too. The point
 // of this test is the transport and the client, and a shell is the agent whose replies a test can
 // state exactly.
-writeFileSync(profiles, JSON.stringify({ sh: { command: "/bin/sh", args: [], name: "Shell" } }));
+// `hooked` is the same shell with a hook waiting mechanism declared, which is what makes
+// `detectsWaiting` true for it and `waiting` a state the strip is allowed to show. The agent
+// binary is deliberately still /bin/sh: what is being driven is the hook path - a POST to
+// /api/hooks/:id carrying the session's own secret - and claude is not needed to send one. The
+// POST itself is sent by the REAL hook command from src/claude-hooks.ts, run inside the session,
+// the way claude runs it.
+writeFileSync(
+  profiles,
+  JSON.stringify({
+    sh: { command: "/bin/sh", args: [], name: "Shell" },
+    hooked: {
+      command: "/bin/sh",
+      args: [],
+      name: "Hooked shell",
+      waiting: { via: "hook", settings: "hooked/settings.json" },
+    },
+  }),
+);
 
 let port = 0;
 let token = "";
@@ -82,7 +110,7 @@ const startServer = async (): Promise<ChildProcess> => {
       LC_ALL: "en_US.UTF-8",
       TMUX_SOCKET: socket,
       AGENTDECK_PORT: String(port),
-      AGENTDECK_MOUNTS: `${work}:${pasteWork}:${dropWork}:${restartWork}`,
+      AGENTDECK_MOUNTS: [work, pasteWork, dropWork, restartWork, ...stripWork].join(":"),
       AGENTDECK_PROFILES: profiles,
       AGENTDECK_AGENT_STATE_DIR: join(conf, "agent-state"),
     },
@@ -133,7 +161,7 @@ after(async () => {
   } catch {
     // Already gone: the desired end state.
   }
-  for (const dir of [home, work, pasteWork, dropWork, restartWork, conf]) {
+  for (const dir of [home, work, pasteWork, dropWork, restartWork, ...stripWork, conf]) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -321,6 +349,216 @@ void describe("an agent driven from the browser, end to end", () => {
   });
 });
 
+// ------------------------------------------------------------------------------------------
+// m3/tab-strip: three sessions, a status per tab, and the status arriving as a PUSHED frame.
+//
+// The strip is the one part of this product whose whole argument is a timing claim, so it is
+// driven rather than asserted about: three real tmux sessions, a real socket, the real `toTabs`
+// the page renders from, and a real hook POST sent by the real command in src/claude-hooks.ts,
+// running inside the session with the session's own secret - which is the only way a `waiting`
+// exists at all (src/http.ts authenticates that route with the secret, never the user's token).
+//
+// The client below never attaches to any of the three. That is deliberate: plan 002 says the
+// strip must be able to say "this one needs you" without attaching to every session at once, so
+// a state frame that only reached attached clients would be a strip that is right only about the
+// tab already being looked at.
+
+interface Strip {
+  connection: Connection;
+  sessions: Session[];
+  tabs: () => Tab[];
+  /** State frames that arrived on the socket. Zero means nothing was pushed. */
+  pushed: () => number;
+  /** Every HTTP request this process made, so a poll cannot hide. */
+  http: string[];
+  /** Run the real hook command inside a session, the way the agent's own hook runs it. */
+  hook: (session: Session, event: string) => void;
+  stop: () => void;
+}
+
+let strip: Strip | undefined;
+
+const buildStrip = async (): Promise<Strip> => {
+  // Every fetch this process makes, recorded. This is what makes "nothing polls" checkable rather
+  // than claimed: a strip that re-fetched GET /api/sessions on a timer would show up here as
+  // requests nobody in the test asked for.
+  const http: string[] = [];
+  const realFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = async (input, init) => {
+    const target = input instanceof Request ? input.url : String(input);
+    http.push(`${init?.method ?? "GET"} ${target}`);
+    return await realFetch(input, init);
+  };
+
+  const base = `http://127.0.0.1:${String(port)}`;
+  const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+
+  const created: Session[] = [];
+  for (const cwd of stripWork) {
+    const response = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ cwd, agent: "hooked" }),
+    });
+    const body = (await response.json()) as { session?: Session; error?: string };
+    assert.equal(response.status, 201, body.error ?? "");
+    assert.ok(body.session, "the server created no session");
+    created.push(body.session);
+  }
+
+  // The hook command as the agent gets it: the same string src/claude-hooks.ts writes into the
+  // agent's settings file, run by a shell with the session's AGENTDECK_SESSION_ID and
+  // AGENTDECK_SECRET in its environment, with the payload on stdin. Nothing about the transport
+  // is simulated - if this file's node -e form stopped working, this test would stop passing.
+  const hookScript = join(conf, "hook.sh");
+  writeFileSync(hookScript, `${hookCommand(port)}\n`);
+
+  const state = {
+    sessions: [] as Session[],
+    pushed: 0,
+  };
+  const errors: string[] = [];
+  const connection = new Connection(
+    // The token is known good here - it was read off disk - and every request this test makes is
+    // absolute, so the ladder never needs a verdict it would have to fetch for.
+    { token, connect: browserSocket, verifyToken: () => Promise.resolve("ok") },
+    {
+      render: () => undefined,
+      // App.vue's, restated: a pushed state patches the session it names and nothing else. No
+      // refetch, which is the point of the whole item.
+      state: (sessionId, next, exitCode) => {
+        state.pushed += 1;
+        state.sessions = state.sessions.map((session) =>
+          session.id === sessionId
+            ? { ...session, state: next, ...(exitCode === undefined ? {} : { exitCode }) }
+            : session,
+        );
+      },
+      sessions: (list) => (state.sessions = list),
+      error: (_sessionId, message) => errors.push(message),
+      status: () => undefined,
+      unauthorized: () => errors.push("the token was rejected"),
+    },
+  );
+  connection.start();
+  await waitFor("the strip's socket to open", () => connection.status === "open");
+
+  // The one and only load. Everything after this arrives on the socket.
+  const listed = (await (await fetch(`${base}/api/sessions`, { headers: auth })).json()) as {
+    sessions: Session[];
+  };
+  const agents = (await (await fetch(`${base}/api/agents`, { headers: auth })).json()) as {
+    agents: AgentSummary[];
+  };
+  state.sessions = listed.sessions.filter((session) =>
+    created.some((made) => made.id === session.id),
+  );
+  assert.equal(state.sessions.length, 3, "the three sessions are not all listed");
+
+  return {
+    connection,
+    sessions: created,
+    tabs: () => toTabs(state.sessions, agents.agents),
+    pushed: () => state.pushed,
+    http,
+    hook: (session, event) => {
+      connection.input(
+        session.id,
+        `printf '%s' '{"hook_event_name":"${event}"}' | sh ${hookScript}\r`,
+      );
+    },
+    stop: () => {
+      connection.stop();
+      globalThis.fetch = realFetch;
+    },
+  };
+};
+
+const stateOf = (tabs: readonly Tab[], id: string): SessionState | undefined =>
+  tabs.find((tab) => tab.id === id)?.state;
+
+void describe("the tab strip, against three real sessions", () => {
+  before(async () => {
+    strip = await buildStrip();
+    const live = strip;
+    // Quiet panes for the rest of this: no echo of what is typed, and an empty prompt. Output is
+    // what a declared `waiting` is cleared by (src/stream.ts) - the agent writing means the agent
+    // is doing something - so a shell that printed `$ ` after every command would be contradicting
+    // the hook a millisecond after it landed, for reasons that have nothing to do with an agent.
+    for (const session of live.sessions) live.connection.input(session.id, "stty -echo; PS1=''\r");
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    // All three working, each said by its own hook POST. The transition measured below is out of
+    // this state, not out of a blank one.
+    for (const session of live.sessions) live.hook(session, "UserPromptSubmit");
+    await waitFor("all three tabs to report working", () =>
+      live.tabs().every((tab) => tab.state === "working"),
+    );
+  });
+
+  after(() => strip?.stop());
+
+  void test("distinguishes working from waiting within a second or two of the transition", async () => {
+    const live = strip;
+    assert.ok(live, "the strip was not built");
+    const [first, second, third] = live.sessions;
+    assert.ok(first && second && third);
+
+    // `Stop` is what claude sends when a turn ends, and src/claude-hooks.ts maps it to `waiting`.
+    const at = Date.now();
+    live.hook(second, "Stop");
+    // Nothing else is holding this session's pane quiet, so the state has to survive on its own.
+    live.connection.input(second.id, "sleep 20\r");
+    await waitFor(
+      "the middle tab to report waiting",
+      () => stateOf(live.tabs(), second.id) === "waiting",
+      10_000,
+    );
+    const took = Date.now() - at;
+    assert.ok(took < 2500, `the transition took ${String(took)}ms to reach the strip`);
+
+    const tabs = live.tabs();
+    // The needs-you indicator, and only on the tab that needs you. A strip that lit all three
+    // would pass a test that only looked at one.
+    assert.deepEqual(
+      tabs.filter((tab) => tab.needsYou).map((tab) => tab.id),
+      [second.id],
+    );
+    assert.equal(stateOf(tabs, first.id), "working");
+    assert.equal(stateOf(tabs, third.id), "working");
+    assert.ok(live.pushed() > 0, "no state frame arrived at all");
+  });
+
+  void test("the status is pushed: nothing in the strip asks over HTTP", async () => {
+    const live = strip;
+    assert.ok(live, "the strip was not built");
+    const third = live.sessions[2];
+    assert.ok(third);
+
+    // The whole HTTP conversation so far, frozen. Everything after this line is the socket's.
+    const before = live.http.length;
+    const pushedBefore = live.pushed();
+
+    live.hook(third, "Stop");
+    live.connection.input(third.id, "sleep 20\r");
+    await waitFor(
+      "the third tab to report waiting",
+      () => stateOf(live.tabs(), third.id) === "waiting",
+      10_000,
+    );
+    // Three seconds of a client that has a live socket and a status that just changed. A poll on
+    // any interval a person would tolerate - the 2s Firestore poll this project exists not to be,
+    // or anything under it - lands inside this window and fails here.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    assert.ok(live.pushed() > pushedBefore, "the status changed without a frame arriving");
+    assert.deepEqual(
+      live.http.slice(before),
+      [],
+      "the strip made an HTTP request while the socket was open: it is polling",
+    );
+  });
+});
+
 void describe("the reconnection ladder, against the real transport", () => {
   void test("the socket is killed mid-output and the reconnect repaints instead of leaving a hole", async () => {
     const driven = await drive(dropWork);
@@ -456,6 +694,50 @@ void describe("the reconnection ladder, against the real transport", () => {
     } finally {
       driven.connection.stop();
     }
+  });
+});
+
+void describe("a session whose waiting detection died, for real", () => {
+  void test("is marked in the strip instead of rendering as a healthy tab", async () => {
+    // Not a fixture and not a flag set by hand: the three sessions above outlived the SIGKILL in
+    // the restart test, and the server that came back adopted them from tmux without the hook
+    // secret they were started with. Their hook POSTs are unsigned from here on, so they will
+    // never report `waiting` again until their agent is restarted (plan 002) - and that is
+    // precisely the tab that would otherwise look healthy and quietly never ask for anybody.
+    const base = `http://127.0.0.1:${String(port)}`;
+    const headers = { authorization: `Bearer ${token}` };
+    // A session of the SAME agent started by the server that is running now, so the comparison is
+    // between two tabs that differ in one thing: whether the hook secret still exists.
+    const fresh = (await (
+      await fetch(`${base}/api/sessions`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ cwd: work, agent: "hooked" }),
+      })
+    ).json()) as { session?: Session };
+    assert.ok(fresh.session, "no fresh session to compare against");
+    const listed = (await (await fetch(`${base}/api/sessions`, { headers })).json()) as {
+      sessions: Session[];
+    };
+    const agents = (await (await fetch(`${base}/api/agents`, { headers })).json()) as {
+      agents: AgentSummary[];
+    };
+    const tabs = toTabs(listed.sessions, agents.agents);
+    const stripIds = new Set((strip?.sessions ?? []).map((session) => session.id));
+    const survivors = tabs.filter((tab) => stripIds.has(tab.id));
+    assert.equal(survivors.length, 3, "the three sessions did not survive the restart");
+    for (const tab of survivors) {
+      assert.equal(
+        tab.waitingDetectionLost,
+        true,
+        `${tab.name} survived the restart and its tab still claims a working waiting mechanism`,
+      );
+    }
+    // The same agent, started fresh, does NOT carry it. Without this the assertion above would
+    // pass just as well if every tab were marked, which says nothing to a person at all.
+    const healthy = tabs.find((tab) => tab.id === fresh.session?.id);
+    assert.ok(healthy, "the fresh session is not listed");
+    assert.equal(healthy.waitingDetectionLost, false);
   });
 });
 

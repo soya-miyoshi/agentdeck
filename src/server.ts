@@ -281,7 +281,17 @@ export const main = async (): Promise<void> => {
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist);
-  const hub = new Hub({ tmux, registry, socket });
+  const hub = new Hub({
+    tmux,
+    registry,
+    socket,
+    // `state` is pushed rather than polled (plan 002), and the two sources of a state change - the
+    // hub's inference and an agent's own hook - both go out through this one funnel. `ws` is
+    // declared below, after the hub it announces for; nothing syncs before it exists.
+    onState: (id, state, exitCode) => {
+      ws.pushState(id, state, exitCode);
+    },
+  });
 
   // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
   // finish, or did I lose it", and expiring it after five minutes puts the question back.
@@ -319,6 +329,21 @@ export const main = async (): Promise<void> => {
         origin: process.env["AGENTDECK_ORIGIN"],
         probe: async () => await probeTmux(socket),
         streamFor: (id) => hub.streamFor(id),
+        onStateDeclared: (id, state) => {
+          // `POST /api/hooks/:id` is the one route not behind the user's token - it is
+          // authenticated by the per-session secret, which `Registry.secretMatches` checks against
+          // `#meta` alone. A `#meta` entry outlives the session's membership of `Registry.list()`:
+          // a session recreated by hand at a path off the allowlist is dropped by `list()` on every
+          // call, so neither `close()` nor `reap()` ever removes its metadata and its secret keeps
+          // authenticating forever. Without this check that id could put a state frame for an
+          // off-allowlist session onto every socket, which makes this a second place the cwd
+          // boundary is decided - the thing `Registry.list` is documented as being the only one of.
+          //
+          // The hub holds a stream only for what `sync()` adopted through that filtered list, and a
+          // hook POST comes from a running agent, so "attached" is exactly the right set.
+          if (!hub.attached(id)) return;
+          hub.announce(id, state);
+        },
       }),
       CLIENT_DIR,
     ),
@@ -328,6 +353,7 @@ export const main = async (): Promise<void> => {
     token,
     origin: process.env["AGENTDECK_ORIGIN"],
     streamFor: (id) => hub.streamFor(id),
+    listSessions: async () => await registry.list(),
     captureHistory: async (id) => await hub.captureHistory(id, HISTORY_LINES),
     isAlternateScreen: async (id) => await hub.isAlternateScreen(id),
     repaint: async (id) => await hub.repaint(id),

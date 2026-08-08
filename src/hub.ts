@@ -1,7 +1,7 @@
 import { SessionPty } from "./pty.ts";
 import type { Registry } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
-import type { Tmux } from "./tmux.ts";
+import type { SessionState, Tmux } from "./tmux.ts";
 
 // Owns one live attachment per session, and keeps that set equal to what tmux actually has.
 //
@@ -23,6 +23,9 @@ const DEFAULT_ROWS = 40;
 const REPAINT_QUIET_MS = 120;
 const REPAINT_MAX_MS = 1000;
 
+/** What the hub calls when a session's state is news. `src/server.ts` wires this to the sockets. */
+export type StateListener = (sessionId: string, state: SessionState, exitCode?: number) => void;
+
 export interface HubOptions {
   tmux: Tmux;
   registry: Registry;
@@ -32,6 +35,15 @@ export interface HubOptions {
   /** Injected so a test of the repaint does not have to spend a real second on it. */
   repaintQuietMs?: number;
   repaintMaxMs?: number;
+  /**
+   * Called when a session's state CHANGES, so the strip is told rather than asked.
+   *
+   * Plan 002: `state` is pushed, not polled. Without this the only state frame a client ever saw
+   * was the one answering its own `attach`, so a tab that was not being looked at - or one whose
+   * agent changed state after the attach - showed whatever the last full session list said, until
+   * something else made the client fetch one. That is a poll waiting to be written.
+   */
+  onState?: StateListener;
 }
 
 export class Hub {
@@ -42,11 +54,21 @@ export class Hub {
   #ptys = new Map<string, SessionPty>();
   #repaintQuietMs: number;
   #repaintMaxMs: number;
+  #onState: StateListener | undefined;
+  /**
+   * The last state each live session was announced with, so a repeat is not sent.
+   *
+   * The exit code is part of the key, not a passenger: `exited` with no code followed by `exited
+   * 137` is news - it is the difference between "it stopped" and "it was killed" - and a key of
+   * state alone suppressed the second one forever.
+   */
+  #announced = new Map<string, { state: SessionState; exitCode: number | undefined }>();
 
   constructor(options: HubOptions) {
     this.#tmux = options.tmux;
     this.#registry = options.registry;
     this.#socket = options.socket;
+    this.#onState = options.onState;
     this.#repaintQuietMs = options.repaintQuietMs ?? REPAINT_QUIET_MS;
     this.#repaintMaxMs = options.repaintMaxMs ?? REPAINT_MAX_MS;
     this.#createPty =
@@ -114,10 +136,49 @@ export class Hub {
     }
 
     // Push inferred state back so GET /api/sessions reports what the stream observed rather than
-    // a default. This is the field the tab UI exists to show.
-    for (const [id, pty] of this.#ptys) {
-      this.#registry.setState(id, pty.stream.state());
+    // a default. This is the field the tab UI exists to show - and telling the clients is the half
+    // that makes the strip pushed rather than polled. A session with no attachment - one that has
+    // exited - is announced with what the registry says, because that is the only reading of it
+    // there is, and there is nothing inferred to write back for it.
+    for (const session of live) {
+      // tmux says the pane is dead, so the stream does not get a vote. With `remain-on-exit on`
+      // the attach client stays alive against the dead pane, so `SessionPty.onExit` never fires
+      // and the stream still reads `idle` two seconds after the last byte - which used to be
+      // announced OVER the registry's correct `exited 137`, turning a killed agent into a
+      // healthy-looking tab. Declaring it on the stream as well is what stops the `attach` reply
+      // in src/ws.ts from answering `idle` for the same session.
+      if (session.state === "exited") {
+        this.#ptys.get(session.id)?.stream.declare("exited", session.exitCode);
+        this.announce(session.id, session.state, session.exitCode);
+        continue;
+      }
+      const stream = this.#ptys.get(session.id)?.stream;
+      if (stream !== undefined) this.#registry.setState(session.id, stream.state());
+      this.announce(session.id, stream?.state() ?? session.state, session.exitCode);
     }
+    for (const id of this.#announced.keys()) {
+      if (!liveIds.has(id)) this.#announced.delete(id);
+    }
+  }
+
+  /**
+   * Say a session's state once, and only when it is news.
+   *
+   * The single funnel for both sources: this sync's inference, and an agent's own hook statement
+   * arriving over HTTP (src/http.ts), which is announced the moment it lands rather than at the
+   * next sync - the difference between a transition seen in milliseconds and one seen in up to a
+   * sync interval.
+   */
+  /** Whether this hub currently holds a stream for a session, which only `sync()` sets up. */
+  attached(sessionId: string): boolean {
+    return this.#ptys.has(sessionId);
+  }
+
+  announce(sessionId: string, state: SessionState, exitCode?: number): void {
+    const last = this.#announced.get(sessionId);
+    if (last?.state === state && last.exitCode === exitCode) return;
+    this.#announced.set(sessionId, { state, exitCode });
+    this.#onState?.(sessionId, state, exitCode);
   }
 
   streamFor(sessionId: string): SessionStream | undefined {

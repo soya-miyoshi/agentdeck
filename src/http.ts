@@ -8,6 +8,7 @@ import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
 import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
+import type { SessionState } from "./tmux.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
 
 // A terminal server is remote code execution by design. MulmoTerminal binds loopback for exactly
@@ -39,6 +40,11 @@ export interface HttpDeps {
    * a session tmux has but nothing is attached to still gets its state through the registry.
    */
   streamFor?: (sessionId: string) => SessionStream | undefined;
+  /**
+   * Called with the state a hook just declared, so the strip hears it now rather than at the next
+   * sync. Plan 002: `state` is pushed, not polled, and a hook exists to arrive AT the transition.
+   */
+  onStateDeclared?: (sessionId: string, state: SessionState) => void;
 }
 
 interface Handled {
@@ -69,7 +75,41 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" && value !== "" ? value : undefined;
 
+/**
+ * Hook POSTs allowed per session per second, and the burst above that.
+ *
+ * `POST /api/hooks/:id` is the one route not behind the user's token, and since the tab strip is
+ * pushed rather than polled every accepted POST fans out a frame to every open socket. The secret
+ * that authenticates it is readable by any same-uid process (`tmux show-environment -t`, see
+ * m0/host-boundary), and the route is reachable over the tailnet rather than loopback-only because
+ * `tailscale serve` fronts the whole port. So the cost of a POST has to be bounded by something
+ * other than the caller's good behaviour: an agent looping on two events that map to different
+ * states defeats the announce dedupe by construction.
+ *
+ * A real agent's transitions are human-paced. Ten a second per session is far above that and far
+ * below what a loop produces.
+ */
+const HOOKS_PER_SECOND = 10;
+const HOOK_BURST = 20;
+
 export const createHandler = (deps: HttpDeps) => {
+  // Per session, refilled by elapsed time rather than on a timer: no interval to clean up, and a
+  // session that stops posting costs one map entry until the process ends.
+  const hookBudget = new Map<string, { tokens: number; at: number }>();
+  const hookAllowed = (id: string, now: number): boolean => {
+    const bucket = hookBudget.get(id) ?? { tokens: HOOK_BURST, at: now };
+    const refilled = Math.min(
+      HOOK_BURST,
+      bucket.tokens + ((now - bucket.at) / 1000) * HOOKS_PER_SECOND,
+    );
+    if (refilled < 1) {
+      hookBudget.set(id, { tokens: refilled, at: now });
+      return false;
+    }
+    hookBudget.set(id, { tokens: refilled - 1, at: now });
+    return true;
+  };
+
   const handle = async (req: IncomingMessage, url: URL): Promise<Handled> => {
     const method = req.method ?? "GET";
     const path = url.pathname;
@@ -92,6 +132,11 @@ export const createHandler = (deps: HttpDeps) => {
       if (typeof secret !== "string" || !deps.registry.secretMatches(id, secret)) {
         return { status: 401, body: { error: "bad session secret" } };
       }
+      if (!hookAllowed(id, Date.now())) {
+        // Answered rather than dropped, so a legitimate agent that briefly outruns the budget can
+        // see why. Nothing is declared and nothing is announced.
+        return { status: 429, body: { error: "too many hook posts for this session" } };
+      }
       let payload: unknown;
       try {
         payload = await readJson(req);
@@ -112,6 +157,9 @@ export const createHandler = (deps: HttpDeps) => {
       // next GET /api/sessions carries it, rather than the one after the hub's next sync.
       deps.streamFor?.(id)?.declare(state);
       deps.registry.setState(id, state);
+      // And out to every open socket, at the transition. This is the one path that can be fast:
+      // the agent said so itself, so there is nothing to infer and nothing to wait for.
+      deps.onStateDeclared?.(id, state);
       return { status: 200, body: { ok: true, state } };
     }
 

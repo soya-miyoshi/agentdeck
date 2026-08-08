@@ -367,6 +367,15 @@ mode that transforms or refuses them.
 **`state` is pushed, not polled.** The tab strip updates from these messages. Polling would
 reintroduce the latency this design exists to remove.
 
+A `state` frame goes to **every open socket, attached or not**. The strip shows a row per session
+and, by the rule above, must be able to say "this one needs you" without attaching to every
+session at once — so a frame that only reached the clients attached to that session would leave
+every unlooked-at tab showing whatever the last session list said, which is a poll waiting to be
+written. The two things that produce one are the hub noticing a session's inferred state changed,
+and `POST /api/hooks/:sessionId` carrying an agent's own statement, which is announced as it lands
+rather than at the next sync. Repeats of a value that did not change are not sent; this is a
+change notification, and the heartbeat above is what carries liveness.
+
 **Errors are sentences.** The server writes `message` for a person; the client renders it
 verbatim. Rewording a refusal on the client loses the advice it contained.
 
