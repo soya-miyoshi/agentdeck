@@ -590,6 +590,266 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
   });
 });
 
+void describe("an answer that is not a healthy one", () => {
+  // The fourth outcome, and the quietest. `answered` is proof the event loop turned, which is what
+  // the check tests - but a 503, or a 200 whose body says `ok: false`, is the server telling you
+  // itself that it cannot do its job. That is a failure and it takes the streak, exactly like a
+  // wedge: the plan asks for consecutive failures over a meaningful window rather than a single
+  // miss, and there is no reason a self-reported bad pass deserves less patience than silence.
+  //
+  // Only two passes are run here on purpose. A third would restart, and a restart on this port
+  // would leave a real detached server behind on a port the stub owns.
+  let stub: ReturnType<typeof spawn>;
+  let port = "";
+  let mode = "";
+
+  const seed = (): void => {
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        failures: 0,
+        restarts: 0,
+        gaveUp: false,
+        pid: null,
+        serveConfigured: false,
+      }),
+    );
+  };
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("unhealthy");
+    mode = join(conf, "unhealthy-mode.txt");
+    writeFileSync(mode, "503");
+    stub = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");` +
+          `require("node:http").createServer((req, res) => {` +
+          `const mode = fs.readFileSync(${JSON.stringify(mode)}, "utf8").trim();` +
+          `const status = mode === "503" ? 503 : 200;` +
+          `res.writeHead(status, {"content-type": "application/json"});` +
+          `res.end(JSON.stringify({ ok: mode === "healthy", version: "stub" }));` +
+          `}).listen(${port}, "127.0.0.1");`,
+      ],
+      { stdio: "ignore" },
+    );
+    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.notEqual(listenerPid(port), null, "the unhealthy stub never came up");
+  });
+
+  after(() => {
+    stub.kill("SIGKILL");
+    killListener(port);
+  });
+
+  void test("a 503 is a failure, takes the streak, and does not restart on its own", () => {
+    writeFileSync(mode, "503");
+    seed();
+    const held = listenerPid(port);
+    for (const expected of [1, 2]) {
+      const outcome = pass(port);
+      assert.equal(outcome.status, 0, outcome.stderr);
+      assert.match(outcome.stdout, /answered 503 in \d+ms - unhealthy/);
+      assert.match(outcome.stdout, /not restarting yet/);
+      assert.equal(state().failures, expected, "a 503 did not count toward the streak");
+      assert.equal(state().restarts, 0);
+    }
+    assert.equal(listenerPid(port), held, "the process holding the port changed");
+    assert.equal(notified(), "", "an unhealthy answer notified before anything was done about it");
+  });
+
+  void test("200 with `ok: false` is unhealthy too: the status line alone is not the verdict", () => {
+    // The one a check written as `curl -f` gets wrong. The server answers 200 and says in the body
+    // that it is not well - which is what it does when the tmux round trip inside /api/health
+    // fails - and a watchdog that reads only the status code calls that healthy forever.
+    writeFileSync(mode, "notok");
+    seed();
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /answered 200 in \d+ms - unhealthy/);
+    assert.equal(state().failures, 1, "a 200 saying `ok: false` was read as healthy");
+  });
+
+  void test("a healthy answer from the same server clears the streak", () => {
+    writeFileSync(mode, "healthy");
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        failures: 2,
+        restarts: 0,
+        gaveUp: false,
+        pid: null,
+        serveConfigured: false,
+      }),
+    );
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /answered 200 in \d+ms$/m);
+    assert.equal(state().failures, 0, "two failures then a healthy pass did not reset the streak");
+  });
+});
+
+void describe("the watchdog survives its own surroundings", () => {
+  // Three ways this script can be handed a broken world, all of which have to end in it still
+  // supervising. A watchdog that refuses to run because of its own bookkeeping is a watchdog that
+  // is off exactly when nobody is looking.
+  let stub: ReturnType<typeof spawn>;
+  let port = "";
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("robust");
+    stub = spawn(
+      process.execPath,
+      [
+        "-e",
+        `require("node:http").createServer((req, res) => {` +
+          `res.writeHead(200, {"content-type": "application/json"});` +
+          `res.end(JSON.stringify({ ok: true, version: "stub" }));` +
+          `}).listen(${port}, "127.0.0.1");`,
+      ],
+      { stdio: "ignore" },
+    );
+    for (let i = 0; i < 80 && listenerPid(port) === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.notEqual(listenerPid(port), null, "the healthy stub never came up");
+  });
+
+  after(() => {
+    stub.kill("SIGKILL");
+    killListener(port);
+    rmSync(join(stubs, "tailscale"), { force: true });
+    // Put the recording notifier back, whatever this suite did to it.
+    writeFileSync(
+      join(stubs, "osascript"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AGENTDECK_TEST_NOTIFY"\nexit 0\n`,
+    );
+    chmodSync(join(stubs, "osascript"), 0o755);
+  });
+
+  void test("a corrupt state file is a first run, not a refusal to supervise", () => {
+    // Truncated by a crash mid-write, or edited by hand. Starting from zero is the honest
+    // recovery; exiting non-zero and touching nothing leaves the machine unsupervised over a
+    // scratch file.
+    writeFileSync(statePath, "{ this is not json");
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /answered 200/);
+    assert.deepEqual(state(), {
+      failures: 0,
+      restarts: 0,
+      gaveUp: false,
+      pid: listenerPid(port),
+      serveConfigured: false,
+    });
+  });
+
+  void test("clearing the state file after a give-up resumes supervision, as the log says it does", () => {
+    // The give-up branch tells the operator, in the only channel it has left, that clearing the
+    // state file is how they resume. That sentence is an instruction to a person at 3am and is
+    // worth being true.
+    writeFileSync(
+      statePath,
+      JSON.stringify({ failures: 3, restarts: 2, gaveUp: true, pid: null, serveConfigured: false }),
+    );
+    const stuck = pass(port);
+    assert.equal(stuck.status, 1);
+    const instruction = /Clear (\S+) to resume/.exec(stuck.stdout);
+    assert.notEqual(
+      instruction,
+      null,
+      `the give-up pass does not say how to resume\n${stuck.stdout}`,
+    );
+    assert.equal(instruction?.[1], statePath, "it names a state file other than the one it reads");
+
+    rmSync(statePath, { force: true });
+    const resumed = pass(port);
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.match(resumed.stdout, /answered 200/);
+    assert.equal(state().gaveUp, false, "it stayed given-up after the state file was cleared");
+  });
+
+  void test("a notifier that fails does not stop the pass that was trying to tell somebody", () => {
+    // `osascript` can fail for reasons that have nothing to do with the server - no GUI session,
+    // a TCC prompt nobody answered. Supervision must not be conditional on being able to talk
+    // about it, and the failure must be logged rather than swallowed.
+    writeFileSync(join(stubs, "osascript"), `#!/bin/sh\necho "notifier unavailable" >&2\nexit 3\n`);
+    chmodSync(join(stubs, "osascript"), 0o755);
+    writeFileSync(join(stubs, "tailscale"), `#!/bin/sh\necho "no serve config"\nexit 0\n`);
+    chmodSync(join(stubs, "tailscale"), 0o755);
+    // `serveConfigured: true` with a stub that now says there is none: the regression branch, the
+    // cheapest pass that has something to say to a person.
+    writeFileSync(
+      statePath,
+      JSON.stringify({ failures: 0, restarts: 0, gaveUp: false, pid: null, serveConfigured: true }),
+    );
+    const outcome = pass(port);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.match(outcome.stdout, /WAS configured for the port and is not any more/);
+    assert.match(outcome.stdout, /could not post the notification/);
+    assert.equal(state().serveConfigured, false, "the pass did not finish its bookkeeping");
+    assert.equal(notified(), "", "the failing notifier somehow recorded something");
+  });
+});
+
+void describe("what the watchdog is forbidden to do", () => {
+  const source = readFileSync(watchdog, "utf8");
+
+  void test("it never reaches for `tmux kill-server`", () => {
+    // Plan 006 names this as the one thing that stays expensive on the host: it is every session
+    // at once, and no watchdog should ever reach for it. The recovery test proves the panes
+    // survive one particular restart; this proves the command is not in the script to be reached
+    // by a path no test happens to take.
+    const code = source
+      .split("\n")
+      .filter((line) => !/^(\/\/|\/\*|\*)/.test(line.trim()))
+      .join("\n");
+    assert.doesNotMatch(code, /kill-server/, "the watchdog can kill the tmux server");
+    assert.doesNotMatch(code, /execFile\(\s*"tmux"/, "the watchdog drives tmux directly");
+  });
+
+  void test("every external command it runs carries a timeout, so it cannot join the pile", () => {
+    // audit.md's second known gap: there is no execFile timeout on the SERVER's tmux path, so a
+    // wedged tmux accumulates children nothing reaps - and that state is precisely what this
+    // script exists to notice. A watchdog that also hangs on a wedged tmux, once a minute,
+    // forever, would be adding to the pile it was written to see. Every child it spawns is either
+    // given a timeout or explicitly detached and unref'd.
+    const calls = source.match(/execFile\(/g) ?? [];
+    assert.ok(calls.length >= 3, "no execFile calls found; this test is reading the wrong file");
+    const timeouts = source.match(/\{ timeout: TOOL_TIMEOUT_MS \}|timeout: TOOL_TIMEOUT_MS/g) ?? [];
+    assert.equal(
+      timeouts.length,
+      calls.length,
+      `${String(calls.length)} execFile calls but ${String(timeouts.length)} timeouts`,
+    );
+    // The two that are not timed are the ones deliberately outliving the pass: the server it
+    // starts, and the critical dialog nobody may be there to dismiss.
+    for (const detached of source.match(/spawn\([\s\S]*?\);/g) ?? []) {
+      assert.match(detached, /detached: true/, "a spawned child is neither timed nor detached");
+    }
+    assert.equal((source.match(/\.unref\(\)/g) ?? []).length, 2, "a detached child is not unref'd");
+  });
+
+  void test("the probe timeout is well above the server's own health budget", () => {
+    // The slow-but-alive clause in numbers rather than in prose: 15s is five times the 3s the
+    // server gives its own tmux round trip, so "silent" means silent, not busy.
+    assert.match(source, /const PROBE_TIMEOUT_MS = 15_000;/);
+    assert.match(source, /const FAIL_THRESHOLD = 3;/);
+    assert.match(source, /const MAX_RESTARTS = 2;/);
+    const health = readFileSync(join(repoRoot, "src", "server.ts"), "utf8");
+    const budget = /3_?000/.test(health) || /3000/.test(health);
+    assert.ok(
+      budget,
+      "the server's health round trip no longer has the 3s budget 15000ms is five times",
+    );
+  });
+});
+
 // The spawned server is detached from this process on purpose - it has to outlive the pass that
 // started it - so this file is the only thing that will clean it up. Belt and braces alongside
 // `after`: a crashed test run must not leave a server or a tmux socket behind.
