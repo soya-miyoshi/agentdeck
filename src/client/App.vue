@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { AgentSummary } from "../agent-profiles.ts";
 import type { Session } from "../registry.ts";
@@ -144,6 +144,16 @@ const select = (id: string): void => {
 // from a cap on the row or from a character typed on the soft keyboard - which is what makes
 // Ctrl+C reachable by pressing Ctrl and then `c`.
 const ctrlLatched = ref(false);
+
+// The latch belongs to the tab it was armed on. It is one app-wide ref while `send` reads
+// `active.value` at SPEND time, and the active tab can move on its own - the session list settling
+// after a sync, or a tab exiting - so an armed Ctrl could be spent on a session the user was not
+// looking at when they armed it. Ctrl+C to the wrong agent is the confidently-wrong output this
+// design refuses, and the person would have no way to know it happened. Disarming on any change of
+// tab costs one extra tap in the case where they meant it.
+watch(active, () => {
+  ctrlLatched.value = false;
+});
 
 const send = (data: string): void => {
   const id = active.value;
