@@ -133,6 +133,18 @@ void describe("qr", () => {
     assert.ok(!text.includes(token));
   });
 
+  void test("off a terminal, the block is a sentence and carries no code", () => {
+    // The grid is the credential in another encoding, so it must not go anywhere a log goes.
+    const token = generateToken();
+    const lines = firstRunLines(token, "http://127.0.0.1:7777", "/home/x/.agentdeck/token", false);
+    const text = lines.join("\n");
+    assert.deepEqual(qrBlockLines(text), [], "a QR was rendered for a non-terminal stdout");
+    assert.ok(!text.includes(token), "the token was printed as text instead");
+    assert.ok(text.includes("/home/x/.agentdeck/token"), "the token file was not named");
+    assert.ok(text.includes("http://127.0.0.1:7777"));
+    assert.match(text, /terminal/i);
+  });
+
   void test("the QR carries the bare token, and never a URL with the token in it", () => {
     // The decision the item asks to be argued, held as a test rather than only as a comment. A
     // scannable `https://host/?token=...` signs a phone in with one tap and writes the credential

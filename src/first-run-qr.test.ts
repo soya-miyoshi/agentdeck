@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { spawn as spawnPty, type IPty } from "node-pty";
+
 import { decodeLines, qrBlockLines } from "./fixtures/qr-decoder.ts";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -28,6 +30,7 @@ const serverPath = join(repoRoot, "src", "server.ts");
 
 const temps: string[] = [];
 const children: ChildProcess[] = [];
+const ptys: IPty[] = [];
 
 const temp = (prefix: string): string => {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -60,59 +63,110 @@ interface Boot {
  * so a test that stopped reading at "listening on" would see no QR on the run that prints one and
  * would pass for the wrong reason on the run that does not.
  */
-const boot = async (home: string, origin?: string): Promise<Boot> => {
+const boot = async (
+  home: string,
+  origin?: string,
+  options: { tty?: boolean } = {},
+): Promise<Boot> => {
+  const tty = options.tty ?? true;
   const port = await freePort();
-  const child = spawn(process.execPath, [serverPath], {
-    env: {
-      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
-      HOME: home,
-      TERM: "xterm-256color",
-      LC_ALL: "en_US.UTF-8",
-      TMUX_SOCKET: `agentdeck-qr-${String(process.pid)}`,
-      AGENTDECK_PORT: String(port),
-      AGENTDECK_MOUNTS: temp("agentdeck-qr-work-"),
-      ...(origin === undefined ? {} : { AGENTDECK_ORIGIN: origin }),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  children.push(child);
+  const env = {
+    PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+    HOME: home,
+    TERM: "xterm-256color",
+    LC_ALL: "en_US.UTF-8",
+    TMUX_SOCKET: `agentdeck-qr-${String(process.pid)}`,
+    AGENTDECK_PORT: String(port),
+    AGENTDECK_MOUNTS: temp("agentdeck-qr-work-"),
+    ...(origin === undefined ? {} : { AGENTDECK_ORIGIN: origin }),
+  };
   let stdout = "";
   let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => (stdout += chunk));
-  child.stderr.on("data", (chunk: string) => (stderr += chunk));
+  // A real PTY when the case is about what a person sees, pipes when it is about what a
+  // redirected or launchd-supervised run writes. The difference is the whole point of the
+  // isTTY gate, so a test that only ever pipes could not tell the two apart.
+  //
+  // A PTY is one stream for both, so the PTY run sends stderr to a file and reads it back: the
+  // boot warnings mention example origins, and merging them into stdout would let a case that
+  // asks what the server PRINTED AS ITS URL pass or fail on a warning's wording.
+  let child: ChildProcess | undefined;
+  let pty: IPty | undefined;
+  let errFile: string | undefined;
+  const exited = { code: null as number | null, done: false };
+  if (tty) {
+    errFile = join(temp("agentdeck-qr-err-"), "stderr");
+    pty = spawnPty("/bin/sh", ["-c", `exec ${process.execPath} ${serverPath} 2> ${errFile}`], {
+      cols: 200,
+      rows: 60,
+      env,
+    });
+    ptys.push(pty);
+    pty.onData((chunk: string) => {
+      stdout += chunk.replaceAll("\r\n", "\n");
+    });
+    pty.onExit(({ exitCode }) => {
+      exited.code = exitCode;
+      exited.done = true;
+    });
+  } else {
+    const piped = spawn(process.execPath, [serverPath], { env, stdio: ["ignore", "pipe", "pipe"] });
+    child = piped;
+    children.push(piped);
+    piped.stdout.setEncoding("utf8");
+    piped.stderr.setEncoding("utf8");
+    piped.stdout.on("data", (chunk: string) => (stdout += chunk));
+    piped.stderr.on("data", (chunk: string) => (stderr += chunk));
+    piped.on("exit", (code) => {
+      exited.code = code;
+      exited.done = true;
+    });
+  }
   await new Promise<void>((ready, fail) => {
     const timer = setTimeout(() => {
       fail(new Error(`the server did not listen within 20s\n${stdout}\n${stderr}`));
     }, 20_000);
     timer.unref();
     const poll = setInterval(() => {
+      if (exited.done) {
+        clearInterval(poll);
+        clearTimeout(timer);
+        fail(new Error(`the server exited ${String(exited.code)} instead of listening\n${stderr}`));
+        return;
+      }
       if (!stdout.includes("listening on")) return;
       clearInterval(poll);
       clearTimeout(timer);
       // Everything the boot prints, not just up to the listen line.
-      setTimeout(ready, 750).unref();
+      setTimeout(ready, 750);
     }, 50);
-    poll.unref();
-    child.on("exit", (code) => {
-      clearInterval(poll);
-      clearTimeout(timer);
-      fail(new Error(`the server exited ${String(code)} instead of listening\n${stderr}`));
-    });
   });
-  child.kill("SIGTERM");
+  if (pty === undefined) child?.kill("SIGTERM");
+  else pty.kill("SIGTERM");
   await new Promise<void>((done) => {
-    child.on("exit", () => {
+    const give = setTimeout(() => {
+      clearInterval(poll);
       done();
-    });
-    setTimeout(done, 5_000).unref();
+    }, 5_000);
+    const poll = setInterval(() => {
+      if (!exited.done) return;
+      clearInterval(poll);
+      clearTimeout(give);
+      done();
+    }, 50);
   });
+  if (errFile !== undefined && existsSync(errFile)) stderr = readFileSync(errFile, "utf8");
   return { stdout, stderr, port };
 };
 
 after(() => {
   for (const child of children) child.kill("SIGKILL");
+  for (const pty of ptys) {
+    try {
+      pty.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -178,6 +232,40 @@ void describe("the QR the server prints on first run", () => {
     assert.equal(decodeLines(qrBlockLines(run.stdout)), token);
     assert.ok(run.stdout.includes(`http://127.0.0.1:${String(run.port)}`));
     assert.ok(!run.stdout.includes("ts.net"), "a tailnet hostname was guessed");
+  });
+
+  void test("prints no code at all when stdout is not a terminal", async () => {
+    // `pnpm start > ~/agentdeck.log 2>&1 &`, or a launchd agent with a StandardOutPath. The grid
+    // IS the token - the decoder three lines below is the proof - so printing it into a file
+    // created with the process umask leaves the credential sitting in the operator's home
+    // directory, in whatever backs it up, and in the log they later paste into a bug report
+    // alongside the boot warnings they meant to report. It does not read as a credential, so
+    // nobody redacts it. Nothing is holding a phone up to a log file, so there is nothing lost.
+    const home = temp("agentdeck-qr-home-");
+    const run = await boot(home, undefined, { tty: false });
+    const tokenFile = join(home, ".agentdeck", "token");
+    // The token is still issued and still stored: this is about what is printed, not about
+    // refusing to run off a terminal.
+    assert.ok(existsSync(tokenFile), "the non-TTY first run issued no token");
+    const token = readFileSync(tokenFile, "utf8").trim();
+    assert.ok(token.length > 0);
+    assert.deepEqual(qrBlockLines(run.stdout), [], "the QR was printed to a non-terminal stdout");
+    assert.deepEqual(qrBlockLines(run.stderr), []);
+    assert.ok(!run.stdout.includes(token), "the token was printed as text");
+    assert.ok(!run.stderr.includes(token));
+    // And it says enough that the operator is not left guessing where the credential went.
+    assert.ok(run.stdout.includes(tokenFile), "the token file was not named");
+    assert.match(run.stdout, /terminal/i);
+
+    // The same HOME booted on a real terminal is no longer a first run, so suppressing the code
+    // is not deferring it: the way back to one is the documented rotation, deleting the file.
+    const again = await boot(home);
+    assert.deepEqual(qrBlockLines(again.stdout), [], "a later boot reprinted the QR");
+    rmSync(tokenFile);
+    const rotated = await boot(home);
+    const fresh = readFileSync(tokenFile, "utf8").trim();
+    assert.notEqual(fresh, token);
+    assert.equal(decodeLines(qrBlockLines(rotated.stdout)), fresh);
   });
 
   void test("deleting the token file makes the next boot a first run again", async () => {

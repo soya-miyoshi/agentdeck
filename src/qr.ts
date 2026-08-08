@@ -99,8 +99,33 @@ export const qrLines = (text: string): string[] => {
  *
  * The URL is printed beside it as text, which is what plan 001 describes. It is not a secret, it
  * is typed once per device, and the app is then installed to the home screen.
+ *
+ * **`tty` is not cosmetic.** The grid is the token: anything that can read the block can decode
+ * the credential back out of it, and a block of half-blocks and colour escapes does not look like
+ * one, so nobody redacts it. When stdout is not a terminal - `pnpm start > ~/agentdeck.log`, or a
+ * launchd agent with a `StandardOutPath` - the code would be written to a file created with the
+ * process umask, kept indefinitely, and pasted into a bug report along with the boot warnings the
+ * person is actually reporting. So off a terminal we print no grid at all, only where the token
+ * is and how to get a code: nobody is holding a phone up to a log file anyway.
  */
-export const firstRunLines = (token: string, url: string, tokenFile: string): string[] => [
+export const firstRunLines = (
+  token: string,
+  url: string,
+  tokenFile: string,
+  tty = true,
+): string[] =>
+  tty
+    ? qrFirstRunLines(token, url, tokenFile)
+    : [
+        "agentdeck: first run. A bearer token was issued and stored in " + tokenFile + ".",
+        "agentdeck: stdout is not a terminal, so the QR code was NOT printed - it encodes the",
+        "token, and anything that can read this output could decode it back out.",
+        `agentdeck: open ${url} on the device and paste the token into the field. To get the`,
+        "scannable code, run the server from a terminal; delete the token file first and restart,",
+        "which issues a new token and makes that boot a first run again.",
+      ];
+
+const qrFirstRunLines = (token: string, url: string, tokenFile: string): string[] => [
   "agentdeck: first run. This is the bearer token as a QR code - scan it with the phone's camera",
   "and paste the text into the token field. The QR carries the token only, deliberately: a URL",
   "with the token in it would leave the credential in browser history and in every Referer header.",

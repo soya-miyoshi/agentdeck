@@ -416,6 +416,7 @@ export const main = async (): Promise<void> => {
       token,
       clientUrl(process.env["AGENTDECK_ORIGIN"], port),
       tokenFile,
+      process.stdout.isTTY === true,
     ))
       console.log(line);
   }
