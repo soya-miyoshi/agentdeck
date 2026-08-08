@@ -344,7 +344,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       unrecognised event **name** is logged and changes no state; and a fixture of a subagent
       finishing mid-turn does not flag the tab.
 
-- [ ] **`m3/tab-strip`** — one tab per session, status per tab, pushed not polled.
+- [x] **`m3/tab-strip`** — one tab per session, status per tab, pushed not polled.
       **Done when:** with three sessions running, the strip distinguishes working from waiting
       within a second or two of the transition.
 
