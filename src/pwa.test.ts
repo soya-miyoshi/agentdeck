@@ -65,8 +65,26 @@ interface Manifest {
   display: string;
   scope: string;
   start_url: string;
-  icons: { src: string; sizes: string; type: string; purpose?: string }[];
+  icons: { src: string; sizes: string; type: string }[];
 }
+
+/** The hashed asset of a given extension in this build, read from the page rather than guessed. */
+let names: string[] | undefined;
+const assetName = (ext: string): string => {
+  names ??= [...readFileSync(join(clientDir, "index.html"), "utf8").matchAll(/\/assets\/([^"]+)/g)]
+    .map((m) => m[1])
+    .filter((name): name is string => name !== undefined);
+  const found = names.find((name) => name.endsWith(ext));
+  assert.ok(found !== undefined, `the built page names no ${ext} asset`);
+  return found;
+};
+
+/** What the running server actually answers with, which is the only thing this file asserts on. */
+const served = async (path: string): Promise<string> =>
+  await (await fetch(`${base}${path}`)).text();
+
+/** The built module or stylesheet, fetched the way a browser reaches it. */
+const asset = async (ext: string): Promise<string> => await served(`/assets/${assetName(ext)}`);
 
 void describe("the manifest, as the server actually serves it", () => {
   void test("it is served with the type that makes a browser read it, and it parses", async () => {
@@ -81,7 +99,7 @@ void describe("the manifest, as the server actually serves it", () => {
   });
 
   void test("the page links it, and asks for the viewport the safe-area insets need", async () => {
-    const page = await (await fetch(`${base}/`)).text();
+    const page = await served("/");
     assert.match(page, /<link rel="manifest" href="\/manifest\.webmanifest"/);
     // Without `viewport-fit=cover` every `env(safe-area-inset-*)` resolves to zero and the whole
     // layout half of this item silently does nothing.
@@ -90,9 +108,7 @@ void describe("the manifest, as the server actually serves it", () => {
   });
 
   void test("every icon it names exists, at the size it claims", async () => {
-    const manifest = JSON.parse(
-      await (await fetch(`${base}/manifest.webmanifest`)).text(),
-    ) as Manifest;
+    const manifest = JSON.parse(await served("/manifest.webmanifest")) as Manifest;
     assert.ok(manifest.icons.length > 0, "a manifest with no icons is not installable");
     for (const icon of manifest.icons) {
       const res = await fetch(new URL(icon.src, base));
@@ -109,7 +125,7 @@ void describe("the manifest, as the server actually serves it", () => {
   });
 
   void test("the apple-touch-icon the page names is served too", async () => {
-    const page = await (await fetch(`${base}/`)).text();
+    const page = await served("/");
     const href = /<link rel="apple-touch-icon" href="([^"]+)"/.exec(page)?.[1];
     assert.ok(href !== undefined, "no apple-touch-icon, which is what iOS puts on the home screen");
     const res = await fetch(new URL(href, base));
@@ -144,8 +160,8 @@ void describe("the manifest, as the server actually serves it", () => {
     // The manifest is the visible one - its name goes under the home-screen icon - but the page
     // and the worker are installed alongside it and the rule is repository-wide.
     for (const file of ["manifest.webmanifest", "index.html", "sw.mjs"]) {
-      const text = readFileSync(join(clientDir, file), "utf8");
-      assert.doesNotMatch(text, /\p{Extended_Pictographic}/u, `${file} contains an emoji`);
+      const content = readFileSync(join(clientDir, file), "utf8");
+      assert.doesNotMatch(content, /\p{Extended_Pictographic}/u, `${file} contains an emoji`);
     }
   });
 });
@@ -159,7 +175,7 @@ void describe("the service worker, and what it provably cannot do", () => {
     // A worker's maximum scope is its own directory, so being at the root IS the scope claim -
     // moved under `/assets/` it could never control `/`, and no header would fix that here
     // because `/assets/` is also served `immutable`.
-    const bundle = await (await fetch(`${base}/assets/${assetName(".js")}`)).text();
+    const bundle = await asset(".js");
     assert.match(bundle, /register\(\s*["`']\/sw\.mjs["`']/);
     assert.match(bundle, /scope:\s*["`']\/["`']/);
   });
@@ -170,16 +186,16 @@ void describe("the service worker, and what it provably cannot do", () => {
     assert.doesNotMatch(cache, /immutable/);
     // The other half of the same property: the browser is told not to consult an HTTP cache for
     // this file at all when it checks for an update.
-    const bundle = await (await fetch(`${base}/assets/${assetName(".js")}`)).text();
+    const bundle = await asset(".js");
     assert.match(bundle, /updateViaCache:\s*["`']none["`']/);
   });
 
   void test("it cannot intercept /api or /ws, or anything else, because it answers nothing", async () => {
-    const text = await (await fetch(`${base}/sw.mjs`)).text();
+    const worker = await served("/sw.mjs");
     // The comments in that file argue for all of this at length, and the argument is prose. What
     // is asserted is the CODE, so strip them first rather than let the word "cache" in a sentence
     // decide whether the worker caches.
-    const source = text.replace(/\/\/.*$/gm, "");
+    const source = worker.replace(/\/\/.*$/gm, "");
     // This is the whole safety argument and it is a property of the FILE, not of a route list:
     // a worker with no `respondWith` cannot substitute a response for any request, so there is no
     // path on which it could serve a cached `/api/sessions`, a cached socket handshake, or a
@@ -198,7 +214,7 @@ void describe("the service worker, and what it provably cannot do", () => {
   void test("the worker is the whole of it - no second worker is registered anywhere", async () => {
     // `respondWith` being absent from `sw.mjs` only bounds what THAT file does. If the bundle
     // registered a second worker as well, this file's argument would cover none of it.
-    const bundle = await (await fetch(`${base}/assets/${assetName(".js")}`)).text();
+    const bundle = await asset(".js");
     const registrations = bundle.match(/serviceWorker\s*\.\s*register\s*\(/g) ?? [];
     assert.equal(registrations.length, 1, "exactly one worker is registered, and it is sw.mjs");
   });
@@ -211,7 +227,7 @@ void describe("the service worker, and what it provably cannot do", () => {
 
 void describe("the phone layout, in the built CSS", () => {
   void test("the insets are declared and used on the edges that have hardware", async () => {
-    const css = await (await fetch(`${base}/assets/${assetName(".css")}`)).text();
+    const css = await asset(".css");
     for (const side of ["top", "right", "bottom", "left"]) {
       assert.match(css, new RegExp(`env\\(safe-area-inset-${side}`), `no ${side} inset survived`);
     }
@@ -223,24 +239,13 @@ void describe("the phone layout, in the built CSS", () => {
   });
 
   void test("the touch targets survive the build at 44px or more", async () => {
-    const css = await (await fetch(`${base}/assets/${assetName(".css")}`)).text();
+    const css = await asset(".css");
     assert.match(css, /--touch-target:\s*44px/);
     // Both surfaces a thumb has to hit before anything else works: the tabs and the paste field.
     const uses = css.match(/min-height:\s*var\(--touch-target\)/g) ?? [];
     assert.ok(uses.length >= 2, `only ${String(uses.length)} control claims a touch target`);
   });
 });
-
-/** The hashed asset of a given extension in this build, read from the page rather than guessed. */
-let names: string[] | undefined;
-function assetName(ext: string): string {
-  names ??= [...readFileSync(join(clientDir, "index.html"), "utf8").matchAll(/\/assets\/([^"]+)/g)]
-    .map((m) => m[1])
-    .filter((name): name is string => name !== undefined);
-  const found = names.find((name) => name.endsWith(ext));
-  assert.ok(found !== undefined, `the built page names no ${ext} asset`);
-  return found;
-}
 
 // NOT DEMONSTRATED HERE, and not claimed: the home-screen install. Everything above is checkable
 // from the Mac; "it installs to the home screen and launches without browser chrome" needs a
