@@ -33,6 +33,8 @@ const stubTailscale = (options: {
   serveDelay?: number;
   serveStatus?: string;
   serveStatusAfter?: string;
+  serveStatusExit?: number;
+  serveStatusExitAfter?: number;
   serveExit?: number;
 }): void => {
   const status =
@@ -61,10 +63,11 @@ fi
 if [ "$1" = "serve" ] && [ "$2" = "status" ]; then
   if [ -f '${applied}' ]; then
     echo '${options.serveStatusAfter ?? options.serveStatus ?? "No serve config"}'
+    exit ${String(options.serveStatusExitAfter ?? options.serveStatusExit ?? 0)}
   else
     echo '${options.serveStatus ?? "No serve config"}'
   fi
-  exit 0
+  exit ${String(options.serveStatusExit ?? 0)}
 fi
 exit 1
 `,
@@ -72,14 +75,17 @@ exit 1
   );
 };
 
-/** A child process answering `/api/health` 200, and the port it got. Its port is printed on
- *  stdout because the parent must not pick one this test would then race for. */
-const healthResponder = async (): Promise<{ server: ChildProcess; port: string }> => {
+/** A child process answering `/api/health` 200 with agentdeck's body, and the port it got. Its port
+ *  is printed on stdout because the parent must not pick one this test would then race for.
+ *  `body` is how a DIFFERENT process holding the port is played. */
+const healthResponder = async (
+  body = '{"ok":true,"version":"0.0.0-test"}',
+): Promise<{ server: ChildProcess; port: string }> => {
   const server = spawn(
     process.execPath,
     [
       "-e",
-      "require('http').createServer((_q,s)=>{s.writeHead(200);s.end('{\"ok\":true}')})" +
+      `require('http').createServer((_q,s)=>{s.writeHead(200);s.end(${JSON.stringify(body)})})` +
         ".listen(0,'127.0.0.1',function(){process.stdout.write(String(this.address().port))})",
     ],
     { stdio: ["ignore", "pipe", "ignore"] },
@@ -174,6 +180,45 @@ void describe("the operator's serve command", () => {
     assert.doesNotMatch(invocations(), /--bg/);
   });
 
+  void test("a different process holding the port: serve is never applied", async () => {
+    // An SPA dev server answering 200 on every path is the realistic case. A 2xx is not proof the
+    // port is agentdeck's, and publishing it would put an unrelated service on the tailnet.
+    const { server, port } = await healthResponder("<!doctype html><title>vite</title>");
+    stubTailscale({
+      certDomains: DNS_NAME,
+      serveStatus: `https://${DNS_NAME} (tailnet only) |-- / proxy http://127.0.0.1:${port}`,
+    });
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
+    assert.notEqual(status, 0);
+    assert.match(out, /not agentdeck/);
+    assert.match(out, /nothing was exposed/);
+    assert.doesNotMatch(invocations(), /--bg/);
+  });
+
+  void test("a 200 without agentdeck's health body is also refused", async () => {
+    const { server, port } = await healthResponder('{"ok":true}');
+    stubTailscale({ certDomains: DNS_NAME });
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
+    assert.notEqual(status, 0);
+    assert.match(out, /agentdeck's \/api\/health body/);
+    assert.doesNotMatch(invocations(), /--bg/);
+  });
+
+  void test("unreadable `serve status` refuses instead of reading it as Funnel off", async () => {
+    // Fail-open here is the whole exposure: on a node with AllowFunnel set, the handler serve
+    // installs is public the moment it is written.
+    const { server, port } = await healthResponder();
+    stubTailscale({ certDomains: DNS_NAME, serveStatus: "", serveStatusExit: 1 });
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
+    assert.notEqual(status, 0);
+    assert.match(out, /whether Funnel is on for this node cannot be read/);
+    assert.match(out, /nothing was exposed/);
+    assert.doesNotMatch(invocations(), /--bg/);
+  });
+
   void test("no tailscale binary is a named refusal, not a stack trace", () => {
     const result = spawnSync(process.execPath, [script], {
       encoding: "utf8",
@@ -253,6 +298,17 @@ void describe("the operator's serve command", () => {
     assert.match(out, /public internet/);
     assert.match(out, new RegExp(`tailscale funnel ${port} off`));
     assert.doesNotMatch(out, /is up\. Open it on the phone/);
+  });
+
+  void test("`serve status` failing AFTER the apply names that, not a missing port", async () => {
+    const { server, port } = await healthResponder();
+    stubTailscale({ certDomains: DNS_NAME, serveStatusExitAfter: 1 });
+    const { status, out } = run(port);
+    server.kill("SIGKILL");
+    assert.notEqual(status, 0);
+    assert.match(out, /neither Funnel nor the proxy target can be confirmed/);
+    assert.doesNotMatch(out, /does not mention port/);
+    assert.match(out, /tailscale serve reset/);
   });
 
   void test("with the server up, the last thing it cannot do is the ts.net fetch", async () => {

@@ -53,7 +53,8 @@ const preflight = (tailnet) => {
 };
 
 /** A GET with its own timeout, because a proxy that accepts and never answers is exactly the
- *  failure being checked for. */
+ *  failure being checked for. `ok` requires agentdeck's own /api/health body, not just a 2xx:
+ *  any other process holding the port would otherwise pass this gate. */
 const probe = async (url) => {
   const timeout = new Promise((resolve) => {
     setTimeout(() => resolve("timeout"), TOOL_TIMEOUT_MS).unref();
@@ -61,7 +62,21 @@ const probe = async (url) => {
   try {
     const response = await Promise.race([fetch(url), timeout]);
     if (response === "timeout") return { ok: false, detail: `no answer in ${TOOL_TIMEOUT_MS}ms` };
-    return { ok: response.ok, detail: `HTTP ${String(response.status)}` };
+    if (!response.ok) return { ok: false, detail: `HTTP ${String(response.status)}` };
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return { ok: false, detail: "answered 200 but not with JSON, so it is not agentdeck" };
+    }
+    const agentdeck =
+      typeof body === "object" &&
+      body !== null &&
+      body.ok === true &&
+      typeof body.version === "string";
+    if (!agentdeck)
+      return { ok: false, detail: "answered 200 but not with agentdeck's /api/health body" };
+    return { ok: true, detail: `HTTP ${String(response.status)}` };
   } catch (error) {
     return { ok: false, detail: String(error) };
   }
@@ -97,6 +112,16 @@ if (problems.length > 0) {
 }
 
 const before = await runTool(binary, ["serve", "status"], TOOL_TIMEOUT_MS);
+// An unreadable `serve status` is not "Funnel is off": the funnel gate would fail open and put a
+// public handler on a node with AllowFunnel set.
+if (before.killed || before.code !== 0) {
+  say(
+    `\`tailscale serve status\` ${before.killed ? "did not exit" : "failed"}, so whether Funnel is ` +
+      `on for this node cannot be read: ${before.text.trim()}`,
+  );
+  say("NOT running `tailscale serve --bg`: nothing was exposed.");
+  process.exit(1);
+}
 const funnelBefore = funnelLine(before.text);
 if (funnelBefore !== undefined) {
   say(
@@ -142,6 +167,11 @@ if (serve.code !== 0)
   await exitExposed(`\`tailscale serve --bg ${port}\` failed: ${serve.text.trim()}`);
 
 const configured = await runTool(binary, ["serve", "status"], TOOL_TIMEOUT_MS);
+if (configured.killed || configured.code !== 0)
+  await exitExposed(
+    `serve was applied but \`tailscale serve status\` ${configured.killed ? "did not exit" : "failed"}, ` +
+      `so neither Funnel nor the proxy target can be confirmed: ${configured.text.trim()}`,
+  );
 const funnelAfter = funnelLine(configured.text);
 if (funnelAfter !== undefined)
   await exitExposed(
