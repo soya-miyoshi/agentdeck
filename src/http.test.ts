@@ -311,6 +311,11 @@ void describe("a hook that authenticates routes its event into the session's sta
   let hookBase: string;
   let hookRegistry: Registry;
   let stream: SessionStream;
+  // Every state this route announced onward, in order. A hook exists to arrive AT the transition
+  // (plan 002), so a route that only wrote the state down and left the strip to ask for it later
+  // is the poll this item refuses - and that failure is invisible in the response body, which is
+  // identical either way.
+  const declared: { id: string; state: string }[] = [];
 
   before(async () => {
     const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
@@ -331,6 +336,7 @@ void describe("a hook that authenticates routes its event into the session's sta
         origin: undefined,
         probe: async () => await Promise.resolve(true),
         streamFor: () => stream,
+        onStateDeclared: (id, state) => declared.push({ id, state }),
       }),
     );
     await new Promise<void>((done) => hookServer.listen(0, "127.0.0.1", done));
@@ -377,6 +383,27 @@ void describe("a hook that authenticates routes its event into the session's sta
     assert.equal(stream.state(), "waiting", "the previous statement must still stand");
   });
 
+  void test("the state it declared is pushed onward, naming the session it belongs to", async () => {
+    const [session] = await hookRegistry.list();
+    assert.ok(session);
+    const before = declared.length;
+    await post({ hook_event_name: "Stop" });
+    assert.deepEqual(
+      declared.slice(before),
+      [{ id: session.id, state: "waiting" }],
+      "the hook wrote the state down and told nobody: the strip can only learn this by asking",
+    );
+  });
+
+  void test("an event that changes no state announces nothing", async () => {
+    // Repeats and non-events are not news. A frame per hook POST would make the strip's traffic a
+    // function of how chatty the agent is rather than of how often it changed what a person sees.
+    await post({ hook_event_name: "Stop" });
+    const before = declared.length;
+    assert.deepEqual(await post({ hook_event_name: "PreCompact" }), { ok: true, state: null });
+    assert.deepEqual(declared.slice(before), []);
+  });
+
   void test("a body that is not JSON is 400 rather than 500", async () => {
     const [session] = await hookRegistry.list();
     assert.ok(session);
@@ -386,6 +413,49 @@ void describe("a hook that authenticates routes its event into the session's sta
       body: "not json",
     });
     assert.equal(response.status, 400);
+  });
+});
+
+// The push is a broadcast to every open socket, so a POST that can move a tab without proving it
+// is the session it claims to be is a way to make somebody's phone say the wrong session needs
+// them. The real Registry is used here rather than the open one above, because the secret check is
+// the thing under test.
+void describe("a hook that does not authenticate moves nothing and tells nobody", () => {
+  void test("a wrong secret is 401 and announces no state", async () => {
+    const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
+    const allowlist = new CwdAllowlist(["/workspace/agentdeck"]);
+    const closedRegistry = new Registry(fakeTmux(), profiles, allowlist);
+    const { session } = await closedRegistry.create("/workspace/agentdeck", "claude");
+    const declared: string[] = [];
+    const closedServer = createServer(
+      createHandler({
+        registry: closedRegistry,
+        profiles,
+        allowlist,
+        token: TOKEN,
+        version: "0.0.0-test",
+        origin: undefined,
+        probe: async () => await Promise.resolve(true),
+        onStateDeclared: (_id, state) => declared.push(state),
+      }),
+    );
+    await new Promise<void>((done) => closedServer.listen(0, "127.0.0.1", done));
+    const closedBase = `http://127.0.0.1:${String((closedServer.address() as AddressInfo).port)}`;
+
+    const response = await fetch(`${closedBase}/api/hooks/${session.id}`, {
+      method: "POST",
+      headers: { "x-agentdeck-secret": "not-the-secret", "content-type": "application/json" },
+      body: JSON.stringify({ hook_event_name: "Stop" }),
+    });
+    assert.equal(response.status, 401);
+    assert.deepEqual(declared, []);
+    assert.equal((await closedRegistry.list())[0]?.state, "idle", "the state moved anyway");
+
+    await new Promise<void>((done) =>
+      closedServer.close(() => {
+        done();
+      }),
+    );
   });
 });
 

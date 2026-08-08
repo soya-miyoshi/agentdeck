@@ -56,8 +56,8 @@ interface Client {
   take: (count: number) => Promise<Frame[]>;
 }
 
-const open = async (protocols: string | string[] = TOKEN): Promise<Client> => {
-  const socket = new WebSocket(url, protocols, { origin: ORIGIN });
+const open = async (protocols: string | string[] = TOKEN, target = url): Promise<Client> => {
+  const socket = new WebSocket(target, protocols, { origin: ORIGIN });
   const queue: Frame[] = [];
   let notify: (() => void) | undefined;
 
@@ -835,5 +835,93 @@ void describe("one attach cannot be parked behind every other attach's failure",
       last < 500,
       `the last client was parked ${String(last)}ms, which is one build per client`,
     );
+  });
+});
+
+// A state frame is the strip's only source of a status change, so who receives one decides
+// whether the strip can be right about a session nobody is looking at. Plan 002: the strip must
+// be able to say "this one needs you" without attaching to every session at once.
+void describe("a state change goes to every open socket, not only the attached ones", () => {
+  let own: Server;
+  let ownUrl: string;
+  let handle: ReturnType<typeof attachWebSocketServer>;
+
+  before(async () => {
+    const s1 = new SessionStream({ sessionId: "s1" });
+    own = createServer();
+    handle = attachWebSocketServer(own, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: (id) => (id === "s1" ? s1 : undefined),
+      captureHistory: async () => await Promise.resolve("scrollback\n"),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
+      sendInput: () => undefined,
+      applyPaneSize: () => undefined,
+    });
+    await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
+    ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
+  });
+
+  after(() => {
+    handle.close();
+    own.close();
+  });
+
+  void test("a socket that has attached nothing is still told", async () => {
+    // The strip's own socket. It attached to no session at all, which is exactly the client this
+    // item is about: one tab is open in the terminal pane and the other two are rows in a strip.
+    const client = await open(TOKEN, ownUrl);
+    handle.pushState("s2", "waiting");
+    assert.deepEqual(await client.next(), { t: "state", sessionId: "s2", state: "waiting" });
+    client.socket.close();
+  });
+
+  void test("a socket attached to one session hears about another", async () => {
+    const client = await open(TOKEN, ownUrl);
+    client.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+    // snapshot, then the state answering the attach.
+    await client.take(2);
+
+    handle.pushState("s2", "waiting");
+    assert.deepEqual(await client.next(), { t: "state", sessionId: "s2", state: "waiting" });
+    client.socket.close();
+  });
+
+  void test("every open socket gets it, so a second phone is not left behind", async () => {
+    const clients = await Promise.all([open(TOKEN, ownUrl), open(TOKEN, ownUrl)]);
+    handle.pushState("s3", "working");
+    for (const client of clients) {
+      assert.deepEqual(await client.next(), { t: "state", sessionId: "s3", state: "working" });
+    }
+    for (const client of clients) client.socket.close();
+  });
+
+  void test("an exit carries its code, and a state without one does not invent it", async () => {
+    // `exited 1` is an answer to "did it finish or did I lose it", and the absent field must stay
+    // absent rather than becoming a 0 the strip would render as a clean exit.
+    const client = await open(TOKEN, ownUrl);
+    handle.pushState("s2", "exited", 137);
+    assert.deepEqual(await client.next(), {
+      t: "state",
+      sessionId: "s2",
+      state: "exited",
+      exitCode: 137,
+    });
+    handle.pushState("s2", "idle");
+    assert.deepEqual(await client.next(), { t: "state", sessionId: "s2", state: "idle" });
+    client.socket.close();
+  });
+
+  void test("a closed socket is not written to", async () => {
+    const client = await open(TOKEN, ownUrl);
+    await new Promise<void>((done) => {
+      client.socket.once("close", () => done());
+      client.socket.close();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // A push after every client has gone must be a no-op rather than a throw out of the hub's
+    // sync, which is a timer callback with nothing above it to catch.
+    assert.doesNotThrow(() => handle.pushState("s2", "waiting"));
   });
 });

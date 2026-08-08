@@ -83,6 +83,8 @@ const fakePty = (sessionId: string) => {
 
 const build = (onRefresh: () => void = () => undefined) => {
   const { tmux, die, sessions, plant } = fakeTmux(onRefresh);
+  /** Everything the hub said out loud, in order, so a repeat or a silence is countable. */
+  const announced: { id: string; state: string; exitCode?: number }[] = [];
   const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
   const allowlist = new CwdAllowlist(["/workspace/a", "/workspace/b"]);
   const registry = new Registry(tmux, profiles, allowlist);
@@ -97,6 +99,8 @@ const build = (onRefresh: () => void = () => undefined) => {
     // that is drawing on its own at the same time.
     repaintQuietMs: 10,
     repaintMaxMs: 100,
+    onState: (id, state, exitCode) =>
+      announced.push({ id, state, ...(exitCode === undefined ? {} : { exitCode }) }),
     createPty: (sessionId) => {
       created.push(sessionId);
       const pty = fakePty(sessionId);
@@ -104,7 +108,7 @@ const build = (onRefresh: () => void = () => undefined) => {
       return pty;
     },
   });
-  return { hub, registry, tmux, die, created, ptys, sessions, plant };
+  return { hub, registry, tmux, die, created, ptys, sessions, plant, announced };
 };
 
 void describe("the allowlist bounds the session set, not only what can be created", () => {
@@ -393,5 +397,101 @@ void describe("shutdown", () => {
     hub.disposeAll();
     assert.equal(hub.size, 0);
     assert.equal(ptys.get(a.session.id)?.disposed, true);
+  });
+});
+
+// The strip is pushed, not polled (plan 002), and the hub is where the inferred half of that push
+// is decided. What matters here is not that a frame CAN be produced but when one is: a frame per
+// sync is a poll with the timer moved to the server, and no frame on a change is the stale tab the
+// item exists to remove.
+void describe("a state change is announced, and nothing else is", () => {
+  void test("each session is announced once when it first appears", async () => {
+    const { hub, registry, announced } = build();
+    const a = await registry.create("/workspace/a", "claude");
+    const b = await registry.create("/workspace/b", "claude");
+    await hub.sync();
+    assert.deepEqual(
+      [...announced].sort((x, y) => x.id.localeCompare(y.id)),
+      [
+        { id: a.session.id, state: "idle" },
+        { id: b.session.id, state: "idle" },
+      ].sort((x, y) => x.id.localeCompare(y.id)),
+    );
+  });
+
+  void test("a sync that changed nothing says nothing", async () => {
+    // The one assertion that separates this design from a poll. A frame every sync would keep a
+    // phone's radio awake for news that is always "no news", and would make the strip's traffic a
+    // function of the sync interval rather than of what the agents did.
+    const { hub, registry, announced } = build();
+    await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    announced.length = 0;
+    await hub.sync();
+    await hub.sync();
+    assert.deepEqual(announced, []);
+  });
+
+  void test("output makes it working, once, and staying working is not re-announced", async () => {
+    const { hub, registry, ptys, announced } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    announced.length = 0;
+
+    ptys.get(session.id)?.stream.write(Buffer.alloc(200, 0x61));
+    await hub.sync();
+    ptys.get(session.id)?.stream.write(Buffer.alloc(200, 0x61));
+    await hub.sync();
+
+    assert.deepEqual(announced, [{ id: session.id, state: "working" }]);
+  });
+
+  void test("a session with no attachment is announced from the registry, code and all", async () => {
+    // `exited 137` is the answer to "did it finish, or did I lose it", so the code travels with
+    // the state rather than being left for a fetch. There is no stream to read here - the hub
+    // never attaches to a dead pane - so the registry's reading is the only one there is.
+    //
+    // KNOWN GAP, not asserted here because it is the implementation's and not this test's: a
+    // session that dies while the hub IS attached keeps its stream, and the stream still says
+    // `idle`, so no exit is announced at all until something refetches the list. See the report
+    // for this item.
+    const { hub, registry, die, announced } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    die(session.id, "137");
+    await hub.sync();
+    assert.deepEqual(announced, [{ id: session.id, state: "exited", exitCode: 137 }]);
+  });
+
+  void test("a session that goes away and comes back is announced again", async () => {
+    // The suppression is per live session, so forgetting one that left is what stops a recreated
+    // session from being silent forever on the state it happens to come back in.
+    const { hub, registry, tmux, announced } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    announced.length = 0;
+
+    await tmux.kill(session.id);
+    await hub.sync();
+    await registry.create("/workspace/a", "claude");
+    await hub.sync();
+
+    assert.deepEqual(announced, [{ id: session.id, state: "idle" }]);
+  });
+
+  void test("a hook's statement goes out through the same funnel, and repeats do not", async () => {
+    // src/http.ts calls this the moment a hook POST lands, which is the difference between a
+    // transition seen in milliseconds and one seen at the next sync. The dedupe has to hold across
+    // the two sources or a chatty agent restating `waiting` becomes a frame per statement.
+    const { hub, registry, ptys, announced } = build();
+    const { session } = await registry.create("/workspace/a", "claude");
+    await hub.sync();
+    announced.length = 0;
+
+    ptys.get(session.id)?.stream.declare("waiting");
+    hub.announce(session.id, "waiting");
+    hub.announce(session.id, "waiting");
+    await hub.sync();
+
+    assert.deepEqual(announced, [{ id: session.id, state: "waiting" }]);
   });
 });

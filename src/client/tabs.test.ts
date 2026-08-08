@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
 import type { AgentSummary } from "../agent-profiles.ts";
@@ -128,5 +129,32 @@ void describe("which tab stays selected when the list changes", () => {
 
   void test("no tabs at all is no selection, not an empty string", () => {
     assert.equal(selectTab([], "a"), undefined);
+  });
+});
+
+// `toTabs` deciding the flag is only half of "visibly distinct": a strip that computed it and
+// never rendered it would pass every test above while looking exactly like a healthy tab on the
+// phone, which is the failure this item names. There is no DOM here and no renderer in the
+// dependency budget, so the template itself is read - the cheapest thing that fails if the flag
+// stops reaching the screen.
+void describe("the strip renders the flag rather than only computing it", () => {
+  const template = readFileSync(new URL("./TabStrip.vue", import.meta.url), "utf8")
+    // Comments explain the decision; they do not draw anything. Reading them as evidence would
+    // let the rendering be deleted and leave the prose behind, which is the worst of both.
+    .replace(/<!--[\s\S]*?-->/g, "");
+
+  void test("a tab that lost waiting detection is drawn differently", () => {
+    assert.match(template, /v-if="tab\.waitingDetectionLost"/);
+    assert.match(template, /deaf: tab\.waitingDetectionLost/);
+  });
+
+  void test("it says so in words, not in a shade of grey", () => {
+    // A colour alone is not a difference a person can name, and on the phone it is the difference
+    // between two greys. The words are what let somebody act on it.
+    assert.match(template, /no waiting alerts/);
+  });
+
+  void test("no emojis, here as everywhere", () => {
+    assert.doesNotMatch(template, /\p{Extended_Pictographic}/u);
   });
 });
