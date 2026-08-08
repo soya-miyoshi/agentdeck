@@ -1,8 +1,15 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { parseProfiles } from "./agent-profiles.ts";
@@ -10,6 +17,7 @@ import { installHookSettings } from "./claude-hooks.ts";
 import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
+import { clientUrl, firstRunLines } from "./qr.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
@@ -60,13 +68,60 @@ export const defaultTokenFile = (): string => join(homedir(), ".agentdeck", "tok
  * agent's terminal. A prefix test is right here even though `CwdAllowlist.allows` refuses one:
  * membership is the question there, containment is the question here.
  */
+/**
+ * The path a write to `p` would actually land on, symlinks followed.
+ *
+ * `resolve` normalises `.` and `..` and stops there, so a lexical comparison is blind to a symlink
+ * - and `writeFileSync` is not: it follows. Measured before this was here: a symlink at
+ * `~/.agentdeck/token` pointing into `dist/client` passed both refusals below, because its lexical
+ * path is nowhere near either, and the first boot then created a real 0600 file inside the
+ * publish root, served at a URL equal to its filename to anything on the tailnet with no token at
+ * all. `src/static.ts` uses `realpath` for exactly this reason; these checks did not.
+ *
+ * The file itself usually does not exist yet - it is created on first run - so the DIRECTORY is
+ * what gets resolved and the basename is rejoined. A missing directory resolves as far as it can.
+ */
+const wouldLandOn = (p: string, hops = 0): string => {
+  const full = resolve(p);
+  // The whole path, when everything on it exists. This is the case a planted symlink whose target
+  // already exists takes.
+  try {
+    return realpathSync(full);
+  } catch {
+    // Falls through: something on the path does not exist yet, which is the ordinary first run.
+  }
+  // The LEAF may still be a symlink even when its target does not exist - which is exactly how the
+  // bypass was planted, since the file the link points at is the one the first boot is about to
+  // create. `realpath` of the directory cannot see that: the link is not in the directory's path.
+  try {
+    if (lstatSync(full).isSymbolicLink() && hops < 32) {
+      return wouldLandOn(resolve(dirname(full), readlinkSync(full)), hops + 1);
+    }
+  } catch {
+    // Not a link, or gone between the two calls.
+  }
+  // Neither exists, so resolve as much of the parent chain as does.
+  const parts: string[] = [basename(full)];
+  let dir = dirname(full);
+  for (;;) {
+    try {
+      return join(realpathSync(dir), ...parts.reverse());
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return full;
+      parts.push(basename(dir));
+      dir = parent;
+    }
+  }
+};
+
 export const tokenInsideAllowlist = (
   tokenPath: string,
   allowedPaths: readonly string[],
 ): string | undefined => {
-  const token = resolve(tokenPath);
+  const token = wouldLandOn(tokenPath);
   return allowedPaths.find((allowed) => {
-    const root = resolve(allowed);
+    const root = wouldLandOn(allowed);
     return token === root || token.startsWith(`${root}/`);
   });
 };
@@ -305,6 +360,26 @@ export const main = async (): Promise<void> => {
     console.error("agentdeck: reap at boot failed, continuing:", error);
   }
 
+  // Asked before `loadToken`, which is the call that creates the file. "First run" is the run that
+  // issues the token, and it is the only run where a QR is worth printing: on every later boot the
+  // devices already hold it, and reprinting a live credential into a terminal's scrollback on
+  // every restart is how it ends up in a screen recording. Rotating is deleting the file, which
+  // makes the next boot a first run again.
+  // Asked the way `loadToken` asks it, not with `existsSync`. The two disagreed on one input and
+  // it is the dangerous one: a file that exists but is empty - a truncated write, an interrupted
+  // first boot, a `> ~/.agentdeck/token`, an editor that saved nothing, a restore that produced a
+  // stub. `loadToken` treats that as a first run and mints a NEW token, silently signing out every
+  // device holding the old one, while `existsSync` said "not a first run" so nothing was printed:
+  // no QR, and not even the line naming the file. A rotation nobody asked for and nobody was told
+  // about. One question, one answer.
+  const firstRun = ((): boolean => {
+    try {
+      return readFileSync(tokenFile, "utf8").trim() === "";
+    } catch {
+      return true;
+    }
+  })();
+
   let token: string;
   try {
     token = loadToken(tokenFile);
@@ -400,6 +475,18 @@ export const main = async (): Promise<void> => {
   console.log(
     `agentdeck: ${String(profiles.size)} agent profile(s), ${String(mounts.length)} mount(s)`,
   );
+
+  // Last, after the boot warnings, so the QR is what is on the screen when a person turns to the
+  // terminal with a phone in their hand rather than something they have to scroll back to.
+  if (firstRun) {
+    for (const line of firstRunLines(
+      token,
+      clientUrl(process.env["AGENTDECK_ORIGIN"], port),
+      tokenFile,
+      process.stdout.isTTY === true,
+    ))
+      console.log(line);
+  }
 
   const shutdown = (): void => {
     clearInterval(syncTimer);

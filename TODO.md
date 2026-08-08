@@ -414,7 +414,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       special-cased because there is no code path that could treat anything specially. It exists
       for installability, and to `skipWaiting`/`claim` so it can never sit a version behind.
 
-- [ ] **`m4/token-qr`** — QR printed to the terminal on first run beside the URL, paste field in
+- [x] **`m4/token-qr`** — QR printed to the terminal on first run beside the URL, paste field in
       the client, `localStorage`, and the rejected-token path from M2 wired to it.
       **Done when:** the token gets onto a phone without being typed by hand, and survives
       backgrounding the app.

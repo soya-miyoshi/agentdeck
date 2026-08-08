@@ -1160,3 +1160,53 @@ implying otherwise, with the steps a person with a phone must take.
   item once the phone is actually in use.
 - **The origin is whole-app.** Inherited by `m4/tailscale-serve`.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/token-qr - final whole-codebase pass - 2026-08-08
+
+The QR carries the token ALONE, not a URL containing it: a scanned `?token=...` would sign the
+phone in with one tap and leave the credential in browser history, in the `Referer` of every
+request the page makes, and in the log of anything in front of the server. The encoder's output is
+verified by decoding it back rather than by eyeballing blocks. The sixth and last runtime
+dependency is spent here, which plan 003 line 218 pre-authorises.
+
+### Findings
+
+- [medium] src/server.ts:66 - **Both token-placement refusals compared lexical paths, so a symlink
+  smuggled the token into the unauthenticated publish root.** `resolve` normalises `.` and `..` and
+  stops there; `writeFileSync` follows links. **Measured on this machine:** a symlink at
+  `~/.agentdeck/token` pointing into `dist/client` passed both refusals, the server started
+  normally, and a real 0600 file appeared in the publish root - served at a URL equal to its
+  filename to any tailnet device with no bearer token. That is a same-uid capability - planting a
+  link in `~/.agentdeck/` - escalated into unauthenticated network read, which the README does not
+  concede anywhere. `static.ts` had used `realpath` for exactly this reason since it was written.
+  Status: FIXED in 1c67166, with a boot test. Worth recording that the first attempt was wrong:
+  realpathing the containing directory does not follow a link AT the leaf, and the leaf is where it
+  was planted - re-measured, still leaking, then fixed properly.
+
+- [medium] src/server.ts:314 - **Two disagreeing definitions of "first run", and the disagreement
+  rotated the credential in silence.** `loadToken` treats an existing but EMPTY token file as a
+  first run and mints a new token; the print gate used `existsSync`, which said the file was there.
+  A truncated write, an interrupted boot, a `> ~/.agentdeck/token` or an editor that saved nothing
+  therefore signed out every device holding the old token and printed NOTHING - no QR, not even the
+  line naming the file. Status: FIXED in 1c67166: one question, asked the way `loadToken` asks it.
+
+- [medium] src/server.ts:414 - **The token gains a second home the boot refusals cannot reach:
+  terminal scrollback.** Both refusals check where the FILE is. `capture-pane -p -e` preserves the
+  escape sequences the QR is drawn with, and agentdeck runs that on every cold attach, so a QR
+  printed into a tmux pane is recoverable verbatim - as it is from `pipe-pane`, `script`,
+  Terminal.app and iTerm2 logging, or a screen recording. Running the server inside tmux is the
+  ordinary way to keep it alive on a Mac. The `isTTY` gate is well-reasoned and covers a pipe and a
+  launchd log, but a recorded TTY is still a TTY. The branch also ships a full QR decoder in
+  `src/fixtures/`, which shortens "there are coloured blocks in this scrollback" to a three-line
+  script. Status: DOCUMENTED in the README rather than fixed - there is no way to print a QR that a
+  recorder cannot capture. The operator is told to treat a recorded first run as a disclosure and
+  rotate.
+
+### Open after this iteration
+
+- **A recorded first run discloses the token**, and rotation is the only answer. Stated, not
+  solved.
+- **No token expiry and no revocation list**, carried from `m4/pwa`.
+- **Same-uid**, unchanged.

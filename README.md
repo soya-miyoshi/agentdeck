@@ -84,7 +84,8 @@ the next install), any lint, format or toolchain config the host tool discovers 
 JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
 host, and auto-discovers more filenames than the one we happen to have) —
 `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `src/client/public/` (Vite copies it verbatim into `dist/client`,
+the suite already shells out), `src/fixtures/` (imported by test files, so `node --test` runs it
+too even though the glob above does not match it), `src/client/public/` (Vite copies it verbatim into `dist/client`,
 which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
 there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
 `.git/config`, `.git/hooks/`
@@ -110,6 +111,27 @@ the root of a working tree — where an agent's `ls -la` or `grep -rn token .` m
 place it must not be. It lives in `~/.agentdeck/token`, created 0600 on first run;
 `AGENTDECK_TOKEN_FILE` moves it. **The server refuses to start if that path resolves inside an
 allowlist entry**, which is the rule made executable rather than written down three times.
+
+The run that creates that file — first run, and every run after the file is deleted — prints the
+token to the terminal as a QR code, with the URL to open beside it as text. Scan the code with the
+phone's camera and paste the result into the app's token field; the field is also there for typing
+it by hand if the camera is not to hand. **The QR carries the token alone and not a URL containing
+it**: a scanned `?token=...` would sign the phone in with one tap and leave the credential in
+browser history, in the `Referer` header of every request the page makes, and in the log of
+anything sitting in front of the server. The URL printed beside it is `AGENTDECK_ORIGIN` when that
+is set, and the loopback address the server is actually listening on when it is not — this process
+cannot know whether a `tailscale serve` exists in front of it, so it does not claim one.
+
+**That printed block is the credential, so do not do the first run in a pane that is being
+recorded.** The token has a second home the two boot refusals cannot reach - they check where the
+FILE is, and this is scrollback. `capture-pane -p -e` preserves the escape sequences the QR is made
+of, and agentdeck itself runs that on every cold attach, so a QR printed into a tmux pane comes back
+verbatim; the same goes for `pipe-pane`, `script`, Terminal.app and iTerm2 session logging, and a
+screen recording. Starting the server inside tmux is the ordinary way to keep it alive on a Mac,
+which is exactly when this bites. agentdeck prints nothing when stdout is not a terminal, which
+covers a pipe and a launchd log file, but a TTY that is being recorded is still a TTY. If the first
+run happened somewhere that keeps a transcript, treat the token as disclosed: delete the file,
+restart, and re-scan on each device.
 
 The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
 attaches to and streams the sessions whose directory is on it, and ignores everything else on the
@@ -335,7 +357,7 @@ now, which makes the review below the only control rather than the second of two
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `src/fixtures/`, `scripts/`, `.claude/`,
 `.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
 points at. That last one is
 the most direct host-execution surface of the lot and had been on none of these lists: a profile's
