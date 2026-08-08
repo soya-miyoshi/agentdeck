@@ -84,7 +84,8 @@ the next install), any lint, format or toolchain config the host tool discovers 
 JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
 host, and auto-discovers more filenames than the one we happen to have) —
 `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `src/client/public/` (Vite copies it verbatim into `dist/client`,
+the suite already shells out), `src/fixtures/` (imported by test files, so `node --test` runs it
+too even though the glob above does not match it), `src/client/public/` (Vite copies it verbatim into `dist/client`,
 which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
 there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
 `.git/config`, `.git/hooks/`
@@ -345,7 +346,7 @@ now, which makes the review below the only control rather than the second of two
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
+`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `src/fixtures/`, `scripts/`, `.claude/`,
 `.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
 points at. That last one is
 the most direct host-execution surface of the lot and had been on none of these lists: a profile's

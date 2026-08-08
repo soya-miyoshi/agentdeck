@@ -199,7 +199,10 @@ can edit.
 of them looks like a build file.** `src/**/*.test.ts` is what `pnpm test` hands to `node --test`,
 which executes it as code — the suite already shells out (`execFileSync("/bin/sh", ...)`) and
 already prepends `node_modules/.bin` to `PATH`, so one more shell-out added to an existing helper
-is unremarkable in a diff nobody expects to contain an attack. `.mise*.toml` documents `mise install`
+is unremarkable in a diff nobody expects to contain an attack. `src/fixtures/` is the same surface
+one step out of sight: the glob matches test files only, but `node --test` executes what they
+import at module scope too, so a helper there runs on the host at every `pnpm test` while sitting
+outside the enumeration a reviewer is working from. `.mise*.toml` documents `mise install`
 and mise executes `[env] _.source` and `[tasks]` entries on the host — note the glob, because mise
 auto-discovers `mise.toml`, `.mise.toml`, `mise.local.toml`, `.config/mise/config.toml` and file
 tasks under `mise-tasks/` or `.mise/tasks/`, so enumerating the one filename we happen to have
@@ -226,7 +229,7 @@ never with the host toolchain (the README's Toolchain section states this as the
 require `git status` and `git diff` to be clean of unreviewed edits to `Dockerfile`,
 `docker-compose.yml`, `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
 `.mise*.toml`, `mise-tasks/`,
-`src/**/*.test.ts`, `.claude/` and `.github/workflows/` before any `--build`, and before any host
+`src/**/*.test.ts`, `src/fixtures/`, `.claude/` and `.github/workflows/` before any `--build`, and before any host
 toolchain run or agent
 session taken as the exception. **That enumeration is a floor rather than the job**: every one of
 these tools discovers its own config, so the exception requires reading every added or modified
