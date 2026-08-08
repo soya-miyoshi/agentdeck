@@ -1,5 +1,21 @@
+/*
+ * The insets are applied by the components that own an edge (`TabStrip`, `App`'s pane area,
+ * `TokenGate`) rather than as one padding on `body`, and that is not a refactor for tidiness.
+ * Padding the body inserts a band of the body's own colour along every edge, so once the app runs
+ * without browser chrome the notch and the home indicator sit on a strip that is a visibly
+ * different colour from the row beneath them. Insetting the CONTENT and letting each element's
+ * background run to the edge is what makes it look like one surface - and it is the same
+ * mechanism either way: `viewport-fit=cover` in index.html is what gives these a non-zero value.
+ */
 :root {
   color-scheme: dark;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  /* A one-handed thumb, not a mouse pointer. Every control the phone has to hit is at least this
+     tall, which is the smaller of the two published minimums (Apple 44pt, Android 48dp). */
+  --touch-target: 44px;
 }
 
 html,
@@ -17,8 +33,4 @@ body {
     system-ui,
     -apple-system,
     sans-serif;
-  /* The phone is the target device, and the strip sits under the notch without this. */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
-  box-sizing: border-box;
 }

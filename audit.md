@@ -1112,3 +1112,51 @@ here.
 - **No `execFile` timeout on the tmux path**, now reachable from the upgrade handler too.
 - **No cap on concurrent WebSocket connections**, and the upgrade handler accepts any path.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/pwa - final whole-codebase pass - 2026-08-08
+
+Manifest, hand-written service worker, safe-area insets and touch targets, checked against the real
+build served by the real server. **The install itself is NOT demonstrated** - it needs a phone, and
+the only other tailnet device has been offline for five days - and the README says so rather than
+implying otherwise, with the steps a person with a phone must take.
+
+### Findings
+
+- [high] src/client/vite.config.ts:11 - **`src/client/public/` is a build-time route into the
+  unauthenticated publish root, and the copy dereferences symlinks.** Vite's `publicDir` copies it
+  verbatim into `dist/client`, which this server serves with no bearer token, and `copyDir` is
+  `statSync` + `copyFileSync` - both follow symlinks. **Measured on this machine:** a symlink at
+  `src/client/public/icons/planted.png` pointing outside the repo produced a REGULAR FILE in
+  `dist/client` holding that file's bytes, readable over HTTP. Pointed at `~/.agentdeck/token` it
+  hands out the credential that starts sessions in every allowed repository. Three controls miss
+  it: `static.ts` checks containment against the real root and by serve time it is a real file
+  inside that root; the purpose-built "symlink planted inside the REAL build output" test only
+  catches symlinks that survive as symlinks; and the boot guard checks where the token and profiles
+  files are configured to be, never what is in the publish root. The directory was also named in
+  none of the lists review is directed at. Status: FIXED in 94f9ea9. A test walks the directory and
+  fails on any `lstat` that is a symlink - verified to catch a planted one - and the directory is
+  named in `containment.test.ts`, the README's toolchain exception and plan 005, under its own
+  heading: not host-executed, host-PUBLISHED.
+
+- [medium] src/client/public/manifest.webmanifest:6 - `scope: "/"` plus a root-scoped worker claims
+  the whole origin, and `localStorage` is keyed by origin rather than path. `tailscale serve
+--set-path` mounting a sibling service on the same `.ts.net` hostname is the ordinary way to run
+  two things on one machine, and that sibling would be able to read the token. Status: DOCUMENTED
+  in the README's install section, with what has to change if a sibling is ever wanted. Not
+  enforceable in code from here - it is a deployment decision `m4/tailscale-serve` inherits.
+
+- [medium] src/client/index.html:18 - Installing makes the token permanent. An installed iOS web
+  app gets its own storage partition and is exempt from Safari's eviction of script-writable
+  storage, so the token lives until the app is deleted - and it exists in two partitions, since the
+  installed app cannot see the one pasted into Safari. The server has no expiry and no revocation
+  list. Status: DOCUMENTED. The only invalidation is deleting the token file and restarting, which
+  revokes for every device at once; that is now stated rather than discovered.
+
+### Open after this iteration
+
+- **No token expiry and no revocation.** Installing sharpens it rather than causing it. Worth an
+  item once the phone is actually in use.
+- **The origin is whole-app.** Inherited by `m4/tailscale-serve`.
+- **Same-uid**, unchanged.

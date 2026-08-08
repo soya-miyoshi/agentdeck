@@ -44,7 +44,9 @@ const submit = (): void => {
   gap: 0.75rem;
   max-width: 26rem;
   margin: 3rem auto;
-  padding: 1rem;
+  /* The gate is the whole page before a token exists, so it owns every edge itself. */
+  padding: calc(1rem + var(--safe-top)) calc(1rem + var(--safe-right)) calc(1rem + var(--safe-bottom))
+    calc(1rem + var(--safe-left));
 }
 h1 {
   margin: 0;
@@ -56,7 +58,7 @@ h1 {
 }
 .field,
 button {
-  min-height: 44px;
+  min-height: var(--touch-target);
   padding: 0 0.75rem;
   border: 1px solid #2a2e35;
   border-radius: 6px;

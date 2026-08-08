@@ -84,7 +84,10 @@ the next install), any lint, format or toolchain config the host tool discovers 
 JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
 host, and auto-discovers more filenames than the one we happen to have) —
 `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `.claude/`, `.github/workflows/`, `.git/config`, `.git/hooks/`
+the suite already shells out), `src/client/public/` (Vite copies it verbatim into `dist/client`,
+which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
+there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
+`.git/config`, `.git/hooks/`
 and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the
 toolchain runs agent-authored code on the Mac with your identity. `.claude/` is the one with no
 build step in front of it: `.claude/skills/*/SKILL.md`,
@@ -207,6 +210,62 @@ Automated, the same path is `src/client/end-to-end.test.ts`: the real client mod
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
 the two pieces that need a DOM.
 
+## Installing to the home screen
+
+The built client ships a manifest (`/manifest.webmanifest`, `display: standalone`), its icons, and
+a service worker at `/sw.mjs`. `src/pwa.test.ts` checks all of that against the real build served by
+the real server: the manifest parses and is served as `application/manifest+json`, every icon it
+names exists at the size it claims, the worker is served from the root as JavaScript with a
+`no-cache` header, and the safe-area insets and 44px touch targets survive into the built CSS.
+
+**The install itself has not been demonstrated.** It needs a phone, and the only other tailnet
+device has been offline. Nothing in this repository has been observed launching without browser
+chrome. To confirm the remaining half, on an iPhone:
+
+1. Finish `m4/tailscale-serve` first. Safari will not register a service worker outside a secure
+   context, and iOS will not treat a plain-`http` page as installable, so the deck has to be
+   reached over its `https://<host>.ts.net` URL — not over `http://<mac>:7777`.
+2. `pnpm build`, then start the server, and open that HTTPS URL in **Safari** (Chrome on iOS cannot
+   add to the home screen).
+3. Share, then **Add to Home Screen**. The icon shown should be the blue prompt mark, not a
+   screenshot of the page — a screenshot means the `apple-touch-icon` did not load.
+4. Launch it from the home screen. It should open with no address bar and no toolbar. That is the
+   done-when.
+5. Check the layout in that mode specifically, because it is the only mode where the insets are
+   non-zero: the tab strip must sit below the status bar with its own background running up under
+   it, and the terminal's bottom rows — the cursor, and any permission prompt — must sit above the
+   home indicator rather than under it.
+6. In Safari on the Mac, with the phone attached, Develop > the device > Service Workers should
+   show one worker for the origin, scope `/`, and no storage under Caches. If anything appears
+   under Caches, something other than `public/sw.mjs` put it there.
+
+### Two consequences of installing, both about the token
+
+**The `.ts.net` hostname has to be agentdeck's alone.** The manifest takes `scope: "/"` and the
+worker registers at the root, and the token lives in `localStorage`, which is keyed by ORIGIN and
+not by path. So mounting a second service on the same hostname — `tailscale serve --set-path` is
+the ordinary way to do that — gives it read access to a credential that starts sessions in every
+allowed repository, kills live ones and attaches to every other agent's terminal. This is the same
+reasoning that moved the dev server off Vite's shared default port. If you ever want a sibling
+service there, the deck has to move under a path prefix first, and the manifest's `scope` and
+`start_url` and the `register()` URL move with it.
+
+**Installing makes the token permanent, and there is no revocation.** An installed iOS web app gets
+its own storage partition and is exempt from Safari's eviction of script-writable storage, so the
+token stops being purged after a week of disuse and lives until the app is deleted. It also now
+exists in two partitions — the installed app cannot see the one you pasted into Safari, so you will
+paste it twice. The server has no expiry and no revocation list: the only way to invalidate a token
+is to delete the token file and restart, which invalidates it for every device at once and means
+pasting the new one into each of them again.
+
+### Removing a worker that should not be running
+
+Delete `src/client/public/sw.mjs`, run `pnpm build`, and restart the server. `/sw.mjs` then answers
+404 — the static handler never falls back to `index.html` for a path that names a file — and 404 is
+the one response that makes a browser drop the registration on its next update check, so reloading
+the page on the phone unregisters the worker. A 200 with HTML would not: the browser reads that as
+a failed update and keeps running the worker it already has. `src/pwa.test.ts` holds the 404.
+
 ## Non-goals
 
 Written down because "code we do not use" is the thing this repo exists to avoid. Each of
@@ -266,14 +325,19 @@ a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs`
 `scripts/restart-survival.mjs` are run by hand besides. `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
 executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
 loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
-`.git/hooks/`. There used to be a container between all of that and the machine; there is not one
+`.git/hooks/`. `pnpm build` is on the list for a different reason: Vite copies `src/client/public/`
+verbatim into `dist/client`, which this server publishes with no bearer token, and that copy
+DEREFERENCES symlinks — so an entry there becomes a real file in the publish root holding whatever
+it pointed at, which `static.ts` cannot refuse because by serve time it is not a symlink. Measured:
+a link to a file outside the repo came back as its contents over HTTP. There used to be a container between all of that and the machine; there is not one
 now, which makes the review below the only control rather than the second of two.
 
 So before any of those commands,
 `git status` and `git diff` must be clean of unreviewed agent edits to
 `package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
 `.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `scripts/`, `.claude/`,
-`.github/workflows/` and the agent profiles file `AGENTDECK_PROFILES` points at. That last one is
+`.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
+points at. That last one is
 the most direct host-execution surface of the lot and had been on none of these lists: a profile's
 `command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
 profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.
