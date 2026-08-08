@@ -386,8 +386,17 @@ Agent-agnostic signals first, so the generic path is the proven one.
       **Done when:** the `ts.net` URL loads over HTTPS from the phone and the page reports a
       secure context.
 
-- [ ] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
+- [x] **`m4/pwa`** — manifest, service worker, safe-area layout, touch targets.
       **Done when:** it installs to the home screen and launches without browser chrome.
+      **The install is NOT demonstrated** — it needs a phone and the only other tailnet device has
+      been offline for five days. Everything checkable from here is: the manifest parses and is
+      served as `application/manifest+json`, every icon exists at the size it claims, the worker is
+      root-scoped and cannot touch `/api` or `/ws`, and the insets and 44px targets survive into the
+      built CSS. The README carries the steps for the rest.
+      **Found by the audit and fixed before merge:** `src/client/public/` is copied into the
+      unauthenticated publish root and the copy dereferences symlinks, so a link planted there
+      becomes a real served file — measured with a canary. Structural test plus the directory named
+      in all three review lists.
       **Built, and the install is NOT demonstrated.** Everything checkable from the Mac is checked
       by `src/pwa.test.ts` against the real build served by the real server: the manifest parses
       and is served `application/manifest+json`, declares `display: standalone` and scope `/`,

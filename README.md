@@ -239,6 +239,25 @@ chrome. To confirm the remaining half, on an iPhone:
    show one worker for the origin, scope `/`, and no storage under Caches. If anything appears
    under Caches, something other than `public/sw.mjs` put it there.
 
+### Two consequences of installing, both about the token
+
+**The `.ts.net` hostname has to be agentdeck's alone.** The manifest takes `scope: "/"` and the
+worker registers at the root, and the token lives in `localStorage`, which is keyed by ORIGIN and
+not by path. So mounting a second service on the same hostname — `tailscale serve --set-path` is
+the ordinary way to do that — gives it read access to a credential that starts sessions in every
+allowed repository, kills live ones and attaches to every other agent's terminal. This is the same
+reasoning that moved the dev server off Vite's shared default port. If you ever want a sibling
+service there, the deck has to move under a path prefix first, and the manifest's `scope` and
+`start_url` and the `register()` URL move with it.
+
+**Installing makes the token permanent, and there is no revocation.** An installed iOS web app gets
+its own storage partition and is exempt from Safari's eviction of script-writable storage, so the
+token stops being purged after a week of disuse and lives until the app is deleted. It also now
+exists in two partitions — the installed app cannot see the one you pasted into Safari, so you will
+paste it twice. The server has no expiry and no revocation list: the only way to invalidate a token
+is to delete the token file and restart, which invalidates it for every device at once and means
+pasting the new one into each of them again.
+
 ### Removing a worker that should not be running
 
 Delete `src/client/public/sw.mjs`, run `pnpm build`, and restart the server. `/sw.mjs` then answers
