@@ -122,6 +122,17 @@ anything sitting in front of the server. The URL printed beside it is `AGENTDECK
 is set, and the loopback address the server is actually listening on when it is not — this process
 cannot know whether a `tailscale serve` exists in front of it, so it does not claim one.
 
+**That printed block is the credential, so do not do the first run in a pane that is being
+recorded.** The token has a second home the two boot refusals cannot reach - they check where the
+FILE is, and this is scrollback. `capture-pane -p -e` preserves the escape sequences the QR is made
+of, and agentdeck itself runs that on every cold attach, so a QR printed into a tmux pane comes back
+verbatim; the same goes for `pipe-pane`, `script`, Terminal.app and iTerm2 session logging, and a
+screen recording. Starting the server inside tmux is the ordinary way to keep it alive on a Mac,
+which is exactly when this bites. agentdeck prints nothing when stdout is not a terminal, which
+covers a pipe and a launchd log file, but a TTY that is being recorded is still a TTY. If the first
+run happened somewhere that keeps a transcript, treat the token as disclosed: delete the file,
+restart, and re-scan on each device.
+
 The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
 attaches to and streams the sessions whose directory is on it, and ignores everything else on the
 tmux socket. That socket is `/tmp/tmux-<uid>/agentdeck` and every process running as you can write
