@@ -46,17 +46,18 @@ watch(
       <span class="name">{{ tab.name }}</span>
       <span class="status" :class="tab.state">{{ tab.status }}</span>
       <!-- The session outlived the server, so its hook secret is gone and it can never report
-           waiting again until its agent is restarted (plan 002). It is said in WORDS and on the
-           tab itself rather than as a colour or an icon: this is a tab that will look healthy and
-           quietly never ask for you, and a person cannot infer that from a shade of grey. The
-           sentence says what will not happen rather than what went wrong, because what will not
-           happen is the part that changes what the user does - this tab has to be opened and
-           looked at. The fix is in the title for the person who wants it. -->
+           waiting again until its agent is restarted (plan 002). It stays a WORD rather than
+           becoming a colour or an icon: this is a tab that will look healthy and quietly never ask
+           for you, and a person cannot infer that from a shade of grey. One word rather than the
+           sentence it used to be, because at 40 columns the sentence was most of the tab - the
+           sentence is in the title and the aria-label, which is where a person who wants it looks
+           and where a screen reader takes it from. -->
       <span
         v-if="tab.waitingDetectionLost"
         class="lost"
+        aria-label="waiting alerts are muted for this session"
         title="This session outlived the server, so it can no longer tell you when it needs you. Restart the agent in this tab to get it back."
-        >no waiting alerts</span
+        >muted</span
       >
       </button>
       <!-- Only on the tab being looked at, so a mis-hit cannot arm the close cap of an agent the

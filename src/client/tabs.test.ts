@@ -151,8 +151,13 @@ void describe("the strip renders the flag rather than only computing it", () => 
 
   void test("it says so in words, not in a shade of grey", () => {
     // A colour alone is not a difference a person can name, and on the phone it is the difference
-    // between two greys. The words are what let somebody act on it.
-    assert.match(template, /no waiting alerts/);
+    // between two greys. A word is what lets somebody act on it - which word is a matter of how
+    // much room 40 columns leaves, so this pins that letters are rendered rather than pinning the
+    // wording. The sentence still has to be reachable, and `title` is where it lives.
+    const flag = /<span\b[^>]*class="lost"[\s\S]*?>([^<]*)<\/span/.exec(template);
+    assert.ok(flag !== null, "the flag is not rendered as a span at all");
+    assert.match(flag[1] ?? "", /[A-Za-z]{3}/);
+    assert.match(template, /title="[^"]*needs you[^"]*"/);
   });
 
   void test("no emojis, here as everywhere", () => {
