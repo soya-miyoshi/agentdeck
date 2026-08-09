@@ -217,6 +217,14 @@ the next restart instead of after an edit. `make mounts` prints what it would al
 `AGENTDECK_PORT` — but not the work, since tmux keeps the agents and a restart adopts them back. A variable
 set in the shell still wins over the file, so any one entry can be overridden per launch.
 
+`make restart` is the one to use **from the phone**, or from a pane inside the deck. `make stop`
+followed by `make start` cannot work from there: `start` runs in the foreground, so stopping the
+server kills the socket carrying the keystrokes before the second command is ever read. `restart`
+stops, waits for the port to actually be released, and relaunches detached with its output appended
+to `~/.agentdeck/server.log` (`AGENTDECK_LOG`). The agents are untouched either way — what a
+restart costs is each running session's hook secret, so `waiting` detection stays dead for those
+sessions until their agents are restarted.
+
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
 your session appears.
 
