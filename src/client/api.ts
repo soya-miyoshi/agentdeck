@@ -97,6 +97,11 @@ export const createSession = async (
     agent,
   });
 
+/** Kill a session and its agent. Irreversible from here: the tmux session goes with it. */
+export const closeSession = async (token: string, id: string): Promise<void> => {
+  await request<{ closed: true }>(token, `/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+};
+
 /**
  * Why this client cannot get in, as one cheap authenticated request.
  *

@@ -5,6 +5,7 @@ import type { AgentSummary } from "../agent-profiles.ts";
 import type { Cwd } from "../cwds.ts";
 import type { Session } from "../registry.ts";
 import {
+  closeSession,
   createSession,
   fetchAgents,
   fetchCwds,
@@ -127,6 +128,27 @@ const startSession = async (cwd: string, agent: string): Promise<void> => {
     note(error instanceof Error ? error.message : "could not start a session");
   } finally {
     starting.value = false;
+  }
+};
+
+/**
+ * Kill a session and its agent. Removed from the list here rather than waiting for the next sync,
+ * so the tab does not linger as something that can still be typed into after it is gone.
+ */
+const endSession = async (id: string): Promise<void> => {
+  const current = token.value;
+  if (current === undefined) return;
+  try {
+    await closeSession(current, id);
+    sessions.value = sessions.value.filter((session) => session.id !== id);
+    settle();
+    void loadCwds();
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      signOut("That token was rejected. Paste the current one.");
+      return;
+    }
+    note(error instanceof Error ? error.message : "could not close that session");
   }
 };
 
@@ -274,7 +296,12 @@ if (token.value !== undefined) start(token.value);
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
-    <TabStrip :tabs="tabs" :active="active" @select="select" />
+    <TabStrip
+      :tabs="tabs"
+      :active="active"
+      @select="select"
+      @close="(id) => void endSession(id)"
+    />
     <!-- Without this the deck can drive sessions but never start one. -->
     <NewSession
       :cwds="cwds"
