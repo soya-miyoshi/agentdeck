@@ -10,6 +10,13 @@
 > agent that runs `rm -rf ~` or a poisoned `curl | sh` now reaches the Mac. The blast radius was
 > "the union of the mount list"; it is now the user's account.
 >
+> **Where the boundary went instead, 2026-08-09.** [Plan 008](008-separate-user.md) answers the
+> deployment question this header left open: a dedicated non-administrator account rather than a
+> container or a VM. It protects the same list — home directory, SSH keys, browser profiles, other
+> repositories, keychain, system files — by account separation instead of by a namespace, and it
+> closes the root-owned-script-and-interpreter gap named further down this header. It is decided
+> and not installed.
+>
 > **What this does not change.** Every hazard this plan describes as _inside_ the boundary
 > survives unchanged, because it never depended on the container: same-uid between the server and
 > every session, so file mode buys nothing; one agent able to read another's secrets by the means

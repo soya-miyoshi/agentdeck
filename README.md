@@ -76,6 +76,14 @@ bought and what its removal costs. The remaining lever is the `cwd` allowlist �
 the repositories actually worked in — and it decides where a session _starts_, not where it can
 reach. A git remote is what protects the work.
 
+**Decided, not installed:** [`plans/008-separate-user.md`](plans/008-separate-user.md) moves the
+server to a dedicated non-administrator macOS account, started at boot by a root-owned
+`LaunchDaemon` that nobody logs into. That returns most of the paragraph above — the home
+directory, the SSH keys, the browser profiles, the other repositories — to being out of reach, and
+puts the list of host-executed files below inside an account with no `sudo` and no write access to
+`/opt/homebrew`. None of it has been run. Everything on this page describes the machine as it is
+today, which is a single account.
+
 The blast radius therefore includes agentdeck's own repository, and that is the one whose contents
 the host then executes: the `package.json` scripts, `pnpm-lock.yaml`
 (pnpm 9 runs dependency lifecycle scripts, so a rewritten resolution entry is host execution at

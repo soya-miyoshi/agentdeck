@@ -51,6 +51,11 @@ agent session and the machine — the `cwd` allowlist decides where a session _s
 can reach, and a git remote is what protects the work. The bearer token starts sessions in every
 allowed repository, so it never goes anywhere an agent can read it.
 
+**That last part is decided but not built.** [`plans/008-separate-user.md`](plans/008-separate-user.md)
+moves the server to a dedicated non-administrator account started by a root-owned `LaunchDaemon`,
+so an agent can no longer reach `sudo`, `/opt/homebrew`, or the operator's home. Nothing has been
+installed: today it still runs as you, and every sentence above is the current truth.
+
 ## Things that bite
 
 - **The phone is the real test.** It found the dead key row, the missing session picker, and a
@@ -61,6 +66,11 @@ allowed repository, so it never goes anywhere an agent can read it.
 - **The tmux prefix is disabled on agentdeck's socket** (`prefix none`), because everything typed on
   the phone reaches a tmux client's key parser — `Ctrl b :` was arbitrary host command execution.
   Attaching to that socket by hand therefore has no tmux bindings.
-- **The watchdog is written but not installed**, by choice. `launchctl` is Soya's to run.
+- **The watchdog is written but not installed**, by choice. `launchctl` is Soya's to run. Its
+  install changed shape before it was ever run: plan 008 makes it a root-owned `LaunchDaemon`, not
+  the `LaunchAgent` plan 006 and the README still describe, and drops its `osascript` notification
+  because a daemon-launched account has no GUI session to notify.
 - **Same-uid is the standing residual.** Every agent runs as the operator, so the token, the hook
-  secrets and the tmux socket are all readable by anything they run. It is recorded, not solved.
+  secrets and the tmux socket are all readable by anything they run. It is recorded, not solved —
+  and plan 008 does not solve it either. A separate account moves the residual down one level:
+  agents stop sharing a uid with _you_, and go on sharing one with each other.

@@ -122,6 +122,16 @@ and Vite flows the same run serves. Naming the exact string is what makes it one
 
 ## The watchdog: a `launchd` agent on the Mac
 
+> **The install described below is superseded by plan 008.** agentdeck runs as a dedicated
+> non-administrator account started by a root-owned `LaunchDaemon`, not as a `LaunchAgent` in the
+> operator's login session, and the `osascript` notification in step 2 does not work from an
+> account with no GUI session — the notification moves to a `LaunchAgent` in the operator's own
+> account, which polls rather than being pushed to. What the watchdog DOES — the three failures,
+> the health rule, the refusal to hand back a weaker server — is unchanged and still specified
+> here, except that **"no `KeepAlive`" is reopened**: a `LaunchDaemon` can supervise the server
+> process directly, which the argument below was written without. Plan 008 states the refusal-path
+> problem that has to be answered before it is taken.
+
 There is one place it can live, and it is the same place everything else now lives. It is the only
 thing that can fix failure (3), and — since de-containerising — the only thing that answers
 failure (1) at all.
