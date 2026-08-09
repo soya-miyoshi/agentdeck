@@ -18,6 +18,46 @@ let terminal: Terminal | undefined;
 let fit: FitAddon | undefined;
 let observer: ResizeObserver | undefined;
 
+// One finger's position and the fraction of a row it has not yet paid for. xterm has no touch
+// scrolling of its own - `.xterm-screen` sits over `.xterm-viewport`, so a drag on the text reaches
+// an element that does not scroll - and on iOS the page rubber-bands instead.
+let touchY: number | undefined;
+let carry = 0;
+
+const rowHeight = (): number => {
+  const term = terminal;
+  if (term === undefined || host.value === undefined || term.rows === 0) return 0;
+  return host.value.clientHeight / term.rows;
+};
+
+const onTouchStart = (event: TouchEvent): void => {
+  const point = event.touches[0];
+  // Never preventDefault here: that is what makes a tap dead, keyboard and all.
+  touchY = event.touches.length === 1 && point !== undefined ? point.clientY : undefined;
+  carry = 0;
+};
+
+const onTouchMove = (event: TouchEvent): void => {
+  const term = terminal;
+  const point = event.touches[0];
+  if (term === undefined || touchY === undefined || point === undefined) return;
+  const height = rowHeight();
+  if (height <= 0) return;
+  const moved = point.clientY - touchY;
+  touchY = point.clientY;
+  carry += moved / height;
+  const lines = Math.trunc(carry);
+  carry -= lines;
+  // Dragging down shows earlier output, which is a negative line delta.
+  if (lines !== 0) term.scrollLines(-lines);
+  event.preventDefault();
+};
+
+const onTouchEnd = (): void => {
+  touchY = undefined;
+  carry = 0;
+};
+
 const refit = (): void => {
   // A hidden pane has no size, and fitting it would report 0x0 as this client's constraint - which
   // the server takes as the minimum over attached clients and applies to everybody's pane.
@@ -31,6 +71,8 @@ onMounted(() => {
     convertEol: false,
     cursorBlink: true,
     fontSize: 13,
+    // An agent writes far more than a screen at a time, and scrollback is the only copy of it.
+    scrollback: 5000,
     theme: { background: "#0f1115" },
   });
   const addon = new FitAddon();
@@ -46,7 +88,15 @@ onMounted(() => {
   observer = new ResizeObserver(() => {
     refit();
   });
-  if (host.value !== undefined) observer.observe(host.value);
+  if (host.value !== undefined) {
+    observer.observe(host.value);
+    // Non-passive, because the move handler has to refuse the page's own scroll to keep the drag
+    // inside the terminal.
+    host.value.addEventListener("touchstart", onTouchStart, { passive: true });
+    host.value.addEventListener("touchmove", onTouchMove, { passive: false });
+    host.value.addEventListener("touchend", onTouchEnd, { passive: true });
+    host.value.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  }
   emit("ready", props.sessionId, {
     write: (data) => {
       term.write(data);
@@ -76,6 +126,10 @@ watch(
 
 onBeforeUnmount(() => {
   observer?.disconnect();
+  host.value?.removeEventListener("touchstart", onTouchStart);
+  host.value?.removeEventListener("touchmove", onTouchMove);
+  host.value?.removeEventListener("touchend", onTouchEnd);
+  host.value?.removeEventListener("touchcancel", onTouchEnd);
   emit("gone", props.sessionId);
   terminal?.dispose();
   terminal = undefined;
@@ -91,5 +145,8 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   background: #0f1115;
+  /* The pane owns every touch gesture in it, so the browser never claims the drag for the page.
+     Without this Safari scrolls the whole app and the terminal never moves. */
+  touch-action: none;
 }
 </style>

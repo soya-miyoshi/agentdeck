@@ -1582,3 +1582,26 @@ recorded rather than solved.
 *Not demonstrated:* both client changes are unshown on a device. The keyboard fit cannot be
 exercised on the Mac at all - the failure only exists where there is a soft keyboard - and nobody
 has yet tapped Close on a phone.
+
+## Touch scrolling in the terminal pane
+
+**Reported from a phone:** streamed output could not be read back in Safari. Dragging on the
+terminal scrolled the page, never the scrollback.
+
+**Cause:** xterm has no touch scrolling of its own. It scrolls on `wheel`, and on a touch device
+the drag lands on `.xterm-screen`, which sits above `.xterm-viewport` and does not scroll. Nothing
+in the pane claimed the gesture, so Safari gave it to the page.
+
+**Fixed:** `TerminalPane` takes `touchstart`/`touchmove`/`touchend` on the host and converts the
+drag into `term.scrollLines()`, carrying the sub-row remainder so a slow drag still moves. The
+pane is `touch-action: none` so the browser never starts its own scroll, and `touchmove` is
+non-passive so the page can be refused. `touchstart` does NOT preventDefault - that is the change
+that made every key-row cap dead on iOS last time. Scrollback raised from xterm's default 1000
+lines to 5000; an agent writes more than a screen at a time and this is the only copy.
+
+*Accepted with a reason:* `touch-action: none` also gives up pinch-zoom inside the pane. Font size
+is fixed at 13px, so zoom was the only way to enlarge the text and it no longer exists. Recorded
+rather than solved; a pane-local font-size control is the answer if it is wanted.
+
+*Not demonstrated:* unshown on a device. There is no touch on the Mac, and the suite (863 green)
+says nothing about this - the defect it fixes passed every test.
