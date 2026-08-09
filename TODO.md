@@ -352,6 +352,25 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ## Found while building, not in the original plan
 
+- [ ] **`m3/new-session-picker`** — **the client cannot create a session, so the phone cannot start
+      anything.** Found on 2026-08-09 by opening the deck on a phone for the first time: it says
+      "No sessions" and offers no way out of that. `src/client/api.ts` only READS `/api/sessions`;
+      nothing posts to it, and nothing consumes `GET /api/cwds` at all.
+      **This is not a new idea** — plans/002-wire-protocol.md:58 already specifies it, in the
+      sentence that explains why `/api/cwds` exists: "typing an absolute path into a soft keyboard
+      is not a design. The new-session picker is built from this route — pick a directory, pick an
+      agent". `Session.name` and `AgentSummary.name` are documented there as being "for the
+      new-session picker". The route, the fields and the reasoning all shipped; the picker did not.
+      **Why every milestone still read green:** M2 and M3's done-whens were about driving,
+      streaming and statusing a session that already existed, and `src/client/end-to-end.test.ts`
+      creates its session over the API before driving the client. "Can a person start a session
+      from the phone" was nobody's acceptance criterion, so nothing failed.
+      **Done when:** a session is created from the phone, with no terminal open on the Mac —
+      directory and agent both chosen from what the server reports, not typed. An agent whose
+      `available` is false is not offerable, and the two-agents-in-one-tree warning the API already
+      returns is shown rather than swallowed. Demonstrated against the real client modules and a
+      real server, and the honest limit stated if a device is not to hand.
+
 - [x] **`m2/serve-client`** — nothing serves the built SPA. `src/http.ts` answers `/api/*` and 404s
       everything else. Plan 001's Authentication section now settles who serves it: this server
       does, from `dist/client`, on every path that is not an API or socket route — unauthenticated
@@ -400,7 +419,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
       `tailscale serve --bg 7791` prints `Serve is not enabled on your tailnet` with an enable link
       and then **hangs** — 20s timeout, exit 124, never exits on its own — and
       `tailscale cert example-host.tailXXXXXX.ts.net` answers `your Tailscale account does
-  not support getting TLS certs`. Both switches are at
+not support getting TLS certs`. Both switches are at
       <https://login.tailscale.com/admin/dns> and neither is something this repo can turn on, so
       `https://example-host.tailXXXXXX.ts.net/` does not connect and the HTTPS half is
       undemonstrated. What is built is the half that made those failures opaque: `src/tailnet.ts`
