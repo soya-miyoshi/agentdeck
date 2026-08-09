@@ -1970,3 +1970,14 @@ the text away from the edge a thumb rests on.
 tested, but the ratio is measured through xterm's own layout, and whether it lands where the model
 says is a device question. The number to compare against next time: text should reach x=723 of a
 724px screenshot, not 662.
+
+## Confirmed on the device: the key row and the pane's right-hand margin
+
+Soya confirms on the phone that the Ctrl cap is on screen and the margin is gone. Both entries
+above were written "not demonstrated"; this is the verification they were missing, and it is the
+first of these rounds where the reasoning and the device agreed first time.
+
+Worth keeping for the next one: the thing that made it agree was measuring the screenshot's pixels
+instead of reading it. Two independent numbers came out of that - 33pt of dead width, and the key
+row's 4pt padding as the scale reference - and both causes were then found in source rather than
+guessed at. The three earlier scrollback rounds were all reasoned about and all wrong.
