@@ -5,6 +5,11 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import type { TerminalHandle } from "./terminal-handle.ts";
 
+// The deck is 40 columns wide, always. An agent's output is laid out by the agent at the width the
+// PTY reports, and a width that moves with the device wraps the same paragraph differently on each.
+const COLUMNS = 40;
+const BASE_FONT_SIZE = 13;
+
 const props = defineProps<{ sessionId: string; visible: boolean }>();
 const emit = defineEmits<{
   ready: [sessionId: string, handle: TerminalHandle];
@@ -62,7 +67,15 @@ const refit = (): void => {
   // A hidden pane has no size, and fitting it would report 0x0 as this client's constraint - which
   // the server takes as the minimum over attached clients and applies to everybody's pane.
   if (!props.visible || terminal === undefined || fit === undefined) return;
-  fit.fit();
+  // Only the rows come from the addon. Cell width scales with the font, so the font size that makes
+  // exactly COLUMNS fit is the current one times (columns it proposed / COLUMNS).
+  const proposed = fit.proposeDimensions();
+  if (proposed === undefined || proposed.cols <= 0 || proposed.rows <= 0) return;
+  const scaled = (terminal.options.fontSize ?? BASE_FONT_SIZE) * (proposed.cols / COLUMNS);
+  const size = Math.max(6, Math.min(24, Math.floor(scaled)));
+  if (size !== terminal.options.fontSize) terminal.options.fontSize = size;
+  const rows = fit.proposeDimensions()?.rows ?? proposed.rows;
+  terminal.resize(COLUMNS, Math.max(1, rows));
   emit("resize", props.sessionId, terminal.cols, terminal.rows);
 };
 

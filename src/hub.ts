@@ -20,13 +20,12 @@ import type { SessionState, Tmux } from "./tmux.ts";
  * a client half that wide. `capture-pane -J` now makes that width irrelevant, and this makes it
  * close to right in the first place.
  *
- * The arithmetic, so a later reader can redo it rather than trust it: xterm's default 13px
- * monospace is about 7.8px per column, and a portrait phone is around 390 CSS pixels wide. Rows
- * are the remaining height over a ~15.6px line, once the tab strip and the key row have taken
- * theirs. Both are superseded the moment a real client attaches and reports what it measured, so
- * this only has to be near - and it has NOT been checked against a device.
+ * The width is not measured, it is chosen: the client fixes itself at 40 columns and scales its
+ * font to fit, so a session started before any client attaches should already be that wide. Rows
+ * are still a guess - the remaining height over a ~15.6px line, once the tab strip and the key row
+ * have taken theirs - and are superseded the moment a real client reports what it measured.
  */
-const DEFAULT_COLS = 50;
+const DEFAULT_COLS = 40;
 const DEFAULT_ROWS = 30;
 
 // A repaint is finished when tmux stops writing, and tmux does not say so. There is no marker in
