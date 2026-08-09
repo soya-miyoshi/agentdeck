@@ -1519,3 +1519,32 @@ product defect; both are timing assumptions that hold on an idle machine. Worth 
 - **Two flaky tests.**
 - **The HTTPS half is undemonstrated** until both tailnet switches are on.
 - **Same-uid**, unchanged.
+
+---
+
+## m4/tailscale-serve - demonstrated - 2026-08-09
+
+The operator enabled both tailnet switches, so the half that could not be shown now can be. Verified
+from this Mac over the tailnet:
+
+- `https://example-host.tailXXXXXX.ts.net/` serves the client, HTTP 200, with a verified
+  certificate (`ssl_verify_result=0`).
+- `/manifest.webmanifest` and `/sw.mjs` answer 200 with `application/manifest+json` and
+  `text/javascript` - the MIME types iOS needs before it will treat the page as installable.
+- `/api/sessions` without a token is 401 through the proxy.
+- **The Origin check runs for the first time.** With `AGENTDECK_ORIGIN` set to the value the boot
+  log names: right Origin 200, wrong Origin `403 origin not allowed`, absent Origin allowed because
+  curl is not a browser. This file recorded three times that the check was off for every ordinary
+  run; it is not any more.
+- `tailscale serve status` reported `(tailnet only)`, never Funnel. `tailscale serve reset` was run
+  afterwards, so nothing is left published.
+
+**Found by running it for real:** the first HTTPS request to a `ts.net` name is where tailscaled
+issues the certificate, and that outran the script's single 10s probe - the first run reported
+"serve is configured but /api/health did not answer" while the URL worked 0.4s later by hand. The
+script retries across issuance now, with a line saying why. A one-shot probe would have sent the
+operator to debug a working deployment.
+
+**Still not demonstrated: the phone.** Everything above is from the Mac. The device has been offline
+throughout, so the three phone done-whens - the home-screen install, the token arriving by scan, and
+a permission prompt answered rather than watched - remain unshown.
