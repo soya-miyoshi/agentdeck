@@ -15,7 +15,11 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 const script = new URL("../scripts/tailscale-serve.mjs", import.meta.url).pathname;
-const DNS_NAME = "example-host.tailXXXXXX.ts.net";
+// A name that cannot resolve, deliberately. This was the operator's real ts.net name, and the
+// probe in these tests is a REAL fetch - so once the deck was actually deployed the URL started
+// answering and the test that asserts the fetch fails began failing. A test may not depend on
+// whether the machine it runs on happens to be serving. `.invalid` is reserved for exactly this.
+const DNS_NAME = "agentdeck-test.invalid";
 
 let dir = "";
 let stub = "";
