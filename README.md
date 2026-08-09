@@ -212,7 +212,8 @@ pnpm dev
 Rather than retyping that line, `make start` reads the environment from `.env` (copy
 `.env.example`; Node's `--env-file` does no expansion, so every path in it must be absolute) and
 computes `AGENTDECK_MOUNTS` from `ghq list -p`, so a newly cloned repository becomes startable on
-the next restart instead of after an edit. `make mounts` prints what it would allowlist. A variable
+the next restart instead of after an edit. `make mounts` prints what it would allowlist, and `make stop` ends the server on
+`AGENTDECK_PORT` — but not the work, since tmux keeps the agents and a restart adopts them back. A variable
 set in the shell still wins over the file, so any one entry can be overridden per launch.
 
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
