@@ -1,4 +1,5 @@
 import type { AgentSummary } from "../agent-profiles.ts";
+import type { Cwd } from "../cwds.ts";
 import type { Session } from "../registry.ts";
 
 // The REST half. Every request carries the bearer token; a 401 is not a network failure and is
@@ -29,10 +30,19 @@ export class ForbiddenError extends Error {}
  */
 export type TokenVerdict = "ok" | "rejected" | "forbidden" | "unreachable";
 
-const request = async <T>(token: string, path: string, method = "GET"): Promise<T> => {
+const request = async <T>(
+  token: string,
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<T> => {
   const response = await fetch(path, {
     method,
-    headers: { authorization: `Bearer ${token}` },
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   // A status code alone does not say WHO answered. `POST /api/probe` traverses `tailscale serve`,
   // whatever is on the phone's path, and in development the Vite proxy - and any of them can
@@ -68,6 +78,24 @@ export const fetchSessions = async (token: string): Promise<Session[]> =>
 
 export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
   (await request<{ agents: AgentSummary[] }>(token, "/api/agents")).agents;
+
+/** The directories a session may be started in. The picker's left half; nothing is typed. */
+export const fetchCwds = async (token: string): Promise<Cwd[]> =>
+  (await request<{ cwds: Cwd[] }>(token, "/api/cwds")).cwds;
+
+/**
+ * Start a session in a directory the server named, with an agent the server named. The 201's
+ * `warning` is returned rather than dropped: it is how a second agent in one tree is ever seen.
+ */
+export const createSession = async (
+  token: string,
+  cwd: string,
+  agent: string,
+): Promise<{ session: Session; warning?: string }> =>
+  await request<{ session: Session; warning?: string }>(token, "/api/sessions", "POST", {
+    cwd,
+    agent,
+  });
 
 /**
  * Why this client cannot get in, as one cheap authenticated request.

@@ -352,7 +352,7 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ## Found while building, not in the original plan
 
-- [ ] **`m3/new-session-picker`** — **the client cannot create a session, so the phone cannot start
+- [x] **`m3/new-session-picker`** — **the client cannot create a session, so the phone cannot start
       anything.** Found on 2026-08-09 by opening the deck on a phone for the first time: it says
       "No sessions" and offers no way out of that. `src/client/api.ts` only READS `/api/sessions`;
       nothing posts to it, and nothing consumes `GET /api/cwds` at all.
@@ -365,6 +365,11 @@ Agent-agnostic signals first, so the generic path is the proven one.
       streaming and statusing a session that already existed, and `src/client/end-to-end.test.ts`
       creates its session over the API before driving the client. "Can a person start a session
       from the phone" was nobody's acceptance criterion, so nothing failed.
+      **Landed 2026-08-09.** The picker reads `/api/cwds` and `/api/agents`, offers an agent whose
+      `available` is false as disabled with the reason rather than hiding it, and posts to
+      `/api/sessions`. **Not yet confirmed from the phone** — the Mac-side path is tested and the
+      client is built and served, but nobody has tapped Start on a device. That confirmation is the
+      done-when below and it is still outstanding.
       **Done when:** a session is created from the phone, with no terminal open on the Mac —
       directory and agent both chosen from what the server reports, not typed. An agent whose
       `available` is false is not offerable, and the two-agents-in-one-tree warning the API already
