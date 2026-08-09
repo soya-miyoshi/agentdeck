@@ -1847,3 +1847,35 @@ last 20 until someone removes the directory.
 *Not demonstrated:* the phone. `createImageBitmap`, the file picker sheet, HEIC normalisation and
 whether the typed path lands in Claude's prompt rather than being eaten by its input handling are
 all unverified on a real device. The server half is covered by tests; the iOS half is not.
+
+## The scrollback fix, confirmed on the device
+
+The three rounds above - the 40-column pane, the LF-to-CRLF normalisation and the padding strip,
+and dropping `-J` - were all written "not verified on the phone". Soya has now confirmed on the
+device that the scrollback reads correctly. The record above stands as written; this is the
+verification it was missing.
+
+## Ctrl was off the right-hand edge of the key row
+
+Reported from the phone: the row reads `Esc Tab Left Down Up Right Enter` and `Ctrl` is cut off.
+
+`.cap` was `flex: 1 0 auto` with `min-width: var(--touch-target)`. Eight caps at 44px is 352px,
+plus seven 4px gaps and 8px of row padding is 388px, before either safe inset. No phone in portrait
+has that, and `1 0 auto` forbids shrinking, so `overflow-x: auto` on the row took the overflow and
+Ctrl - the last cap, and the only way to reach Ctrl+C - sat off-screen with nothing to indicate it
+could be scrolled to. Ctrl+C is the single most-needed key on the row, so this was the row failing
+at its own reason for existing.
+
+The caps are now `flex: 1 1 0; min-width: 0`, so eight of them share whatever width there is:
+about 42px each on a 375px screen. Height keeps `var(--touch-target)`; a full-width row is under
+the thumb regardless of where along it the thumb lands, so height is the dimension that matters and
+width was never really the touch target. Horizontal padding is 0.125rem and the label font 0.8rem
+so `Right` and `Enter` still fit, with `white-space: nowrap` because the way a shrinking cap fails
+is by wrapping to two lines and making itself taller than the caps beside it.
+
+`key-row.test.ts` asserted `min-width: var(--touch-target)` - it pinned the mechanism that WAS the
+bug, which is the failure mode CLAUDE.md names. It now asserts the opposite, with the arithmetic in
+the comment so the next person does not put it back.
+
+*Not demonstrated:* the phone. The arithmetic is checked and the suite is green, but whether the
+labels are legible at 0.8rem in a real hand is a device question.

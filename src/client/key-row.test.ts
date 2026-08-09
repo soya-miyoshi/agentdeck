@@ -159,7 +159,11 @@ void describe("the row as it is wired into the page", () => {
     // m4/pwa's two phone properties, at the source. `src/pwa.test.ts` holds the same two against
     // the built CSS; this says which element they belong to, which is what the built CSS cannot.
     assert.match(keyRow, /min-height:\s*var\(--touch-target\)/);
-    assert.match(keyRow, /min-width:\s*var\(--touch-target\)/);
+    // Width is NOT the touch target and must not become it again: eight caps at 44px need 388px
+    // plus gaps, more than a phone has, and the row scrolled Ctrl off the right-hand edge. The
+    // caps shrink to share whatever width there is. Reported from a real device: Ctrl cut off.
+    assert.doesNotMatch(keyRow, /min-width:\s*var\(--touch-target\)/);
+    assert.match(keyRow, /flex:\s*1\s+1\s+0/, "the caps do not shrink to fit the row");
     assert.match(keyRow, /padding:[^;]*var\(--safe-bottom\)/);
     // The row owns the bottom edge now, so the pane area must NOT inset the bottom as well: that
     // leaves a band of pane background between the caps and the home indicator, and it is the

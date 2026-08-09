@@ -58,17 +58,24 @@ defineEmits<{ key: [key: KeyName] }>();
   border-top: 1px solid #2a2e35;
 }
 .cap {
-  flex: 1 0 auto;
+  /* Eight caps share the row equally and SHRINK. A 44px min-width needs 388px for eight of them
+     plus the gaps, which no phone has once the safe insets are off, so the row scrolled and Ctrl -
+     the last cap, and the one Ctrl+C is on - was off the screen with nothing to say so. Height is
+     the touch target that survives; a full-width row means every cap is under the thumb already. */
+  flex: 1 1 0;
+  min-width: 0;
   /* One-handed, in a hurry, with a process waiting on the answer. */
   min-height: var(--touch-target);
-  min-width: var(--touch-target);
-  padding: 0 0.5rem;
+  padding: 0 0.125rem;
   border: 1px solid #2a2e35;
   border-radius: 6px;
   background: #1b1e24;
   color: #d7dae0;
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
+  /* `Right` and `Enter` are the widest labels; wrapping one to two lines is how a shrinking cap
+     fails, and a two-line cap makes the row taller than the one beside it. */
+  white-space: nowrap;
 }
 .cap.latched {
   border-color: #ffb454;
