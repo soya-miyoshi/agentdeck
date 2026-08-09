@@ -2063,3 +2063,47 @@ is mid-upgrade. Nothing can close that from inside the protocol.
 *Pre-existing and untouched:* `the reconnection ladder, against the real transport` fails under
 full-suite load and passes when its file is run alone. Confirmed on a clean checkout before this
 work, so it is a load flake this change neither caused nor fixed. 904 of 905 green.
+
+---
+
+## `test-concurrency`: the suite was oversubscribing the machine
+
+The previous section recorded `the reconnection ladder, against the real transport` as a load flake
+it neither caused nor fixed, at 904 of 905 green. It was not that one test. Two full runs failed
+three tests between them and **no test failed twice**: `supervisor-crash`'s "the node process is
+killed and nothing brings it back", `toolchain`'s "the lint script passes on the current tree", and
+`end-to-end`'s "the server process is restarted under an open client", the last timing out after 30
+seconds waiting for a socket to reconnect to a server that was already listening. A failure that
+moves is not a defect in the test it lands on.
+
+`node --test` defaults its worker count to the core count, ten on this machine. Most of these
+suites spawn a real server, a real tmux and real ptys, so ten workers is far more than ten
+processes, and the tests that assert something happens **within a wall-clock window** are the ones
+that lose. `src/client/end-to-end.test.ts` run alone is 13 of 13 green in 19 seconds at 8% CPU: it
+is almost entirely waiting, which is exactly the shape that starves.
+
+Capping the run at four workers fixes it and is also faster, because ten workers were spending the
+difference on contention:
+
+| | result | duration |
+| --- | --- | --- |
+| default (10) | 902/905, then 904/905, different tests each time | 49.4s |
+| `--test-concurrency=4` | 905/905, three consecutive runs | 35.7s, 35.7s, 35.8s |
+
+*What was changed:* one flag in `package.json`'s test script. **No test file's logic, and no
+timeout, was touched** - the starvation is removed rather than waited out. `src/toolchain.test.ts`
+pinned the script by exact string, which is the mechanism-not-property mistake CLAUDE.md warns
+about; it now matches the runner and the glob, and asserts the cap separately with the reason.
+
+*Verified:* three consecutive full-suite runs at 905/905, plus `pnpm typecheck` and `pnpm lint`.
+
+*Not demonstrated:* that four is the right number rather than merely a sufficient one. It was the
+first value tried and it was green three times; nothing was measured at 2, 6 or 8. The assertion
+allows anything at or below four, so lowering it needs no test change and raising it does.
+
+*Residual, and the reason the cap is asserted rather than just set:* this is a property of the
+machine the suite runs on, and the number that is right for a ten-core Mac is not obviously right
+for a two-core CI runner, where four workers may oversubscribe just as badly. CI has not been
+observed under this change. If the same moving-failure pattern appears there, the answer is a lower
+cap, not a longer timeout - and the next person to see a flaky wall-clock test here should suspect
+this before suspecting the test.

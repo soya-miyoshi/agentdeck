@@ -10,7 +10,7 @@ where the value is.
 The default is: write the code, run the checks, verify it by hand, commit, merge.
 
 ```
-pnpm typecheck && pnpm lint && pnpm test   # the whole suite is ~20s
+pnpm typecheck && pnpm lint && pnpm test   # the whole suite is ~40s
 ```
 
 If something genuinely warrants adversarial review, say so and let Soya decide. Do not start one.

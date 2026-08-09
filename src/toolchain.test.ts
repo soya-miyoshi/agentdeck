@@ -115,7 +115,22 @@ void describe("the M0 acceptance criterion", () => {
 
   void test("the test script collects the .ts suites in src", async () => {
     const pkg = await readPackageJson();
-    assert.equal(pkg.scripts?.["test"], 'node --test "src/**/*.test.ts"');
+    const script = pkg.scripts?.["test"] ?? "";
+    assert.match(script, /^node --test\b/);
+    assert.match(script, /"src\/\*\*\/\*\.test\.ts"/);
+  });
+
+  // The suites spawn real servers, tmux and ptys, so `node --test`'s default of one worker per core
+  // oversubscribes the machine and starves the wall-clock-bound reconnect tests. Measured, not
+  // guessed: see audit.md under `test-concurrency`.
+  void test("the test run is capped below the core count, because the suites spawn real processes", async () => {
+    const pkg = await readPackageJson();
+    const capped = /--test-concurrency=(\d+)/.exec(pkg.scripts?.["test"] ?? "");
+    assert.ok(capped, "the test script sets no concurrency cap");
+    assert.ok(
+      Number(capped[1]) <= 4,
+      `the cap is ${String(capped[1])}, high enough for the starvation this exists to prevent`,
+    );
   });
 
   void test("the toolchain is pinned to the package manager and Node line it was built on", async () => {
