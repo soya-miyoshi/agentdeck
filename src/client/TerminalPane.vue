@@ -3,12 +3,33 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
+import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
 // The deck is 40 columns wide, always. An agent's output is laid out by the agent at the width the
 // PTY reports, and a width that moves with the device wraps the same paragraph differently on each.
 const COLUMNS = 40;
 const BASE_FONT_SIZE = 13;
+
+/**
+ * What FitAddon subtracts from the width before it divides, and does not tell anyone about.
+ *
+ * With `scrollback` non-zero it reserves `options.overviewRuler?.width || 14` for a ruler this deck
+ * does not draw, and 0 is falsy, so configuring the width to zero yields 14 again - the reserve
+ * cannot be turned off. It is added back here because 14 of a phone's 393 CSS pixels is a blank
+ * column and a half at the right-hand edge.
+ */
+const RULER_RESERVE = 14;
+
+/**
+ * The font size the cell width is measured at, once.
+ *
+ * `proposeDimensions` reports whole columns, so the cell width read back from it carries the error
+ * of that floor - and at a font that nearly fills the pane, 40 columns is all the resolution there
+ * is and the error is a percent and a half. Measured at the smallest font instead, the same floor
+ * lands across a hundred-odd columns and the ratio is good to well under one percent.
+ */
+const PROBE_FONT_SIZE = MIN_FONT_SIZE;
 
 const props = defineProps<{ sessionId: string; visible: boolean }>();
 const emit = defineEmits<{
@@ -22,10 +43,13 @@ const host = ref<HTMLDivElement>();
 let terminal: Terminal | undefined;
 let fit: FitAddon | undefined;
 let observer: ResizeObserver | undefined;
-// Font passes left before the size in hand is accepted as good enough. Flooring to whole pixels
-// means two sizes can each propose the other, and a pane that re-measures forever renders nothing.
+// Font passes left before the size in hand is accepted as good enough, so a pane that cannot
+// settle renders something rather than re-measuring forever.
 let passes = 0;
 let pending: number | undefined;
+// CSS pixels of cell width per pixel of font size. A property of the font, which never changes, so
+// it is measured once: every later rotation and keyboard open sizes in a single pass off this.
+let cellPerFontPx: number | undefined;
 
 // One finger's position and the fraction of a row it has not yet paid for. xterm has no touch
 // scrolling of its own - `.xterm-screen` sits over `.xterm-viewport`, so a drag on the text reaches
@@ -70,17 +94,39 @@ const onTouchEnd = (): void => {
 // Bring the font to the size at which COLUMNS fills the width, then take the rows from what that
 // font actually measures. One pass cannot do both: the addon measures the font in effect, so the
 // rows for a font size just assigned are still the previous font's until it has been applied.
+//
+// The size is NOT rounded to a whole pixel. It was, and a floored font is up to a whole step of
+// cell width narrower than the pane on every one of 40 columns - 19 CSS pixels of dead margin,
+// measured off a phone, on top of the 14 the addon reserves.
 const refit = (): void => {
   // A hidden pane has no size, and fitting it would report 0 rows as this client's constraint -
   // which the server takes as the minimum over attached clients and applies to everybody's pane.
   if (!props.visible || terminal === undefined || fit === undefined) return;
+  const width = host.value?.clientWidth ?? 0;
+  if (width <= RULER_RESERVE) return;
   const proposed = fit.proposeDimensions();
   if (proposed === undefined || proposed.cols <= 0 || proposed.rows <= 0) return;
-  // Cell width scales with the font, so the size that fits COLUMNS is the current one times
-  // (columns this font proposed / COLUMNS).
   const current = terminal.options.fontSize ?? BASE_FONT_SIZE;
-  const size = Math.max(6, Math.min(24, Math.floor(current * (proposed.cols / COLUMNS))));
-  if (size !== current && passes > 0) {
+
+  // Measure the font, at the size where the addon's whole-column floor costs least.
+  if (cellPerFontPx === undefined) {
+    // Through `passes` like every other re-measure: a font size that would not take would other-
+    // wise leave a requestAnimationFrame loop running for the life of the pane.
+    if (current !== PROBE_FONT_SIZE && passes > 0) {
+      passes -= 1;
+      terminal.options.fontSize = PROBE_FONT_SIZE;
+      pending = requestAnimationFrame(refit);
+      return;
+    }
+    if (current !== PROBE_FONT_SIZE) return;
+    // Too few columns to divide by means the pane is not laid out yet; measuring here would fix a
+    // wrong ratio forever, since this is the only time it is read.
+    cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, COLUMNS);
+    if (cellPerFontPx === undefined) return;
+  }
+
+  const size = fontSizeFor(width, COLUMNS, cellPerFontPx);
+  if (Math.abs(size - current) > 0.05 && passes > 0) {
     passes -= 1;
     terminal.options.fontSize = size;
     // Measure again once the new font is in effect, rather than sizing to the old one's rows.

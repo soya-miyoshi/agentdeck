@@ -1916,3 +1916,57 @@ The server was booted by hand afterwards to check it still starts without the tu
 
 *Not demonstrated:* the phone. Whether the two buttons share the bar legibly at a real width, and
 whether losing Answers is actually wanted once it is gone, are both device questions.
+
+## The dead margin down the right-hand edge of the pane
+
+Reported from the phone as "the padding on the right is too big", and then more precisely as a
+cursor's width of padding for a scroll indicator. Both halves of that are right.
+
+Measured off the screenshot rather than estimated: the terminal's ink runs x=0..662 of a 724px
+image with nothing at all from 663 to 723. The key row's 0.25rem padding is 8px in that image, so
+the scale is 1.842px/pt and the device is 393pt wide. 61px of image is 33pt of phone thrown away -
+three and a half columns of a forty-column deck.
+
+Two causes, both in the sizing pass, both found in source rather than guessed at.
+
+**The addon reserves 14px and does not say so.** `FitAddon.proposeDimensions` computes
+`scrollback === 0 ? 0 : options.overviewRuler?.width || 14` and subtracts it from the width before
+dividing. This deck sets `scrollback: 5000` and draws no overview ruler, so 14 CSS pixels are
+reserved for something that does not exist - and the reserve CANNOT be configured away, because
+`0 || 14` is 14. `RULER_RESERVE` in `TerminalPane.vue` adds it back.
+
+**The font size was floored to a whole pixel.** `Math.floor(current * (proposed.cols / COLUMNS))`.
+A font one step below what fits is narrow on every one of forty columns, which on this phone is the
+other 19pt. The size is now fractional.
+
+That change breaks the old feedback loop, which is why the loop is gone. The cell width is measured
+ONCE, at `MIN_FONT_SIZE`, and cached as a ratio: `proposeDimensions` reports whole columns, so the
+cell width read back from it carries that floor's error, and the error is one column's share - at a
+font that nearly fills the pane there are only 40 columns to share it over, which is the 1.5% that
+made the old two-pass dance oscillate. At the smallest font there are a hundred-odd. Every later
+rotation and keyboard open sizes in one pass off the cached ratio, so the probe's tiny text is a
+single frame at mount, before any output exists to see it in.
+
+The arithmetic moved to `src/client/pane-fit.ts` with `pane-fit.test.ts` beside it, for the reason
+`key-row.ts` exists: it is a rule about numbers, and the alternative is running a browser-only
+component on the host. There was NO test over any of this before.
+
+The tests found two things I had asserted and was wrong about:
+
+- I claimed the residual margin would be under 2px. It is under 5. The estimate of the cell width
+  is deliberately the HIGH one - `(width - reserve) / cols` rather than a midpoint - because that
+  makes the font too small rather than too large, and too large clips the fortieth column. The
+  price is a residual of about one cell at the probe size, ~3px. The test states that bound and
+  a second test holds that the columns never overflow.
+- `width 744 advance 0.5` left 264px. That is `MAX_FONT_SIZE` doing its job on a landscape or iPad
+  width, not a fit failure: 40 columns across 744px would be 18px cells. It has its own test now
+  saying so, because it looks exactly like the bug and is not it.
+
+*Accepted with a reason:* landscape keeps a wide right margin. The deck is 40 columns by decision
+(`PANE_COLS`), and the alternative is text sized for a room. Not centred either - that would move
+the text away from the edge a thumb rests on.
+
+*Not demonstrated:* the phone. The 33pt was measured off a real screenshot and the arithmetic is
+tested, but the ratio is measured through xterm's own layout, and whether it lands where the model
+says is a device question. The number to compare against next time: text should reach x=723 of a
+724px screenshot, not 662.
