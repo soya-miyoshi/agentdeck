@@ -171,7 +171,8 @@ Every variable the server reads. All of them are optional; the row says what an 
 | --------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AGENTDECK_PORT`            | `7777`                     | Loopback only either way; `tailscale serve` decides exposure.                                                                                                                                                                |
 | `AGENTDECK_TOKEN_FILE`      | `~/.agentdeck/token`       | Generated 0600 on first run. Never inside an allowlist entry — the server refuses to start.                                                                                                                                  |
-| `AGENTDECK_MOUNTS`          | empty                      | **No directory is startable.** Colon-separated absolute paths; exact match, never prefix.                                                                                                                                    |
+| `AGENTDECK_MOUNTS`          | empty                      | Colon-separated absolute paths, fixed at boot; exact match, never prefix. With `AGENTDECK_ROOTS` also empty, **no directory is startable**.                                                                                   |
+| `AGENTDECK_ROOTS`           | empty                      | Colon-separated absolute paths to scan for repositories, re-read on every check — a clone made while the server runs is startable with no restart. `ghq root --all` is what `make start` passes. The root itself is not startable. |
 | `AGENTDECK_PROFILES`        | none                       | No agents, so nothing to start. See `agents.example.json`, and copy it somewhere outside every allowlist entry — it decides what command each session runs, and the server refuses to start if it is inside one.             |
 | `AGENTDECK_AGENT_STATE_DIR` | `~/.agentdeck/agent-state` | Hook settings land there, and an agent only reads them if its profile points it there.                                                                                                                                       |
 | `AGENTDECK_TURNS_DIR`       | `~/.agentdeck/turns`       | Where the turn log lives (plan 007): one 0600 JSONL file per session, holding what each turn asked and what the agent answered, in plain text. It outlives the tmux session and the reboot.                                   |
@@ -220,8 +221,10 @@ pnpm dev
 
 Rather than retyping that line, `make start` reads the environment from `.env` (copy
 `.env.example`; Node's `--env-file` does no expansion, so every path in it must be absolute) and
-computes `AGENTDECK_MOUNTS` from `ghq list -p`, so a newly cloned repository becomes startable on
-the next restart instead of after an edit. `make mounts` prints what it would allowlist, and `make stop` ends the server on
+sets `AGENTDECK_ROOTS` to `ghq root --all`. The server walks those roots on every check rather than
+at boot, so a repository cloned while it is running is in the picker at the next tap of `New
+session` — no edit and no restart, which matters because a restart is what costs every running
+agent its hook secret. `make mounts` prints the roots and what is under them, and `make stop` ends the server on
 `AGENTDECK_PORT` — but not the work, since tmux keeps the agents and a restart adopts them back. A variable
 set in the shell still wins over the file, so any one entry can be overridden per launch.
 
@@ -253,8 +256,9 @@ kilobytes of log into the pane — it arrives whole and the socket stays up, the
 into frames under the receiver's limit. And lock the phone, or pull the network for a while, then
 come back: the tab repaints rather than showing a hole.
 
-`AGENTDECK_MOUNTS` and `AGENTDECK_PROFILES` are not optional in practice — with neither set there
-is no directory to start a session in and no agent to start. See the Environment table above.
+A source of directories and `AGENTDECK_PROFILES` are not optional in practice — with neither
+`AGENTDECK_ROOTS` nor `AGENTDECK_MOUNTS` set there is no directory to start a session in, and with
+no profiles there is no agent to start. See the Environment table above.
 
 Automated, the same path is `src/client/end-to-end.test.ts`: the real client modules against a real
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
@@ -405,6 +409,10 @@ protected than the one it replaced. Those three — `AGENTDECK_MOUNTS`, `AGENTDE
 puts a banner up instead of quietly producing a server with an empty allowlist, no agents or no
 Origin check. Add `AGENTDECK_TOKEN_FILE` and
 `AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults.
+
+The watchdog still names `AGENTDECK_MOUNTS` specifically, not `AGENTDECK_ROOTS`, so a plist carrying
+only roots is one it refuses to start. `scripts/` and the plist are the operator's to edit; until
+they are, an installed watchdog needs `AGENTDECK_MOUNTS` set even though the server no longer does.
 
 **Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
 repository, which agents working here can write — as you, every 60 seconds, with no human action.

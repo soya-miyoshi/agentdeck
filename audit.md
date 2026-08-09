@@ -2107,3 +2107,47 @@ for a two-core CI runner, where four workers may oversubscribe just as badly. CI
 observed under this change. If the same moving-failure pattern appears there, the answer is a lower
 cap, not a longer timeout - and the next person to see a flaky wall-clock test here should suspect
 this before suspecting the test.
+
+## A root the server rescans, so a clone is startable without a restart
+
+`make start` computed `AGENTDECK_MOUNTS` from `ghq list -p` **once**, at boot. A repository cloned
+afterwards was refused with a message telling the operator to restart - and a restart is the one
+action that costs every running agent its hook secret, so the cheap-sounding fix for "I just
+cloned something" was the expensive one. `AGENTDECK_ROOTS` names directories to walk instead, and
+`CwdAllowlist.paths` walks them on every read, cached for a second.
+
+*What was changed:* `src/repo-scan.ts` (new) walks each root to depth 4 and returns every directory
+holding a `.git`. `CwdAllowlist` takes roots alongside the fixed mounts and unions them; `allows`,
+`refusal` and `list` are unchanged in shape. `src/server.ts` reads `AGENTDECK_ROOTS`, warns when
+both sources are empty, and reports the startable count at boot rather than the mount count. The
+`Makefile` passes `ghq root --all`. The refusal now offers the free way out first.
+
+*Membership stays exact.* A root is where to look for repositories, not a prefix anything under it
+inherits: `/roots`, `/roots/owner` and `/roots/owner/repo/src` are all refused. The only paths that
+become startable are the ones the scan returns.
+
+*Verified by hand, not from green.* A second server on 7788 with its own tmux socket: `POST
+/api/sessions` for a directory that did not exist was refused with the new message; the directory
+was then created with that same process still running, and the next `POST` started a real tmux
+session in it. `GET /api/cwds` listed all eleven `ghq` repositories including one cloned minutes
+earlier. 923/923 suite, typecheck and lint green.
+
+*Not demonstrated:* the phone. The picker already re-fetches `/api/cwds` every time the sheet
+opens, so a clone should appear at the next tap, but that was checked over loopback with `curl` and
+not on the device. Nor was a root with hundreds of repositories: the picker is an unbounded list of
+rows and eleven of them says nothing about two hundred.
+
+*Accepted, with the reason:* the allowlist is now open at one end. Anything that appears under a
+root with a `.git` in it is startable, so an agent can `mkdir -p ~/ghq/x/y/.git` and make itself a
+new place to start. That is a smaller change than it reads as - an agent already runs as the
+operator with the whole machine in reach, and the allowlist has always bounded where a session
+*starts*, not where it can go - but it is a real widening of what the token can do with no
+filesystem write of its own. Symlinks are not followed, which closes the version of this where a
+link under the root makes `/` startable while reading as an ordinary clone. Plan 008's separate
+account does not change this either: agents would go on sharing a uid with each other.
+
+*Open, and the operator's to close:* `scripts/watchdog.mjs` still lists `AGENTDECK_MOUNTS` in
+`REQUIRED_ENV`, and `scripts/com.agentdeck.watchdog.plist` still sets it. Both are host-executed
+and were left alone. An installed watchdog therefore refuses to start a server configured with
+roots only. The watchdog is not installed, so nothing is broken today; the README says so rather
+than leaving it to be found.

@@ -48,7 +48,8 @@ const start = (): void => {
     <div v-if="open" class="sheet">
       <p class="label">Directory</p>
       <p v-if="directories.length === 0" class="none">
-        No directories are allowlisted, so no session can start. Set AGENTDECK_MOUNTS on the Mac.
+        No directories are allowlisted, so no session can start. Set AGENTDECK_ROOTS (or
+        AGENTDECK_MOUNTS) on the Mac.
       </p>
       <button
         v-for="dir in directories"

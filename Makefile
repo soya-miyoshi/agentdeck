@@ -1,8 +1,8 @@
-# Launch the deck with the cwd allowlist computed from `ghq list -p`, because that list is the one
-# thing .env cannot hold: it changes every time a repository is cloned. Everything else - profiles,
+# Launch the deck pointed at `ghq root`, and let the server find the repositories under it on every
+# request - a clone made while it runs is startable without a restart. Everything else - profiles,
 # origin, ports - comes from .env, and a variable set here wins over that file.
 
-MOUNTS := $(shell ghq list -p 2>/dev/null | tr '\n' ':')
+ROOTS := $(shell ghq root --all 2>/dev/null | tr '\n' ':')
 
 # The port `stop` looks on: the shell, then .env, then the server's own default.
 PORT := $(or $(AGENTDECK_PORT),$(shell sed -n 's/^AGENTDECK_PORT=//p' .env 2>/dev/null),7777)
@@ -16,8 +16,8 @@ LOG := $(or $(AGENTDECK_LOG),$(HOME)/.agentdeck/server.log)
 # Refuses rather than starting with an empty allowlist, which boots fine and then has no directory
 # to start a session in - a failure the phone reports as "no directories are allowlisted".
 start:
-	@test -n "$(MOUNTS)" || { echo "make: 'ghq list -p' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
-	AGENTDECK_MOUNTS="$(MOUNTS)" node --env-file-if-exists=.env src/server.ts
+	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
+	AGENTDECK_ROOTS="$(ROOTS)" node --env-file-if-exists=.env src/server.ts
 
 # Stops the server, not the work: tmux keeps the agents running and a restarted server adopts them
 # back. What does not survive is each session's hook secret, so `waiting` detection stays dead for
@@ -43,7 +43,7 @@ stop:
 # session's hook secret, so `waiting` detection stays dead for every agent that was already running
 # until that agent itself is restarted.
 restart:
-	@test -n "$(MOUNTS)" || { echo "make: 'ghq list -p' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
+	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
 	@$(MAKE) --no-print-directory stop
 	@# The old server closes its listener asynchronously. Starting into a port it still holds is
 	@# EADDRINUSE, which leaves NOTHING listening - the failure that reads as "the deck is gone".
@@ -55,11 +55,13 @@ restart:
 	  echo "make: something still holds $(PORT) after 5s. Not starting a second server."; exit 1; \
 	fi
 	@mkdir -p $(dir $(LOG))
-	@AGENTDECK_MOUNTS="$(MOUNTS)" nohup node --env-file-if-exists=.env src/server.ts >> $(LOG) 2>&1 & \
+	@AGENTDECK_ROOTS="$(ROOTS)" nohup node --env-file-if-exists=.env src/server.ts >> $(LOG) 2>&1 & \
 	  echo "make: agentdeck restarting on $(PORT); its output is appended to $(LOG)."
 
-# What start would allowlist, one per line. The phone's tab label is each path's basename.
+# The roots, then what the server would find under them right now. Kept as `mounts` because that is
+# the name in muscle memory; the phone's tab label is each path's basename.
 mounts:
+	@echo "roots: $(ROOTS)"
 	@ghq list -p
 
 check:

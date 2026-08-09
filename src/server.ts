@@ -241,10 +241,25 @@ export const main = async (): Promise<void> => {
     env("AGENTDECK_UPLOAD_DIR", join(homedir(), ".agentdeck", "uploads")),
   );
 
-  const mounts = env("AGENTDECK_MOUNTS", "")
-    .split(":")
-    .filter((entry) => entry !== "");
-  const allowlist = new CwdAllowlist(mounts);
+  const paths = (name: string): string[] =>
+    env(name, "")
+      .split(":")
+      .filter((entry) => entry !== "");
+
+  // AGENTDECK_ROOTS is read on every request rather than captured here, so a repository cloned
+  // while the server runs is startable without the restart that costs every running agent its
+  // hook secret. AGENTDECK_MOUNTS stays for the directories that live outside any root.
+  const mounts = paths("AGENTDECK_MOUNTS");
+  const roots = paths("AGENTDECK_ROOTS");
+  const allowlist = new CwdAllowlist(mounts, roots);
+  if (mounts.length === 0 && roots.length === 0) {
+    console.error(
+      "agentdeck: neither AGENTDECK_MOUNTS nor AGENTDECK_ROOTS is set, so the allowlist is " +
+        "empty: no session can start and every live one is filtered off /api/sessions. Set " +
+        "AGENTDECK_ROOTS to a directory holding repositories - `ghq root` is one - and clones " +
+        "under it become startable with no restart.",
+    );
+  }
 
   // Refuse to start rather than write the token somewhere an agent meets it. This is plan 005's
   // one surviving rule made executable: the token is never inside a tree a session is pointed at.
@@ -271,15 +286,22 @@ export const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  const clash = tokenInsideAllowlist(tokenFile, allowlist.paths);
+  // A root counts as well as an allowlisted repository, and it has to: a root holds directories
+  // that are not repositories yet, and a clone made tomorrow would swallow a file sitting there
+  // with no boot left to notice it.
+  const trees = [...allowlist.paths, ...allowlist.roots];
+  const source = (tree: string): string =>
+    allowlist.roots.includes(tree) ? "AGENTDECK_ROOTS" : "AGENTDECK_MOUNTS";
+
+  const clash = tokenInsideAllowlist(tokenFile, trees);
   if (clash !== undefined) {
     console.error(
-      `agentdeck: the bearer token file ${resolve(tokenFile)} is inside ${clash}, which is on ` +
-        `the session allowlist. An agent started there meets the token in an ordinary \`ls -la\` ` +
+      `agentdeck: the bearer token file ${resolve(tokenFile)} is inside ${clash}, which sessions ` +
+        `are started in. An agent started there meets the token in an ordinary \`ls -la\` ` +
         `or \`grep -rn token .\`, and that token starts sessions in every allowed repository, ` +
         `kills live ones, and attaches to every other agent's terminal. Move it - the default, ` +
         `${defaultTokenFile()}, is outside every allowlist entry - or take that entry off ` +
-        `AGENTDECK_MOUNTS.`,
+        `${source(clash)}.`,
     );
     process.exit(1);
   }
@@ -292,13 +314,13 @@ export const main = async (): Promise<void> => {
   // `/bin/sh -c 'curl ...|sh'` and the next tap of that agent in the picker runs it - and no
   // prescribed review command looks at the file. A refusal, because there is no degraded mode.
   if (profilesPath !== undefined) {
-    const profilesClash = tokenInsideAllowlist(profilesPath, allowlist.paths);
+    const profilesClash = tokenInsideAllowlist(profilesPath, trees);
     if (profilesClash !== undefined) {
       console.error(
         `agentdeck: the agent profiles file ${resolve(profilesPath)} is inside ${profilesClash}, ` +
-          `which is on the session allowlist. That file decides what command every session runs, ` +
+          `which sessions are started in. That file decides what command every session runs, ` +
           `as this user, so an agent started there can choose what the next session executes. ` +
-          `Move it outside every allowlist entry, or take that entry off AGENTDECK_MOUNTS.`,
+          `Move it outside every allowlist entry, or take that entry off ${source(profilesClash)}.`,
       );
       process.exit(1);
     }
@@ -487,8 +509,12 @@ export const main = async (): Promise<void> => {
   // decided, and binding the tailnet address here would make that two places.
   await new Promise<void>((listening) => server.listen(port, "127.0.0.1", listening));
   console.log(`agentdeck: listening on 127.0.0.1:${String(port)}`);
+  // The startable count rather than the mount count: with roots configured, "0 mount(s)" reads as
+  // an empty allowlist while a dozen repositories are startable.
   console.log(
-    `agentdeck: ${String(profiles.size)} agent profile(s), ${String(mounts.length)} mount(s)`,
+    `agentdeck: ${String(profiles.size)} agent profile(s), ` +
+      `${String(allowlist.paths.length)} startable directory(ies) from ` +
+      `${String(mounts.length)} mount(s) and ${String(roots.length)} root(s)`,
   );
 
   // Last, after the boot warnings, so the QR is what is on the screen when a person turns to the

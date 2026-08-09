@@ -1,8 +1,11 @@
-import { basename, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+
+import { scanRepos } from "./repo-scan.ts";
 
 // One list with two jobs: the `cwd` allowlist that POST /api/sessions validates against, and what
-// GET /api/cwds serves to the phone's new-session picker. It comes from AGENTDECK_MOUNTS, whose
-// name is older than the decision to run on the Mac directly.
+// GET /api/cwds serves to the phone's new-session picker. It has two sources: AGENTDECK_MOUNTS,
+// whose name is older than the decision to run on the Mac directly, and AGENTDECK_ROOTS, which
+// names directories to scan for repositories every time the list is read.
 //
 // GET /api/cwds exists because the client cannot construct a valid `cwd` on its own. The
 // allowlist is knowable only to the server, and a phone user typing an absolute path into a soft
@@ -15,13 +18,57 @@ export interface Cwd {
   sessions: string[];
 }
 
-export class CwdAllowlist {
-  readonly paths: readonly string[];
+/** How long a scan is reused. The registry re-filters every live session against this list every
+ *  two seconds, so without it the walk runs once per session per sync. */
+const SCAN_TTL_MS = 1000;
 
-  constructor(paths: readonly string[]) {
+export interface AllowlistOptions {
+  /** Swapped in tests; the real one walks the filesystem. */
+  scan?: (roots: readonly string[]) => readonly string[];
+  ttlMs?: number;
+}
+
+export class CwdAllowlist {
+  readonly #mounts: readonly string[];
+  readonly #roots: readonly string[];
+  readonly #scan: (roots: readonly string[]) => readonly string[];
+  readonly #ttlMs: number;
+  #scanned: readonly string[] = [];
+  #scannedAt = -Infinity;
+
+  constructor(
+    paths: readonly string[],
+    roots: readonly string[] = [],
+    options: AllowlistOptions = {},
+  ) {
     // Normalised once here so every comparison downstream is between canonical absolute paths.
     // Comparing raw strings would let `/workspace/repo/` and `/workspace/repo` disagree.
-    this.paths = paths.map((p) => resolve(p));
+    this.#mounts = paths.map((p) => resolve(p));
+    this.#roots = roots.map((p) => resolve(p));
+    this.#scan = options.scan ?? scanRepos;
+    this.#ttlMs = options.ttlMs ?? SCAN_TTL_MS;
+  }
+
+  /** The roots themselves, which are containment ancestors rather than startable directories. */
+  get roots(): readonly string[] {
+    return this.#roots;
+  }
+
+  /**
+   * The allowlist as it is right now: the fixed entries plus whatever the roots hold this second.
+   *
+   * Read afresh rather than captured at boot, which is the whole point of the roots: a repository
+   * cloned a moment ago is startable at the next tap of `New session`, with no restart and so no
+   * loss of any running agent's hook secret.
+   */
+  get paths(): readonly string[] {
+    if (this.#roots.length === 0) return this.#mounts;
+    const now = Date.now();
+    if (now - this.#scannedAt >= this.#ttlMs) {
+      this.#scanned = this.#scan(this.#roots).map((p) => resolve(p));
+      this.#scannedAt = now;
+    }
+    return [...new Set([...this.#mounts, ...this.#scanned])];
   }
 
   /**
@@ -43,9 +90,9 @@ export class CwdAllowlist {
   /**
    * The refusal a person meets most often, so it says what would have to change rather than 403.
    *
-   * A repository cloned since the server started is not on the list and cannot be until it is
-   * restarted - so the sentence names the variable to edit and says what the restart actually
-   * costs. Since m2/session-metadata-survives-restart that cost is smaller and sharper than it
+   * Two ways out, and they do not cost the same. A clone under a root is free and immediate; an
+   * AGENTDECK_MOUNTS entry needs a restart, and the restart's real cost is named rather than
+   * implied. Since m2/session-metadata-survives-restart that cost is smaller and sharper than it
    * was: tmux keeps the processes and the restarted server adopts them back from tmux, cwd from
    * `#{session_path}` and agent from the id, so they are listed and streamed again. The
    * per-session hook secret is not recoverable and cannot be delivered to a process already
@@ -53,8 +100,13 @@ export class CwdAllowlist {
    * Understating that is how someone restarts casually and stops being told they are needed.
    */
   refusal(cwd: string): string {
+    const free =
+      this.#roots.length === 0
+        ? ""
+        : `Clone it under one of ${this.#roots.join(", ")} and it is startable at the next tap of ` +
+          `New session, with no restart. Otherwise: `;
     return (
-      `${resolve(cwd)} is not on the allowlist, so no session can start there. ` +
+      `${resolve(cwd)} is not on the allowlist, so no session can start there. ${free}` +
       `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running agents across ` +
       `that restart and they are listed and streamed again afterwards, but their per-session hook ` +
       `secret does not survive it, so waiting detection stays dead for each of them until that ` +
@@ -63,11 +115,22 @@ export class CwdAllowlist {
     );
   }
 
-  /** What GET /api/cwds serves: the list, with the live sessions in each. */
+  /**
+   * What GET /api/cwds serves: the list, with the live sessions in each.
+   *
+   * A basename shared by two entries is qualified with its parent, because a root holds one
+   * directory per owner and two owners' `dotfiles` would otherwise be two identical rows.
+   */
   list(sessionsByCwd: ReadonlyMap<string, string[]>): Cwd[] {
-    return this.paths.map((path) => ({
+    const paths = this.paths;
+    const seen = new Map<string, number>();
+    for (const path of paths) seen.set(basename(path), (seen.get(basename(path)) ?? 0) + 1);
+    return paths.map((path) => ({
       path,
-      name: basename(path),
+      name:
+        (seen.get(basename(path)) ?? 0) > 1
+          ? join(basename(dirname(path)), basename(path))
+          : basename(path),
       sessions: [...(sessionsByCwd.get(path) ?? [])],
     }));
   }

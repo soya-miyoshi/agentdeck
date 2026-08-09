@@ -108,6 +108,86 @@ void describe("plan 006 prices a restart at what it actually costs", () => {
   });
 });
 
+void describe("a root is read on every check, not captured at boot", () => {
+  /** An allowlist whose scan is a variable, so "cloned since" is expressible in a test. */
+  const withRoots = (
+    repos: string[],
+  ): { list: CwdAllowlist; repos: string[]; scans: () => number } => {
+    let scans = 0;
+    const found = repos;
+    const list = new CwdAllowlist(["/workspace/pinned"], ["/roots"], {
+      scan: () => {
+        scans += 1;
+        return found;
+      },
+      ttlMs: 0,
+    });
+    return { list, repos: found, scans: () => scans };
+  };
+
+  void test("a repository cloned since the server started is startable", () => {
+    const { list, repos } = withRoots(["/roots/host/owner/one"]);
+    assert.equal(list.allows("/roots/host/owner/two"), false);
+    repos.push("/roots/host/owner/two");
+    assert.equal(list.allows("/roots/host/owner/two"), true, "no restart should be needed");
+  });
+
+  void test("the fixed entries survive alongside the scanned ones", () => {
+    const { list } = withRoots(["/roots/host/owner/one"]);
+    assert.equal(list.allows("/workspace/pinned"), true);
+    assert.equal(list.allows("/roots/host/owner/one"), true);
+  });
+
+  void test("the root itself is not startable, and nor is a stranger under it", () => {
+    // Membership stays exact. The root names where to look for repositories, not a prefix that
+    // anything below it inherits.
+    const { list } = withRoots(["/roots/host/owner/one"]);
+    assert.equal(list.allows("/roots"), false);
+    assert.equal(list.allows("/roots/host/owner"), false);
+    assert.equal(list.allows("/roots/host/owner/one/src"), false);
+  });
+
+  void test("a scan is reused within its window rather than run per session", () => {
+    // The registry re-filters every live session against this list every two seconds.
+    let scans = 0;
+    const list = new CwdAllowlist([], ["/roots"], {
+      scan: () => {
+        scans += 1;
+        return ["/roots/host/owner/one"];
+      },
+      ttlMs: 60_000,
+    });
+    list.allows("/roots/host/owner/one");
+    list.allows("/roots/host/owner/one");
+    list.list(new Map());
+    assert.equal(scans, 1);
+  });
+
+  void test("no roots means no scan at all", () => {
+    let scans = 0;
+    const list = new CwdAllowlist(["/workspace/pinned"], [], {
+      scan: () => {
+        scans += 1;
+        return [];
+      },
+    });
+    assert.equal(list.allows("/workspace/pinned"), true);
+    assert.equal(scans, 0);
+  });
+
+  void test("the refusal offers the clone before the restart, and prices only the restart", () => {
+    const { list } = withRoots(["/roots/host/owner/one"]);
+    const message = list.refusal("/elsewhere/thing");
+    assert.match(message, /Clone it under one of \/roots/);
+    assert.match(message, /with no restart/);
+    assert.ok(
+      message.indexOf("Clone it under") < message.indexOf("AGENTDECK_MOUNTS"),
+      "the free way out should come first",
+    );
+    assert.match(message, /hook\s+secret does not survive/, "the restart still costs what it did");
+  });
+});
+
 void describe("what the picker is served", () => {
   void test("each entry carries its basename and the sessions already there", () => {
     const cwds = list.list(new Map([["/workspace/agentdeck", ["agentdeck-claude-abc"]]]));
@@ -115,6 +195,19 @@ void describe("what the picker is served", () => {
       { path: "/workspace/agentdeck", name: "agentdeck", sessions: ["agentdeck-claude-abc"] },
       { path: "/workspace/web", name: "web", sessions: [] },
     ]);
+  });
+
+  void test("two repositories sharing a basename are told apart by their owner", () => {
+    // A root holds one directory per owner, so `dotfiles` twice is ordinary rather than exotic -
+    // and two identical rows in the picker is a session started in the wrong tree.
+    const roots = new CwdAllowlist([], ["/roots"], {
+      scan: () => ["/roots/github.com/alice/dotfiles", "/roots/github.com/bob/dotfiles"],
+      ttlMs: 0,
+    });
+    assert.deepEqual(
+      roots.list(new Map()).map((cwd) => cwd.name),
+      ["alice/dotfiles", "bob/dotfiles"],
+    );
   });
 
   void test("the returned session arrays are copies", () => {
