@@ -175,11 +175,19 @@ void describe("the row as it is wired into the page", () => {
     );
   });
 
-  void test("a cap does not steal focus from the terminal", () => {
-    // Without this the soft keyboard closes the moment a thumb reaches for Esc, and the character
-    // typed next has nowhere to go. Both events, because a touch does not imply a mouse.
-    assert.match(keyRow, /@mousedown\.prevent/);
-    assert.match(keyRow, /@touchstart\.prevent/);
+  void test("a cap does not steal focus from the terminal, and still fires on a phone", () => {
+    // This asserted `@mousedown.prevent` and `@touchstart.prevent`, which is the mechanism that
+    // BROKE it: preventing a touch event suppresses the synthetic click iOS would have sent, so
+    // the `@click` behind it never ran and every cap was dead on a real device. It asserts the two
+    // properties now - focus is kept, and the emit happens on an event that actually fires -
+    // rather than the spelling that was supposed to deliver them.
+    assert.match(keyRow, /\.prevent/, "the soft keyboard will close under the thumb");
+    assert.doesNotMatch(
+      keyRow,
+      /@click=/,
+      "a cap emits on click; with the pointer event prevented that never fires on iOS",
+    );
+    assert.match(keyRow, /@pointerdown\.prevent="\$emit/, "no cap emits on pointerdown");
   });
 
   void test("the arrows' form is read off the terminal, not chosen by the page", () => {
