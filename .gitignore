@@ -10,5 +10,10 @@ dist
 # where an agent's own `ls -la` or `grep -rn token .` meets it. The server refuses to start if the
 # path resolves inside an allowlist entry.
 
+# This machine's paths and tailnet origin. Committed as .env.example instead. It holds no secret -
+# it names where the token and profiles files are, not what is in them - but it sits inside a
+# repository that is itself on the allowlist, so keep it that way.
+.env
+
 # Isolated checkouts for parallel agents. Whole copies of this repo; never committed.
 .claude/worktrees
