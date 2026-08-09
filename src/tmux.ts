@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -134,8 +135,29 @@ export const exactWindowTarget = (id: string): string => `=${id}:`;
 // crafted name forge extra fields.
 const SEP = "\u001f";
 
+/**
+ * agentdeck's own tmux configuration, passed as `-f` so `~/.tmux.conf` is never read here.
+ *
+ * The operator's config WAS being read on this socket - tmux resolves its config file from the
+ * home directory regardless of `-L` - and what it carried was not neutral: a `status-left` with
+ * `#(...)` in it runs a shell command on a timer inside the deck's own server, `mouse on` makes
+ * tmux claim the SGR mouse reports the phone's touch handling sends, and `prefix C-b` is the
+ * command channel this class exists to close. A config a person edits for their own terminal is
+ * not a config the deck should inherit by accident.
+ *
+ * Relative to this file rather than the working directory, so `pnpm start` from anywhere finds it,
+ * and fixed rather than configurable: one process, one config, the same reasoning as CLIENT_DIR.
+ *
+ * It only reaches a server WE start. `start-server` is a no-op against one that already exists,
+ * which is the ordinary case after attaching by hand, so `ensureServer` re-applies the settings
+ * that have to hold either way as globals.
+ */
+export const CONFIG_FILE = resolve(import.meta.dirname, "..", "tmux.conf");
+
 export interface TmuxOptions {
   socket: string;
+  /** Overridden only by tests that need a server with no config at all. */
+  configFile?: string;
   /**
    * Injected so tests can drive the parser without a tmux server.
    *
@@ -150,6 +172,7 @@ export interface TmuxOptions {
 
 export class Tmux {
   readonly socket: string;
+  readonly #configFile: string;
   #exec: (
     args: string[],
     extra?: Record<string, string>,
@@ -157,6 +180,7 @@ export class Tmux {
 
   constructor(options: TmuxOptions) {
     this.socket = options.socket;
+    this.#configFile = options.configFile ?? CONFIG_FILE;
     this.#exec =
       options.exec ??
       (async (args, extra) =>
@@ -164,7 +188,8 @@ export class Tmux {
         // SERVER is a child of whichever of these calls starts it, so its global environment -
         // which every pane inherits - is this object. `extra` is what a single session is given
         // on top of it, and it is here rather than on the command line because argv is public.
-        await run("tmux", ["-L", this.socket, ...args], {
+        // `-f` before everything: it decides which config a server this call might start reads.
+        await run("tmux", ["-f", this.#configFile, "-L", this.socket, ...args], {
           encoding: "utf8",
           env: { ...baseEnv(), ...extra },
           // execFile's default is 1MB, and `capture-pane -e` over HISTORY_LINES is agent-sized
@@ -361,6 +386,28 @@ export class Tmux {
       "-g",
       "prefix2",
       "none",
+      // The three settings from tmux.conf that must hold on a server we did NOT start, applied
+      // the same way the prefix is and for the same reason: `-f` reaches a server this call
+      // starts, and `start-server` does nothing to one that already exists. `status off` because
+      // a status line with `#()` in it runs shell commands on a timer inside this server, and
+      // because it costs a row of a phone-sized pane. `mouse off` because every byte the phone
+      // sends reaches this client's parser first. `history-limit` because a foreign server's is
+      // whatever the operator's config said, and a snapshot captures 2000 lines.
+      ";",
+      "set-option",
+      "-g",
+      "status",
+      "off",
+      ";",
+      "set-option",
+      "-g",
+      "mouse",
+      "off",
+      ";",
+      "set-option",
+      "-g",
+      "history-limit",
+      "10000",
     ]);
     await this.#clearInheritedGlobalEnv();
   }

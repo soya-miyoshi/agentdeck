@@ -11,9 +11,23 @@ import type { SessionState, Tmux } from "./tmux.ts";
 // terminal, a session whose agent exited while nobody was looking - are exactly the ones a
 // remembered set gets wrong.
 
-/** Size a session's pane opens at before any browser client has said what it wants. */
-const DEFAULT_COLS = 120;
-const DEFAULT_ROWS = 40;
+/**
+ * Size a session's pane opens at before any browser client has said what it wants.
+ *
+ * Phone-sized, because the phone is the only thing that attaches. It was 120x40, which had no
+ * argument behind it and one visible cost: tmux does not reflow history, so every line written
+ * before the first attach stayed in the scrollback wrapped at 120 and was wrapped a second time by
+ * a client half that wide. `capture-pane -J` now makes that width irrelevant, and this makes it
+ * close to right in the first place.
+ *
+ * The arithmetic, so a later reader can redo it rather than trust it: xterm's default 13px
+ * monospace is about 7.8px per column, and a portrait phone is around 390 CSS pixels wide. Rows
+ * are the remaining height over a ~15.6px line, once the tab strip and the key row have taken
+ * theirs. Both are superseded the moment a real client attaches and reports what it measured, so
+ * this only has to be near - and it has NOT been checked against a device.
+ */
+const DEFAULT_COLS = 50;
+const DEFAULT_ROWS = 30;
 
 // A repaint is finished when tmux stops writing, and tmux does not say so. There is no marker in
 // the stream and nothing to synchronise on: `refresh-client` returns as soon as the redraw is

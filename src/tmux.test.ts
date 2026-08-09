@@ -339,6 +339,12 @@ void describe("ensuring a server exists", () => {
       // `ensureServer`. Chained with the rest for the same reason they are: one invocation.
       ["set-option", "-g", "prefix", "none"],
       ["set-option", "-g", "prefix2", "none"],
+      // tmux.conf reaches a server this call STARTS. These three have to hold on one someone else
+      // started too - which is the ordinary case, since attaching by hand starts one - so they are
+      // set as globals here as well.
+      ["set-option", "-g", "status", "off"],
+      ["set-option", "-g", "mouse", "off"],
+      ["set-option", "-g", "history-limit", "10000"],
     ]);
   });
 

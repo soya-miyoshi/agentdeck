@@ -1670,3 +1670,42 @@ open an answer, the refetch when a turn ends, and the `-J` fix as a person sees 
 device. What was demonstrated on the Mac: the `-J` capture against a real tmux, the hook command
 run through a real shell against a real socket with a real 3776-character captured answer and a
 500,000-character one, and 890 tests.
+
+## The deck's tmux is no longer configured by the operator's terminal
+
+**Found while answering a question about it, not reported as a fault.** `~/.tmux.conf` was being
+read by agentdeck's tmux server: `-L` picks the socket, it does not change where tmux resolves its
+config from. Verified by reading the running options off a server started by hand.
+
+What the operator's config was actually doing on this socket: `mouse on`, which makes tmux claim
+the SGR mouse reports the phone's touch handling sends; a `set-titles-string` containing `#(cd ...
+&& git branch ...)`, which runs shell commands on a timer inside the deck's own server; `status
+on`, costing a row of a phone-sized pane; and `prefix C-b`, which `Tmux.ensureServer` was already
+overriding at boot.
+
+**Fixed:** `tmux.conf` in the repository, passed as `-f`, so a server agentdeck starts reads it and
+never the operator's. The settings that must hold on a server agentdeck did NOT start - status,
+mouse, history-limit - are also applied as globals in `ensureServer`, the same way and for the same
+reason the prefix already was: `start-server` is a no-op against a live server, and attaching by
+hand is the documented way to reach an orphaned session.
+
+Both paths checked against a real tmux rather than inferred. A server started with `-f` reports
+`mouse off`, `history-limit 10000`, `prefix None`, against the operator's `on`/`50000`/`C-b`. A
+server started by hand reports the operator's values and reports agentdeck's after `ensureServer`.
+
+**`DEFAULT_COLS` is now 50x30 rather than 120x40** (`src/hub.ts`), because the phone is the only
+thing that attaches and 120 had no argument behind it. It decided the width of every line written
+before the first attach, and tmux does not reflow history.
+
+*Accepted with a reason:* `tmux.conf` is host-executed in the sense CLAUDE.md means - tmux reads it
+as the operator and a `run-shell` in it would execute on the Mac. Nothing in it runs a command. It
+is not on CLAUDE.md's stop-and-ask list because it did not exist when that list was written; adding
+it there is Soya's call.
+
+*Accepted with a reason:* `history-limit` drops from the operator's 50000 to 10000. A cold snapshot
+captures 2000 lines, so the deck cannot show more than it captures either way; the difference is
+only visible to a person attached by hand.
+
+*Not demonstrated:* the new 50x30 default is arithmetic, not a measurement - 13px monospace at
+about 7.8px per column against a ~390px portrait phone. It has not been checked against a device,
+and the first attach supersedes it, so being near is all it has to be.
