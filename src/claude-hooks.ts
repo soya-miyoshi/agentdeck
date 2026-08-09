@@ -2,6 +2,20 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { SessionState } from "./tmux.ts";
+import { MAX_FIELD_CHARS } from "./turn-log.ts";
+
+/**
+ * Body limit for `POST /api/hooks/:id`, larger than every other route's.
+ *
+ * A hook payload now carries the turn's text (plan 007), and the fields are already cut to
+ * `MAX_FIELD_CHARS` code points by the hook command before it sends. Two of those at three bytes
+ * per character is the size this has to clear, and it is the reason the number is not the 64KB
+ * the rest of the API uses. Bounded above by the route's own rate limit either way.
+ */
+export const HOOK_MAX_BODY_BYTES = 256 * 1024;
+
+/** What the hook command buffers before giving up: enough to parse and trim a large payload. */
+const HOOK_READ_LIMIT = 1024 * 1024;
 
 // Claude Code's hooks, mapped to session states, and the settings fragment that installs them.
 //
@@ -113,6 +127,45 @@ export const mapHookEvent = (
 };
 
 // ---------------------------------------------------------------------------------------------
+// The turn log's half of the same payloads (plan 007).
+
+/** One half of a turn, as read out of a hook payload. */
+export type TurnPart =
+  | { kind: "ask"; promptId: string; prompt: string }
+  | { kind: "answer"; promptId: string; answer: string };
+
+/**
+ * Read the turn text out of a payload, or undefined when there is none in it.
+ *
+ * `prompt_id` is the same value on both events - verified in `fixtures/claude-turns.jsonl` - so
+ * the two halves join on a key the agent supplies rather than on a timestamp guess.
+ *
+ * `last_assistant_message` is the agent's final text block verbatim: 3776 characters of markdown
+ * in the captured long turn, and correct for a Japanese one. What it holds when a turn's last
+ * block is a tool call rather than text could not be captured, so a missing, non-string or empty
+ * value returns undefined here and logs nothing, rather than writing an entry whose shape was
+ * assumed.
+ */
+export const turnFromHookEvent = (payload: unknown): TurnPart | undefined => {
+  if (!isRecord(payload)) return undefined;
+  const promptId = payload["prompt_id"];
+  if (typeof promptId !== "string" || promptId === "") return undefined;
+
+  const event = payload["hook_event_name"];
+  if (event === "UserPromptSubmit") {
+    const prompt = payload["prompt"];
+    if (typeof prompt !== "string" || prompt === "") return undefined;
+    return { kind: "ask", promptId, prompt };
+  }
+  if (event === "Stop") {
+    const answer = payload["last_assistant_message"];
+    if (typeof answer !== "string" || answer === "") return undefined;
+    return { kind: "answer", promptId, answer };
+  }
+  return undefined;
+};
+
+// ---------------------------------------------------------------------------------------------
 // The settings fragment.
 
 /** The events worth installing. Anything else would post a request that changes no state. */
@@ -170,9 +223,31 @@ export const hookCommand = (port: number, interpreter: string = process.execPath
     // closed leaves a Node runtime resident for the life of the session, buffering as it goes.
     `setTimeout(()=>process.exit(0),2000).unref();` +
     `let b="";` +
-    // The server refuses bodies over 64KB, so anything past that is buffering guaranteed to be
-    // thrown away.
-    `process.stdin.on("data",(c)=>{if(b.length<65536)b+=c}).on("end",()=>{` +
+    // A StringDecoder holds a partial multi-byte sequence across a read boundary; appending raw
+    // chunks decodes each one alone, and a character split by the boundary becomes U+FFFD. NOT
+    // observed here - a 90KB Japanese payload came through both ways intact, because it takes the
+    // boundary landing inside a character - and kept anyway: payloads only became big enough to
+    // be chunked at all when they started carrying a turn's text, and the corruption it prevents
+    // is silent and permanent once written.
+    `process.stdin.setEncoding("utf8");` +
+    // Buffered well past what will be sent, because the trim below needs the whole payload to be
+    // valid JSON before it can shorten it. Anything past this is a payload nothing will accept.
+    `process.stdin.on("data",(c)=>{if(b.length<${String(HOOK_READ_LIMIT)})b+=c}).on("end",()=>{` +
+    // The two long fields are cut HERE, in the agent's own process, before the payload crosses
+    // the socket. Without it a turn with a long answer produced a body the route refuses, so the
+    // status frame for that turn was lost as well as its text - and a long answer is exactly the
+    // turn the log exists for. Code points, not bytes: a byte cut halves a multi-byte character.
+    //
+    // ONE character past the store's own bound, deliberately. Cutting to exactly the bound here
+    // would hand the store a field it cannot tell from a complete one, and the log would call a
+    // truncated answer whole. One over means the store's own cut fires and sets `truncated`.
+    `try{const p=JSON.parse(b);` +
+    `for(const k of ["last_assistant_message","prompt"]){const v=p[k];` +
+    `if(typeof v==="string")p[k]=Array.from(v).slice(0,${String(MAX_FIELD_CHARS + 1)}).join("")}` +
+    `b=JSON.stringify(p)}catch(e){}` +
+    // Still oversized means it was not JSON we could shorten. Dropping it is what already
+    // happened, one layer later, as a 400.
+    `if(b.length>${String(HOOK_MAX_BODY_BYTES)})return;` +
     `const r=require("http").request({` +
     `host:"127.0.0.1",port:${String(port)},` +
     `path:"${HOOK_MARKER}"+encodeURIComponent(process.env.AGENTDECK_SESSION_ID||""),` +

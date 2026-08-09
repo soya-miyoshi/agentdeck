@@ -10,6 +10,7 @@ import {
   fetchAgents,
   fetchCwds,
   fetchSessions,
+  fetchTurns,
   UnauthorizedError,
   verifyToken,
 } from "./api.ts";
@@ -20,6 +21,8 @@ import KeyRow from "./KeyRow.vue";
 import NewSession from "./NewSession.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
+import type { Turn } from "../turn-log.ts";
+import TurnHistory from "./TurnHistory.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 import { clearToken, loadToken, saveToken } from "./token-store.ts";
@@ -45,6 +48,65 @@ const handles = new Map<string, TerminalHandle>();
 
 const tabs = computed(() => toTabs(sessions.value, agents.value));
 const reconnecting = computed(() => status.value === "reconnecting");
+
+// The answers, kept for the active session only. Plan 007 puts them behind a fetch rather than a
+// socket frame, so there is nothing to keep in sync - the list is whatever the last GET returned.
+const historyOpen = ref(false);
+const turns = ref<Turn[]>([]);
+const turnsTruncated = ref(false);
+const turnsLoading = ref(false);
+const turnsError = ref<string>();
+
+const logsTurns = computed(() => {
+  const id = active.value;
+  if (id === undefined) return false;
+  const session = sessions.value.find((candidate) => candidate.id === id);
+  return agents.value.find((agent) => agent.id === session?.agent)?.logsTurns ?? false;
+});
+
+const loadTurns = async (): Promise<void> => {
+  const id = active.value;
+  const current = token.value;
+  if (id === undefined || current === undefined) return;
+  turnsLoading.value = true;
+  turnsError.value = undefined;
+  try {
+    const page = await fetchTurns(current, id);
+    // The tab may have changed while this was in flight, and answering the wrong session's
+    // question with this one's answers is worse than showing nothing.
+    if (active.value !== id) return;
+    turns.value = page.turns;
+    turnsTruncated.value = page.truncated;
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      signOut("The deck rejected the token. Paste it again.");
+      return;
+    }
+    turnsError.value = error instanceof Error ? error.message : "could not load the answers";
+  } finally {
+    turnsLoading.value = false;
+  }
+};
+
+const openHistory = (): void => {
+  historyOpen.value = true;
+  turns.value = [];
+  void loadTurns();
+};
+
+// A turn ending is a transition the strip is already told about, so this is the refetch plan 002
+// chose instead of a second delivery path for the same fact. Only while the list is being looked
+// at: a closed overlay has nothing to keep current.
+watch(
+  () => (active.value === undefined ? undefined : tabs.value.find((tab) => tab.id === active.value)?.state),
+  (state, previous) => {
+    if (historyOpen.value && state === "idle" && previous === "working") void loadTurns();
+  },
+);
+
+watch(active, () => {
+  historyOpen.value = false;
+});
 
 const note = (message: string): void => {
   // Newest first, and bounded: an error surface that grows without limit becomes the page.
@@ -302,6 +364,9 @@ if (token.value !== undefined) start(token.value);
       @select="select"
       @close="(id) => void endSession(id)"
     />
+    <!-- Offered only for an agent that reports its own turns: an empty list for an agent that
+         never will reads as broken (plan 004). -->
+    <button v-if="logsTurns" class="answers" type="button" @click="openHistory">Answers</button>
     <!-- Without this the deck can drive sessions but never start one. -->
     <NewSession
       :cwds="cwds"
@@ -323,6 +388,14 @@ if (token.value !== undefined) start(token.value);
         @gone="gone"
         @input="typed"
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
+      />
+      <TurnHistory
+        v-if="historyOpen"
+        :turns="turns"
+        :truncated="turnsTruncated"
+        :loading="turnsLoading"
+        :error="turnsError"
+        @close="historyOpen = false"
       />
     </main>
     <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
@@ -355,6 +428,17 @@ if (token.value !== undefined) start(token.value);
      background between the two. */
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
+}
+.answers {
+  align-self: flex-start;
+  margin: 0 0.75rem 0.25rem;
+  border: 0;
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.8rem;
+  background: #39405060;
+  color: #d7dae0;
+  font: inherit;
+  font-size: 0.85rem;
 }
 .banner {
   margin: 0;

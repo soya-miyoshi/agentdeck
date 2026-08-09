@@ -83,6 +83,19 @@ hook in particular fires precisely when the agent is blocked on a person, which 
 whole tool exists to surface, and the one a push notification would eventually carry
 ([plan 003](003-milestones.md), M5).
 
+### `hook` is also the only mechanism that yields a turn log
+
+The same preference order has a second consequence, added by [plan 007](007-turn-log.md). An agent
+whose hook payload states what it finally said gets a per-session history the phone can read as a
+list; an agent whose status we infer from its pixels does not, because there is no honest way to
+cut an answer out of a rendered screen. So `logsTurns` on the profile summary is derived, not
+configured: it is true exactly when the profile's mechanism is `hook` and its handler extracts an
+answer. `log` and `screen` profiles report `false`, as does a profile with no mechanism at all,
+and `shell` reports `false` because a shell has no turns.
+
+That is a supported configuration, in the same sense `detectsWaiting: false` is: the client shows
+no history affordance for those sessions rather than an empty list that reads as broken.
+
 `screen` is supported and documented, because some CLI will have neither of the others and a weak
 signal beats none. It is not the default and it is not what `claude` uses. Its rules — match the
 rendered screen and never the raw pty stream, scan rows rather than testing the last one, treat a

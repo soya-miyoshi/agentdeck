@@ -3,13 +3,15 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AgentProfile } from "./agent-profiles.ts";
 import { summarise } from "./agent-profiles.ts";
-import { mapHookEvent } from "./claude-hooks.ts";
+import { HOOK_MAX_BODY_BYTES, mapHookEvent, turnFromHookEvent } from "./claude-hooks.ts";
 import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
 import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import type { SessionState } from "./tmux.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
+import type { TurnLog } from "./turn-log.ts";
+import { MAX_TURNS } from "./turn-log.ts";
 
 // A terminal server is remote code execution by design. MulmoTerminal binds loopback for exactly
 // that reason and has no auth of its own - safe only while nothing remote can connect at all,
@@ -45,6 +47,12 @@ export interface HttpDeps {
    * sync. Plan 002: `state` is pushed, not polled, and a hook exists to arrive AT the transition.
    */
   onStateDeclared?: (sessionId: string, state: SessionState) => void;
+  /**
+   * The turn store (plan 007). Optional: without it the hook route still decides state, and the
+   * turns route answers an empty list rather than an error - a deployment with no history is a
+   * supported one, not a broken one.
+   */
+  turns?: TurnLog;
 }
 
 interface Handled {
@@ -57,7 +65,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** Typed so the route can answer 413 with this sentence rather than the generic 500. */
 class BodyTooLargeError extends Error {}
 
-const readJson = async (req: IncomingMessage): Promise<unknown> => {
+const readJson = async (req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> => {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -65,7 +73,7 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
     size += buf.length;
     // Bounded before buffering, not after: an unbounded read is a denial of service that needs
     // no credentials at all.
-    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError("request body too large");
+    if (size > limit) throw new BodyTooLargeError("request body too large");
     chunks.push(buf);
   }
   if (size === 0) return undefined;
@@ -139,9 +147,18 @@ export const createHandler = (deps: HttpDeps) => {
       }
       let payload: unknown;
       try {
-        payload = await readJson(req);
+        payload = await readJson(req, HOOK_MAX_BODY_BYTES);
       } catch {
         return { status: 400, body: { error: "hook payload was not JSON" } };
+      }
+
+      // The turn log's half, before the state decision, because a payload that changes no state
+      // can still carry text worth keeping - and because losing an answer to an early return is
+      // the failure this feature exists to avoid.
+      const part = turnFromHookEvent(payload);
+      if (part?.kind === "ask") deps.turns?.noteAsk(id, part.promptId, part.prompt, Date.now());
+      if (part?.kind === "answer") {
+        deps.turns?.recordAnswer(id, part.promptId, part.answer, Date.now());
       }
 
       const { state, reason } = mapHookEvent(payload);
@@ -223,6 +240,20 @@ export const createHandler = (deps: HttpDeps) => {
           return { status: 404, body: { error: error.message } };
         throw error;
       }
+    }
+
+    // The turn log (plan 007). An unknown session, an agent with no turn-reporting mechanism and a
+    // session that has not finished a turn all answer the same empty list: the absence of history
+    // is not the absence of a session, and the client decides what to offer from `logsTurns` on
+    // the agent, which it already has.
+    const turns = /^\/api\/sessions\/([^/]+)\/turns$/.exec(path);
+    if (method === "GET" && turns) {
+      const id = decodeURIComponent(turns[1] ?? "");
+      const asked = Number(url.searchParams.get("limit"));
+      const limit =
+        Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), MAX_TURNS) : MAX_TURNS;
+      const found = deps.turns?.read(id, limit) ?? { turns: [], truncated: false };
+      return { status: 200, body: found };
     }
 
     const remove = /^\/api\/sessions\/([^/]+)$/.exec(path);

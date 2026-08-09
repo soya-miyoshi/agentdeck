@@ -461,6 +461,9 @@ void describe("capture and repaint", () => {
     assert.ok(call, "capture-pane was never called");
     assert.ok(call.includes("-e"));
     assert.ok(call.includes("-p"));
+    // -J, so a wrapped line comes back as one line and the client wraps it at its own width
+    // instead of inheriting the pane's.
+    assert.ok(call.includes("-J"));
     assert.deepEqual(call.slice(call.indexOf("-S"), call.indexOf("-S") + 2), ["-S", "-2000"]);
   });
 

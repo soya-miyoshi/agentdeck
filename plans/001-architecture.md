@@ -48,6 +48,13 @@ escapes intact, and it keeps working across restarts of our own process because 
 separate long-lived daemon. This is the single decision that removes the database from the
 design.
 
+It stores the *screen*, and only that. What the agent finally said in a turn is prose, not
+terminal state, and asking the scrollback for it costs a line budget spent on tool output, a wrap
+width belonging to another client, and ANSI that cannot be searched or quoted. That text is kept
+separately, as one append-only JSONL file per session, in [plan 007](007-turn-log.md). The
+database stays out of the design there too, and the reasoning is recorded in that plan rather than
+re-derived here.
+
 Sessions are created with **`remain-on-exit on`**. tmux's default is to destroy a session the
 moment its command exits, which would mean an agent that finished or crashed removed its own tab
 and its exit code with it — leaving the strip unable to distinguish "it is done" from "I lost it",
@@ -71,6 +78,13 @@ survive a crash of the server", not "the server survives a crash".
 The end of that scope is the machine. A reboot, a `tmux kill-server`, or logging out takes every
 session with it. Nothing here tries to survive that — the working day is the stated persistence
 requirement.
+
+**One thing is exempt, deliberately.** The turn log of plan 007 is on disk under `~/.agentdeck`,
+keyed by a session id that is a pure function of (absolute path, agent id), so it outlives the
+reboot that takes the session. A session recreated in the same directory with the same agent finds
+its own history waiting. That is a widening of the scope above and it is named here rather than
+left to be discovered: the sessions last a working day, what the agent *said* lasts until it is
+trimmed.
 
 ## Streaming: WebSocket plus a bounded ring buffer
 

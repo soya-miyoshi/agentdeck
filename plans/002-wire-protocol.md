@@ -17,6 +17,7 @@ route not called by the phone authenticates differently, for reasons given under
 | `GET` | `/api/sessions` | `{ sessions: Session[] }` |
 | `POST` | `/api/sessions` | `{ session: Session, warning?: string }` — body `{ cwd, agent }` |
 | `DELETE` | `/api/sessions/:id` | `{ closed: true }` |
+| `GET` | `/api/sessions/:id/turns` | `{ turns: Turn[], truncated: boolean }` — newest first (plan 007) |
 | `GET` | `/api/agents` | `{ agents: AgentSummary[] }` — the configured profiles |
 | `GET` | `/api/cwds` | `{ cwds: Cwd[] }` — the directories a session may be started in |
 | `GET` | `/api/health` | `{ ok: true, version }` |
@@ -44,6 +45,17 @@ interface AgentSummary {
   available: boolean;      // its command resolves on PATH right now
   detectsWaiting: boolean; // profile has a working waiting mechanism; false means this agent
                            // reports only working/idle/exited (plan 004)
+  logsTurns: boolean;      // profile reports its turn text; false means this agent's sessions have
+                           // no history to show at all (plan 007)
+}
+
+interface Turn {
+  promptId: string;   // the agent's own prompt_id: the join key and the de-duplication key
+  askedAt: number;    // unix ms, when the turn started
+  endedAt: number;    // unix ms, when the turn ended
+  prompt: string;     // "" when the asking half was never seen; see plan 007
+  answer: string;     // the agent's final message, plain text, truncated at a documented bound
+  truncated?: true;   // present when either field was cut
 }
 
 interface Cwd {
@@ -116,6 +128,24 @@ started is not on the list, and cannot be until it is restarted.
 the session already running rather than starting a second (plan 004). It is the response saying it
 did not do what was asked, not advice about the tree.
 
+### `GET /api/sessions/:id/turns`
+
+What the agent was asked and what it finally answered, newest first, from the store in
+[plan 007](007-turn-log.md). Bearer token like every other phone route.
+
+`?limit=` is bounded server-side, and the response is capped by total bytes as well as by count —
+`truncated: true` says a cap was hit. A session whose agent has no turn-reporting mechanism, or
+which has no log yet, answers `{ turns: [], truncated: false }` rather than 404: the absence of
+history is not the absence of a session, and the client decides what to show from `logsTurns` on
+the agent, which it already has.
+
+**There is no `turn` frame on the socket.** A turn ending is a transition to `idle`, which the
+client is already told about, so refetching this route on that transition is one request per turn
+on a tab a person is looking at, against a server on the same machine. A push frame would be a
+second delivery path for a fact already delivered, with its own ordering question against the
+stream's `seq`, to save a request that costs nothing. If the refetch is ever visibly late, that
+measurement is what changes this.
+
 ### `POST /api/probe`
 
 Side-effect-free, authenticated, and a `POST` on purpose. It exists so the client can find out
@@ -145,6 +175,12 @@ hook sends back and the route checks against that session id.
 
 The asymmetry is the point: a leaked session secret can lie about one session's status, while the
 user's token can start processes.
+
+Since plan 007 that secret buys one thing more: a caller holding it can write bounded text into
+that session's turn log — at most one entry per unseen `prompt_id`, each field truncated, the file
+trimmed to a fixed number of turns. So the worst it can do is put false answers in front of a
+person and consume a bounded amount of disk. It still cannot start a process, reach another
+session, or grow without limit, and those three are what the bounds in plan 007 exist to keep true.
 
 **What the secret is not is a wall between sessions.** Every session runs as the same user on
 the same Mac, and this used to be written down as one agent reading another's
