@@ -58,8 +58,7 @@ const start = (): void => {
       </button>
 
       <p class="label">Agent</p>
-      <!-- An agent whose command does not resolve on PATH is shown disabled with the reason: a tab
-           that dies the instant it opens is the confidently wrong output this design refuses. -->
+      <!-- Disabled with the reason, never hidden: see agentChoices in new-session.ts. -->
       <button
         v-for="choice in choices"
         :key="choice.id"

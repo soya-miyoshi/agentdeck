@@ -84,11 +84,8 @@ export const fetchCwds = async (token: string): Promise<Cwd[]> =>
   (await request<{ cwds: Cwd[] }>(token, "/api/cwds")).cwds;
 
 /**
- * Start a session in a directory the server named, with an agent the server named.
- *
- * The `warning` comes back with a 201 and is returned rather than dropped: it is how "two agents
- * in one working tree" and "you were attached to the one already running" are ever seen. A refusal
- * arrives as an Error carrying the server's own sentence, which `request` does not reword.
+ * Start a session in a directory the server named, with an agent the server named. The 201's
+ * `warning` is returned rather than dropped: it is how a second agent in one tree is ever seen.
  */
 export const createSession = async (
   token: string,

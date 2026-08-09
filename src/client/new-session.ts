@@ -31,11 +31,8 @@ export const directoryChoices = (cwds: readonly Cwd[]): DirectoryChoice[] =>
   });
 
 /**
- * The profiles as offerable agents.
- *
- * `available: false` is the agent's command not resolving on PATH right now, so it is offered
- * disabled with the reason rather than hidden: hiding it answers "where did claude go" with
- * nothing. The `detectsWaiting` wording matches the tab strip's "no waiting alerts".
+ * The profiles as offerable agents. An agent whose command does not resolve on PATH is offered
+ * disabled with the reason rather than hidden; "no waiting alerts" is the tab strip's wording.
  */
 export const agentChoices = (agents: readonly AgentSummary[]): AgentChoice[] =>
   agents.map((agent) => {

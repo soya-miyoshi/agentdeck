@@ -104,11 +104,8 @@ const loadCwds = async (): Promise<void> => {
 };
 
 /**
- * Create the session the picker chose, and show what the server said about it.
- *
- * The 201's `warning` - two agents in one working tree, or an already-running session handed back -
- * is displayed, and a refusal is displayed in the server's own words. Swallowing either is what
- * makes a second agent editing one tree invisible.
+ * Create the session the picker chose. The 201's `warning` and a refusal are both shown in the
+ * server's own words; swallowing either is what makes a second agent in one tree invisible.
  */
 const startSession = async (cwd: string, agent: string): Promise<void> => {
   const current = token.value;
@@ -267,8 +264,7 @@ if (token.value !== undefined) start(token.value);
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else class="app">
     <TabStrip :tabs="tabs" :active="active" @select="select" />
-    <!-- Without this the deck can drive sessions but never start one, and "No sessions" is a dead
-         end on a phone with no terminal on the Mac. -->
+    <!-- Without this the deck can drive sessions but never start one. -->
     <NewSession
       :cwds="cwds"
       :agents="agents"
