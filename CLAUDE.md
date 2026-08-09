@@ -34,8 +34,6 @@ If something genuinely warrants adversarial review, say so and let Soya decide. 
 - **Six runtime dependencies, and the budget is SPENT** (`node-pty`, `ws`, `vue`, `@xterm/xterm`,
   `@xterm/addon-fit`, `qrcode-generator`). Any new runtime dependency, or any `package.json` change,
   is a stop-and-ask.
-- **The plans in `plans/` are the contract.** If the implementation needs a shape they do not
-  describe, the plan changes first, by a person.
 - **No emojis anywhere** — code, comments, docs, commit messages, UI.
 - **Comments are one or two lines per function**: what it does and the one non-obvious constraint.
   Long reasoning goes to `audit.md` or a plan, not inline.

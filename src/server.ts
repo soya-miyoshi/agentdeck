@@ -24,6 +24,7 @@ import { Tmux } from "./tmux.ts";
 import { readTailnet, tailnetAdvice } from "./tailnet.ts";
 import { generateToken } from "./token.ts";
 import { TurnLog } from "./turn-log.ts";
+import { UploadStore } from "./uploads.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
 const run = promisify(execFile);
@@ -240,6 +241,13 @@ export const main = async (): Promise<void> => {
   // same repository finds its own history.
   const turns = new TurnLog(env("AGENTDECK_TURNS_DIR", join(homedir(), ".agentdeck", "turns")));
 
+  // Images the phone sends into a session. Beside the token and the turn log rather than inside
+  // any repository: a screenshot is not the work, and a session's tree is what a git remote
+  // protects.
+  const uploads = new UploadStore(
+    env("AGENTDECK_UPLOAD_DIR", join(homedir(), ".agentdeck", "uploads")),
+  );
+
   const mounts = env("AGENTDECK_MOUNTS", "")
     .split(":")
     .filter((entry) => entry !== "");
@@ -418,6 +426,7 @@ export const main = async (): Promise<void> => {
         probe: async () => await probeTmux(socket),
         streamFor: (id) => hub.streamFor(id),
         turns,
+        uploads,
         onStateDeclared: (id, state) => {
           // `POST /api/hooks/:id` is the one route not behind the user's token - it is
           // authenticated by the per-session secret, which `Registry.secretMatches` checks against

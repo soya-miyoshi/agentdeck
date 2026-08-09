@@ -1813,3 +1813,37 @@ width and is wrapped again at 40. Nothing can reflow it - that is the same tmux 
 entry is about - and with the width now constant it can only affect sessions that predate it.
 
 *Not demonstrated:* the phone. Third round.
+
+## Sending an image from the phone
+
+`POST /api/sessions/:id/uploads` takes the raw image bytes, writes them under
+`~/.agentdeck/uploads/<session>/`, and answers with the path. The client downscales to 1568px on
+the longest edge, uploads, and TYPES the path at the prompt without submitting it.
+
+The bytes never go near the terminal stream. A screenshot pasted into a pty is megabytes of base64
+typed at an agent's prompt through a 40-column pane; a path is 60 characters and the agent reads
+the file itself.
+
+Raw body rather than multipart or base64: multipart costs a dependency and the budget is spent,
+base64 costs a third of the phone's uplink. The one route whose body is legitimately megabytes gets
+its own 8MB ceiling; every other route keeps the 64KB one, which is right for JSON and was never
+about this.
+
+**Filenames are entirely the server's.** A random stem plus an extension chosen from a safelisted
+content type, so nothing the client sends is ever part of a path - there is no traversal to
+sanitise, no second dot, no `.command` landing in a directory the operator may open in Finder. The
+session id, which does arrive as a raw path segment, goes through the same allowlist-filtered
+`Registry.list()` that `close` uses before any directory is made.
+
+*Accepted with a reason:* the upload directory is readable by anything running as the operator,
+like the token, the hook secrets and the tmux socket. Same-uid is the standing residual, and a
+screenshot of the deck is not a new class of secret. It is outside every allowlist entry so an
+agent's own `grep -rn` does not walk into another session's images.
+
+*Accepted with a reason:* 20 images per session, oldest deleted by mtime. A button on a phone must
+not grow disk without end, and there is no expiry - a session that is never used again keeps its
+last 20 until someone removes the directory.
+
+*Not demonstrated:* the phone. `createImageBitmap`, the file picker sheet, HEIC normalisation and
+whether the typed path lands in Claude's prompt rather than being eaten by its input handling are
+all unverified on a real device. The server half is covered by tests; the iOS half is not.

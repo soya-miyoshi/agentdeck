@@ -10,6 +10,8 @@ import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import type { SessionState } from "./tmux.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
+import type { UploadStore } from "./uploads.ts";
+import { UnsupportedImageError } from "./uploads.ts";
 import type { TurnLog } from "./turn-log.ts";
 import { MAX_TURNS } from "./turn-log.ts";
 
@@ -53,6 +55,12 @@ export interface HttpDeps {
    * supported one, not a broken one.
    */
   turns?: TurnLog;
+  /**
+   * Where an image from the phone is written. Optional: without it the route answers 501 rather
+   * than the deck failing to start, so a deployment that does not want files on disk simply has
+   * no upload button that works.
+   */
+  uploads?: UploadStore;
 }
 
 interface Handled {
@@ -62,10 +70,20 @@ interface Handled {
 
 const MAX_BODY_BYTES = 64 * 1024;
 
+/**
+ * The image route's own ceiling, far above every other route's.
+ *
+ * Its own constant rather than a raised `MAX_BODY_BYTES`, because the reason 64KB is right for the
+ * JSON routes has not changed: this is the only route whose body is legitimately megabytes, and it
+ * is the only one that writes to disk. The client downscales before sending, so this is the
+ * backstop for a client that does not, not the expected size.
+ */
+const UPLOAD_MAX_BODY_BYTES = 8 * 1024 * 1024;
+
 /** Typed so the route can answer 413 with this sentence rather than the generic 500. */
 class BodyTooLargeError extends Error {}
 
-const readJson = async (req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> => {
+const readBody = async (req: IncomingMessage, limit: number): Promise<Buffer> => {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -76,8 +94,13 @@ const readJson = async (req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<u
     if (size > limit) throw new BodyTooLargeError("request body too large");
     chunks.push(buf);
   }
-  if (size === 0) return undefined;
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks);
+};
+
+const readJson = async (req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> => {
+  const body = await readBody(req, limit);
+  if (body.length === 0) return undefined;
+  return JSON.parse(body.toString("utf8"));
 };
 
 const asString = (value: unknown): string | undefined =>
@@ -254,6 +277,38 @@ export const createHandler = (deps: HttpDeps) => {
         Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), MAX_TURNS) : MAX_TURNS;
       const found = deps.turns?.read(id, limit) ?? { turns: [], truncated: false };
       return { status: 200, body: found };
+    }
+
+    // An image from the phone, written to disk so the agent can be handed a path. The bytes are
+    // the body as they are - no multipart, no base64 - because both cost a dependency or a third
+    // of the phone's uplink for nothing.
+    const upload = /^\/api\/sessions\/([^/]+)\/uploads$/.exec(path);
+    if (method === "POST" && upload) {
+      if (deps.uploads === undefined) {
+        return { status: 501, body: { error: "this deck has no upload directory configured" } };
+      }
+      const id = decodeURIComponent(upload[1] ?? "");
+      // The same allowlist-filtered list `close` goes through: an id that is not one of ours must
+      // not get a directory, and this is the only thing standing between a path segment and mkdir.
+      const ours = (await deps.registry.list()).some((session) => session.id === id);
+      if (!ours) return { status: 404, body: { error: `no session ${id}` } };
+      let bytes: Buffer;
+      try {
+        bytes = await readBody(req, UPLOAD_MAX_BODY_BYTES);
+      } catch (error) {
+        if (error instanceof BodyTooLargeError)
+          return { status: 413, body: { error: "that image is too large; send under 8MB" } };
+        throw error;
+      }
+      if (bytes.length === 0) return { status: 400, body: { error: "the image body was empty" } };
+      try {
+        const saved = await deps.uploads.save(id, req.headers["content-type"], bytes);
+        return { status: 201, body: { path: saved } };
+      } catch (error) {
+        if (error instanceof UnsupportedImageError)
+          return { status: 415, body: { error: error.message } };
+        throw error;
+      }
     }
 
     const remove = /^\/api\/sessions\/([^/]+)$/.exec(path);

@@ -113,6 +113,37 @@ export const createSession = async (
     agent,
   });
 
+/**
+ * Send an image into a session and get back the path it landed on.
+ *
+ * Raw bytes rather than JSON or multipart: the body IS the image, so there is no encoding to pay
+ * for and no parser to add. It goes through `fetch` directly rather than `request`, which is the
+ * JSON helper - but the 401/403 sentences still have to mean what they mean everywhere else, so
+ * they are recognised the same way.
+ */
+export const uploadImage = async (
+  token: string,
+  sessionId: string,
+  image: Blob,
+): Promise<string> => {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/uploads`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": image.type },
+    body: image,
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    if (response.status === 401 && body.error === "missing or invalid bearer token") {
+      throw new UnauthorizedError(body.error);
+    }
+    if (response.status === 403 && body.error === "origin not allowed") {
+      throw new ForbiddenError(body.error);
+    }
+    throw new Error(body.error ?? `the upload failed with ${String(response.status)}`);
+  }
+  return ((await response.json()) as { path: string }).path;
+};
+
 /** Kill a session and its agent. Irreversible from here: the tmux session goes with it. */
 export const closeSession = async (token: string, id: string): Promise<void> => {
   await request<{ closed: true }>(token, `/api/sessions/${encodeURIComponent(id)}`, "DELETE");

@@ -546,6 +546,15 @@ not support getting TLS certs`. Both switches are at
       gone". Re-applying belongs to `m4/tailscale-serve`, which is blocked on two admin-console
       switches.
 
+- [x] ~~**`m4/image-upload`**~~ — an image from the phone into the session. `POST
+      /api/sessions/:id/uploads` takes the raw bytes, writes them under `~/.agentdeck/uploads`,
+      and answers with the path; the client downscales to 1568px and types the path at the prompt
+      without submitting it. **Done when:** an image picked on the phone is read by the agent.
+      *Not demonstrated:* the phone. The route was exercised end to end against a live server and
+      the written file opened as an image, but the file picker, `createImageBitmap`, HEIC
+      normalisation and whether the typed path survives Claude's own input handling are all
+      unverified on a device.
+
 ---
 
 ## M5 — Push (optional)

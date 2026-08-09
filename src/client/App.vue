@@ -12,10 +12,12 @@ import {
   fetchSessions,
   fetchTurns,
   UnauthorizedError,
+  uploadImage,
   verifyToken,
 } from "./api.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type ConnectionStatus } from "./connection.ts";
+import { downscale } from "./image.ts";
 import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 import KeyRow from "./KeyRow.vue";
 import NewSession from "./NewSession.vue";
@@ -27,6 +29,7 @@ import type { TerminalHandle } from "./terminal-handle.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 import { clearToken, loadToken, saveToken } from "./token-store.ts";
 import TokenGate from "./TokenGate.vue";
+import UploadImage from "./UploadImage.vue";
 import { followVisualViewport } from "./viewport.ts";
 
 const token = ref(loadToken(window.localStorage));
@@ -98,7 +101,10 @@ const openHistory = (): void => {
 // chose instead of a second delivery path for the same fact. Only while the list is being looked
 // at: a closed overlay has nothing to keep current.
 watch(
-  () => (active.value === undefined ? undefined : tabs.value.find((tab) => tab.id === active.value)?.state),
+  () =>
+    active.value === undefined
+      ? undefined
+      : tabs.value.find((tab) => tab.id === active.value)?.state,
   (state, previous) => {
     if (historyOpen.value && state === "idle" && previous === "working") void loadTurns();
   },
@@ -320,6 +326,34 @@ const typed = (sessionId: string, data: string): void => {
   send(data);
 };
 
+const uploading = ref(false);
+
+/**
+ * Put an image where the agent can read it, then type its path at the prompt.
+ *
+ * The path is typed and NOT submitted, deliberately: an image with no question attached is a turn
+ * spent on "what am I looking at". The person adds the sentence and presses Enter.
+ */
+const sendImage = async (file: File): Promise<void> => {
+  const id = active.value;
+  const current = token.value;
+  if (id === undefined || current === undefined) return;
+  uploading.value = true;
+  try {
+    const path = await uploadImage(current, id, await downscale(file));
+    send(`${path} `);
+    handles.get(id)?.focus();
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      signOut("That token was rejected. Paste the current one.");
+      return;
+    }
+    note(error instanceof Error ? error.message : "could not send that image");
+  } finally {
+    uploading.value = false;
+  }
+};
+
 const ready = (sessionId: string, handle: TerminalHandle): void => {
   handles.set(sessionId, handle);
   const size = handle.size();
@@ -358,15 +392,18 @@ if (token.value !== undefined) start(token.value);
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
-    <TabStrip
-      :tabs="tabs"
-      :active="active"
-      @select="select"
-      @close="(id) => void endSession(id)"
-    />
-    <!-- Offered only for an agent that reports its own turns: an empty list for an agent that
-         never will reads as broken (plan 004). -->
-    <button v-if="logsTurns" class="answers" type="button" @click="openHistory">Answers</button>
+    <TabStrip :tabs="tabs" :active="active" @select="select" @close="(id) => void endSession(id)" />
+    <div class="actions">
+      <!-- Offered only for an agent that reports its own turns: an empty list for an agent that
+           never will reads as broken (plan 004). -->
+      <button v-if="logsTurns" class="answers" type="button" @click="openHistory">Answers</button>
+      <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
+      <UploadImage
+        v-if="active !== undefined"
+        :busy="uploading"
+        @pick="(file) => void sendImage(file)"
+      />
+    </div>
     <!-- Without this the deck can drive sessions but never start one. -->
     <NewSession
       :cwds="cwds"
@@ -429,8 +466,11 @@ if (token.value !== undefined) start(token.value);
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
 }
+.actions {
+  display: flex;
+  align-items: center;
+}
 .answers {
-  align-self: flex-start;
   margin: 0 0.75rem 0.25rem;
   border: 0;
   border-radius: 0.4rem;
