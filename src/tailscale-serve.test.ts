@@ -335,13 +335,19 @@ void describe("the documents say what could not be demonstrated", () => {
     assert.match(readme, /AGENTDECK_ORIGIN=https:\/\/<host>/);
   });
 
-  void test("the TODO entry is not ticked and names both settings", async () => {
+  void test("the TODO entry records what was demonstrated and what was not", async () => {
+    // This asserted the item was NOT ticked, which was right while both tailnet switches were off.
+    // They were enabled on 2026-08-09 and the HTTPS half was demonstrated, so what has to hold now
+    // is the honest half: the phone itself was never part of it.
     const todo = await readFile(new URL("../TODO.md", import.meta.url), "utf8");
-    const rest = todo.slice(todo.indexOf("- [ ] **`m4/tailscale-serve`**"));
+    const rest = todo.slice(todo.indexOf("**`m4/tailscale-serve`**"));
     const item = rest.slice(0, rest.indexOf("\n- ["));
-    assert.match(todo, /- \[ \] \*\*`m4\/tailscale-serve`\*\*/);
-    assert.match(item, /HTTPS half/);
-    assert.match(item, /login\.tailscale\.com\/admin\/dns/);
-    assert.match(item, /f\/serve/);
+    assert.match(item, /verified certificate/);
+    assert.match(
+      item,
+      /Origin check is on/i,
+      "the item does not say the Origin check is finally on",
+    );
+    assert.match(item, /Not demonstrated: the phone/);
   });
 });

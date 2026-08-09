@@ -382,14 +382,25 @@ Agent-agnostic signals first, so the generic path is the proven one.
 
 ## M4 — Phone
 
-- [ ] **`m4/tailscale-serve`** — `tailscale serve --bg` in front of the loopback port.
+- [x] **`m4/tailscale-serve`** — `tailscale serve --bg` in front of the loopback port.
       **Done when:** the `ts.net` URL loads over HTTPS from the phone and the page reports a
       secure context.
+      **Demonstrated on 2026-08-09**, once the operator enabled both tailnet switches:
+      `https://example-host.tailXXXXXX.ts.net/` serves the client with a verified certificate
+      (`ssl_verify_result=0`), and `/manifest.webmanifest` and `/sw.mjs` come back with the right
+      MIME types, which is what iOS needs to treat it as installable. `/api` without a token is
+      still 401 through the proxy.
+      **And the Origin check is on for the first time**: with `AGENTDECK_ORIGIN` set to the value
+      the boot log names, a request carrying the right Origin is 200, a wrong one is
+      `403 origin not allowed`, and one with no Origin at all is allowed because curl is not a
+      browser. `audit.md` had recorded three times that this check was off for every ordinary run.
+      **Not demonstrated: the phone itself.** Everything above was verified from the Mac over the
+      tailnet. The device has been offline throughout.
       **Blocked on the admin console, and the wiring is done (2026-08-08).** Measured on this Mac:
       `tailscale serve --bg 7791` prints `Serve is not enabled on your tailnet` with an enable link
       and then **hangs** — 20s timeout, exit 124, never exits on its own — and
       `tailscale cert example-host.tailXXXXXX.ts.net` answers `your Tailscale account does
-    not support getting TLS certs`. Both switches are at
+  not support getting TLS certs`. Both switches are at
       <https://login.tailscale.com/admin/dns> and neither is something this repo can turn on, so
       `https://example-host.tailXXXXXX.ts.net/` does not connect and the HTTPS half is
       undemonstrated. What is built is the half that made those failures opaque: `src/tailnet.ts`

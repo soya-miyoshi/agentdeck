@@ -12,6 +12,8 @@ const port = process.env.AGENTDECK_PORT ?? "7777";
 // only ever reached by the hang.
 const SERVE_TIMEOUT_MS = Number(process.env.AGENTDECK_SERVE_TIMEOUT_MS) || 15_000;
 const TOOL_TIMEOUT_MS = 10_000;
+/** Extra probes after the first, for the certificate issuance that only happens once. */
+const CERT_ATTEMPTS = Number(process.env.AGENTDECK_CERT_ATTEMPTS) || 3;
 
 const say = (message) => {
   console.log(`agentdeck: ${message}`);
@@ -187,7 +189,16 @@ if (
   );
 say(`tailscale serve status proxies to 127.0.0.1:${port}`);
 
-const remote = await probe(`${tailnet.origin}/api/health`);
+// Retried, because the FIRST request to a ts.net name is where tailscaled fetches the
+// certificate, and that outruns a single probe budget. Measured on this machine: the first
+// attempt timed out at 10s and the next answered in 0.4s.
+let remote = await probe(`${tailnet.origin}/api/health`);
+for (let attempt = 1; !remote.ok && attempt <= CERT_ATTEMPTS; attempt++) {
+  say(
+    `no answer yet - the first request is where the certificate is issued (${attempt}/${CERT_ATTEMPTS})`,
+  );
+  remote = await probe(`${tailnet.origin}/api/health`);
+}
 if (!remote.ok)
   await exitExposed(
     `serve is configured but ${tailnet.origin}/api/health did not answer (${remote.detail}).`,
