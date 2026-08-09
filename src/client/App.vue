@@ -2,12 +2,21 @@
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { AgentSummary } from "../agent-profiles.ts";
+import type { Cwd } from "../cwds.ts";
 import type { Session } from "../registry.ts";
-import { fetchAgents, fetchSessions, UnauthorizedError, verifyToken } from "./api.ts";
+import {
+  createSession,
+  fetchAgents,
+  fetchCwds,
+  fetchSessions,
+  UnauthorizedError,
+  verifyToken,
+} from "./api.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { Connection, type ConnectionStatus } from "./connection.ts";
 import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 import KeyRow from "./KeyRow.vue";
+import NewSession from "./NewSession.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -19,6 +28,8 @@ const token = ref(loadToken(window.localStorage));
 const gateMessage = ref<string>();
 const sessions = ref<Session[]>([]);
 const agents = ref<AgentSummary[]>([]);
+const cwds = ref<Cwd[]>([]);
+const starting = ref(false);
 const active = ref<string>();
 const status = ref<ConnectionStatus>("closed");
 const errors = ref<string[]>([]);
@@ -44,6 +55,7 @@ const signOut = (message: string): void => {
   handles.clear();
   opened.value = new Set();
   sessions.value = [];
+  cwds.value = [];
   clearToken(window.localStorage);
   token.value = undefined;
   gateMessage.value = message;
@@ -75,6 +87,48 @@ const refresh = async (current: string): Promise<void> => {
       return;
     }
     note(error instanceof Error ? error.message : "could not load sessions");
+  }
+};
+
+/** The allowlist, reread each time the picker opens: PATH and the session set both move. */
+const loadCwds = async (): Promise<void> => {
+  const current = token.value;
+  if (current === undefined) return;
+  try {
+    const [list, profiles] = await Promise.all([fetchCwds(current), fetchAgents(current)]);
+    cwds.value = list;
+    agents.value = profiles;
+  } catch (error) {
+    note(error instanceof Error ? error.message : "could not load directories");
+  }
+};
+
+/**
+ * Create the session the picker chose, and show what the server said about it.
+ *
+ * The 201's `warning` - two agents in one working tree, or an already-running session handed back -
+ * is displayed, and a refusal is displayed in the server's own words. Swallowing either is what
+ * makes a second agent editing one tree invisible.
+ */
+const startSession = async (cwd: string, agent: string): Promise<void> => {
+  const current = token.value;
+  if (current === undefined) return;
+  starting.value = true;
+  try {
+    const { session, warning } = await createSession(current, cwd, agent);
+    sessions.value = [...sessions.value.filter((s) => s.id !== session.id), session];
+    if (warning !== undefined) note(warning);
+    select(session.id);
+    settle();
+    void loadCwds();
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      signOut("That token was rejected. Paste the current one.");
+      return;
+    }
+    note(error instanceof Error ? error.message : "could not start a session");
+  } finally {
+    starting.value = false;
   }
 };
 
@@ -123,6 +177,7 @@ const start = (current: string): void => {
   connection.value = conn;
   conn.start();
   void refresh(current);
+  void loadCwds();
 };
 
 const accept = (pasted: string): void => {
@@ -212,6 +267,15 @@ if (token.value !== undefined) start(token.value);
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else class="app">
     <TabStrip :tabs="tabs" :active="active" @select="select" />
+    <!-- Without this the deck can drive sessions but never start one, and "No sessions" is a dead
+         end on a phone with no terminal on the Mac. -->
+    <NewSession
+      :cwds="cwds"
+      :agents="agents"
+      :busy="starting"
+      @open="loadCwds"
+      @start="(cwd, agent) => void startSession(cwd, agent)"
+    />
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
     <p v-for="message in errors" :key="message" class="banner error">{{ message }}</p>
