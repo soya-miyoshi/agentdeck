@@ -1605,3 +1605,68 @@ rather than solved; a pane-local font-size control is the answer if it is wanted
 
 *Not demonstrated:* unshown on a device. There is no touch on the Mac, and the suite (863 green)
 says nothing about this - the defect it fixes passed every test.
+
+## Scrollback wrapping, and the turn log (plan 007)
+
+**Reported from a phone:** after a finished turn, scrolling up showed the earlier part of the
+answer broken at the wrong columns.
+
+**Cause:** `capture-pane` without `-J` returns each segment tmux wrapped as its own line,
+terminated by a newline, broken at whatever width the pane had when the text was written. A pane
+opens at `DEFAULT_COLS = 120` before any client attaches, and the phone is far narrower, so every
+session's early output is in history at 120 and the phone wraps it a second time. Verified against
+a real tmux server: 250 characters written at width 100, the window resized to 40, captured with
+and without `-J`.
+
+**Fixed:** `Tmux.captureHistory` passes `-J`, so a wrapped line comes back as one line and the
+client re-wraps at its own width.
+
+*Accepted with a reason:* pinning the pane to a fixed size was considered as the alternative and
+rejected. The phone's own width is not a constant either (rotation), and a pinned width that does
+not match the attached client makes the LIVE screen wrap wrongly too - a worse failure than the
+history one, and a continuous rather than an occasional one. `-J` removes the dependency on width
+entirely, including for history already written.
+
+**Then, the feature underneath it:** the scrollback is the wrong store for an answer at all -
+bounded by lines rather than turns, ANSI, unsearchable, and reachable only by dragging a repainting
+TUI. Plan 007 adds a turn log: `UserPromptSubmit` and `Stop` joined on the `prompt_id` the agent
+itself supplies, stored as one append-only JSONL file per session under `~/.agentdeck/turns`, and
+read by the phone as a list. No new dependency and no database; the reasoning against sqlite is in
+the plan.
+
+**Found by running it, not by the suite:**
+
+- **A truncated answer was recorded as a whole one.** The hook command cuts the long fields before
+  sending, and it cut to exactly the store's bound - so the store saw a field at its limit,
+  indistinguishable from one that fit, and wrote no `truncated` flag. It now cuts to the bound plus
+  one character. Every test passed both before and after.
+- **A long answer used to lose its state as well as its text.** The hook command buffered 64KB and
+  sent whatever it had, which for a longer payload is invalid JSON, which the route answers 400 -
+  so no state was declared for that turn either. Pre-existing, invisible while payloads carried
+  only an event name, and fixed by the same cut.
+
+*Accepted with a reason:* every answer the agent gave is now plaintext on disk under
+`~/.agentdeck/turns`, readable by anything running as the operator. This adds material to the
+same-uid residual rather than changing its shape - that text already existed in Claude Code's own
+transcripts, which the same processes can already read. One more copy, in a more convenient format.
+
+*Accepted with a reason:* `last_assistant_message` when a turn's final block is a tool call rather
+than text could not be captured - told to end on a tool call and say nothing, the model emitted a
+final text block anyway. An absent, non-string or empty value logs nothing rather than an empty
+entry, so the unobserved case degrades to "no history for that turn". Compaction and `--resume`
+were not captured either; a `Stop` with an unseen `prompt_id` is stored with an empty prompt.
+
+*Pre-existing, not caused by this work:* two tests that drive a real tmux and a real socket flake
+under load. `end-to-end.test.ts`'s "the server process is restarted under an open client" timed out
+waiting for the socket once and passed on the next run and standalone. `snapshot.test.ts`'s
+"scrollback that is already in history is not repeated in data" fails intermittently the same way. Its precondition is that a
+256KB ring buffer still holds a 400-line burst, which is a race with the reader. Confirmed on
+unmodified `main`: one failure in two full runs with this branch stashed. Three added test files
+make the suite heavier and so make it fire more often. Left alone rather than papered over, because
+the fix is to stop the test depending on the machine it runs on and that is its own change.
+
+*Not demonstrated:* the phone half is entirely unshown. The Answers overlay, its list, the tap to
+open an answer, the refetch when a turn ends, and the `-J` fix as a person sees it all need a
+device. What was demonstrated on the Mac: the `-J` capture against a real tmux, the hook command
+run through a real shell against a real socket with a real 3776-character captured answer and a
+500,000-character one, and 890 tests.

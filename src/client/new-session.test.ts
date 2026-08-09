@@ -293,11 +293,17 @@ void describe("what the picker offers", () => {
 
   void test("marks an agent that will never report waiting, in the strip's words", () => {
     const [deaf] = agentChoices([
-      { id: "shell", name: "Shell", available: true, detectsWaiting: false },
+      { id: "shell", name: "Shell", available: true, detectsWaiting: false, logsTurns: false },
     ]);
     assert.equal(deaf?.note, "no waiting alerts");
     const [detects] = agentChoices([
-      { id: "claude", name: "Claude Code", available: true, detectsWaiting: true },
+      {
+        id: "claude",
+        name: "Claude Code",
+        available: true,
+        detectsWaiting: true,
+        logsTurns: false,
+      },
     ]);
     assert.equal(detects?.note, undefined);
     assert.equal(detects?.selectable, true);
@@ -313,7 +319,7 @@ void describe("what the picker offers", () => {
   void test("refuses Start until both halves are chosen from the offered lists", () => {
     const directories = directoryChoices([{ path: "/a/repo", name: "repo", sessions: [] }]);
     const agents = agentChoices([
-      { id: "sh", name: "Shell", available: true, detectsWaiting: false },
+      { id: "sh", name: "Shell", available: true, detectsWaiting: false, logsTurns: false },
     ]);
     assert.equal(canStart(directories, agents, undefined, "sh"), false);
     assert.equal(canStart(directories, agents, "/a/repo", undefined), false);

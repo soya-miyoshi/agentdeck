@@ -529,6 +529,10 @@ export class Tmux {
         "capture-pane",
         "-p",
         "-e",
+        // -J joins a line tmux wrapped back into one line, so the client re-wraps it at ITS width.
+        // Without it every wrap arrives as a hard newline at whatever width the pane had when the
+        // text was written, and the phone's scrollback breaks long lines mid-column.
+        "-J",
         "-t",
         exactWindowTarget(id),
         "-S",
