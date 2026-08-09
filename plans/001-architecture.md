@@ -55,6 +55,20 @@ separately, as one append-only JSONL file per session, in [plan 007](007-turn-lo
 database stays out of the design there too, and the reasoning is recorded in that plan rather than
 re-derived here.
 
+**The deck brings its own tmux configuration**, `tmux.conf` in the repository, passed as `-f`.
+`-L` chooses the socket and nothing else: tmux still resolves its config from the home directory,
+so the operator's `~/.tmux.conf` was configuring the deck's server. That is not a neutral
+inheritance — a `status-left` containing `#(...)` runs a shell command on a timer inside this
+server, `mouse on` makes tmux claim the mouse reports the phone's touch handling sends, and
+`prefix C-b` is the command channel this design closes deliberately. A config a person edits for
+their own terminal is not one the deck should acquire by accident.
+
+`-f` only reaches a server agentdeck starts, and `start-server` is a no-op against one that
+already exists — which is the ordinary case, because the refusal text tells the operator to
+`tmux -L agentdeck attach` to reach an orphaned session, and that starts a server from their
+shell. So the settings that must hold either way are also applied as globals in `ensureServer`,
+exactly as the prefix already was. The file is the record; `src/tmux.ts` is the authority.
+
 Sessions are created with **`remain-on-exit on`**. tmux's default is to destroy a session the
 moment its command exits, which would mean an agent that finished or crashed removed its own tab
 and its exit code with it — leaving the strip unable to distinguish "it is done" from "I lost it",
