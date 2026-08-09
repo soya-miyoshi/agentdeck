@@ -1784,3 +1784,32 @@ padding is what carries it, and the padding is the defect. The live pane keeps i
 
 *Not demonstrated:* the phone, again. Two rounds of this have now been reasoned correct and been
 wrong on the device, and the thing that found the real cause both times was Soya looking at it.
+
+### And then `-J` itself was the rest of it
+
+The report that closed it: text from one line - "Now verify it against", a button glyph - appearing
+at the right-hand END of the previous line. That is `-J` joining, made visible by the padding strip
+above rather than caused by it.
+
+`-J` joins the rows tmux wrapped back into one logical line. That is right only when the client's
+width differs from the pane's, which was the argument for passing it - and it stopped being true
+the moment `PANE_COLS` fixed both at 40. Worse, tmux sets a row's wrap flag whenever text filled
+the row and kept going, which a TUI does on every full-width line it draws, so `-J` welds such a
+line to the next LOGICAL line, not just to its own continuation.
+
+Reproduced on tmux 3.7b in a 40-column pane before changing anything: a padded full-width line
+followed by `NEXTLINE` captures with `-J` as one 57-character line, and without `-J` as the two
+rows the pane actually showed.
+
+**Fixed:** `-J` is gone from `Tmux.captureHistory`, with the reasoning written at the call site so
+it is not helpfully restored. Checked end to end through `captureHistory` itself against a live
+pane: every row comes back at 40 columns or less, one CR per LF, the full-width line breaking
+exactly where the pane broke it. `forTerminal` keeps the CR LF normalisation, which was a real and
+separate defect; its padding strip is now belt and braces, since tmux strips trailing spaces itself
+when `-J` is not passed.
+
+*Accepted with a reason:* history written when the pane was a different width stays wrapped at that
+width and is wrapped again at 40. Nothing can reflow it - that is the same tmux limit this whole
+entry is about - and with the width now constant it can only affect sessions that predate it.
+
+*Not demonstrated:* the phone. Third round.

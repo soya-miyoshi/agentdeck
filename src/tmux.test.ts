@@ -476,9 +476,10 @@ void describe("capture and repaint", () => {
     assert.ok(call, "capture-pane was never called");
     assert.ok(call.includes("-e"));
     assert.ok(call.includes("-p"));
-    // -J, so a wrapped line comes back as one line and the client wraps it at its own width
-    // instead of inheriting the pane's.
-    assert.ok(call.includes("-J"));
+    // NOT -J. The pane and the client are both a fixed 40, so there is nothing to re-wrap, and
+    // -J welds a full-width line to the next logical one - which is the second line's text
+    // appearing at the right-hand end of the first.
+    assert.ok(!call.includes("-J"), "-J joins lines the pane never joined");
     assert.deepEqual(call.slice(call.indexOf("-S"), call.indexOf("-S") + 2), ["-S", "-2000"]);
   });
 
@@ -844,8 +845,7 @@ void describe("what a session's shell puts back, which the name list does not bo
 
 void describe("captured scrollback is turned into bytes a terminal can be written with", () => {
   // The shapes here are what tmux 3.7b actually returned from a 40-column pane, not invented ones:
-  // `printf "%-40s\n" PADDED` captures with -J as the word plus spaces out to 40, LF-separated,
-  // and a coloured full-width line keeps its opening SGR and no closing one.
+  // LF-separated lines with no CR anywhere, and a coloured line that keeps its opening SGR.
   void test("a line padded to the pane width comes back its own length", () => {
     assert.equal(
       forTerminal(`PADDED-A${" ".repeat(32)}\nPADDED-B${" ".repeat(32)}`),
