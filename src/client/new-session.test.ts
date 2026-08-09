@@ -243,13 +243,11 @@ void describe("the new-session picker, against a real server", () => {
   });
 
   void test("shows the warning the server returns rather than swallowing it", async () => {
-    // Two agents in one working tree: allowed, and worth saying out loud.
+    // Two agents in one working tree: allowed, and silent since 2026-08-09 (plan 004).
     const first = await createSession(token, twoWork, "sh");
     assert.equal(first.warning, undefined);
     const second = await createSession(token, twoWork, "other");
-    assert.ok(second.warning, "a second agent in one working tree returned no warning");
-    assert.match(second.warning, /already running in/);
-    assert.ok(second.warning.includes(twoWork));
+    assert.equal(second.warning, undefined, "a neighbouring session warned");
 
     // The same agent again: the running session is handed back, and the response says so.
     const again = await createSession(token, twoWork, "sh");

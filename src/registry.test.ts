@@ -291,15 +291,17 @@ void describe("creating sessions", () => {
     assert.equal(result.session.state, "idle");
   });
 
-  void test("two DIFFERENT agents in one tree produce two sessions and a warning", async () => {
-    // Allowed but worth saying out loud: a read-only reviewer alongside a writer is legitimate,
-    // and the tool cannot tell which case it is looking at. Refusing would be guessing.
+  void test("two DIFFERENT agents in one tree produce two sessions and no warning", async () => {
+    // Allowed, and silent since 2026-08-09 (plan 004). The neighbour is usually the `shell`
+    // profile - the operator's own terminal in the repository they are working in - so the
+    // warning fired mostly on the legitimate case, and a warning dismissed by habit is worse than
+    // none. What is live per directory is still shown by `GET /api/cwds`, at the moment of
+    // choosing, which is when it can still change the decision.
     const { registry } = build();
     await registry.create("/workspace/agentdeck", "claude");
     const second = await registry.create("/workspace/agentdeck", "gemini");
 
-    assert.match(second.warning ?? "", /claude/);
-    assert.match(second.warning ?? "", /already running/);
+    assert.equal(second.warning, undefined, "a neighbouring session warned");
     assert.equal((await registry.list()).length, 2);
   });
 

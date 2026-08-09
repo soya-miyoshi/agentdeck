@@ -1548,3 +1548,37 @@ operator to debug a working deployment.
 **Still not demonstrated: the phone.** Everything above is from the Mac. The device has been offline
 throughout, so the three phone done-whens - the home-screen install, the token arriving by scan, and
 a permission prompt answered rather than watched - remain unshown.
+
+## Phone-found defects, 2026-08-09 (keyboard, close, neighbour warning)
+
+Three items, all found by Soya using the deck on a real phone against a suite that was green.
+
+**The soft keyboard covered the bottom of the app.** iOS Safari shrinks the visual viewport when
+the keyboard opens and leaves the layout viewport at full height, so `height: 100%` kept the app
+tall and the keyboard sat over the key row and the last terminal rows - which is where a permission
+prompt and the cursor are. Fixed: `.app` is `position: fixed` and its height and `translateY` are
+written from `visualViewport` (`src/client/viewport.ts`), on `resize` and on `scroll`. The pane's
+existing `ResizeObserver` refits the terminal and reports the new cols/rows, so the pane reflows
+rather than being cropped.
+
+**No way to close a session from the phone.** `DELETE /api/sessions/:id` has existed since m1 with
+nothing able to reach it: a session started from the phone could only be ended from the Mac. The
+cap is on the active tab only and arms before it acts, because closing kills the agent and there is
+no undo.
+
+**The two-agents-in-one-tree warning is removed** (plan 004, revised by Soya). It fired on a
+neighbouring `shell` session, which is the operator's own terminal rather than a second process
+editing the tree - the case the plan's own last paragraph already exempted. A warning that fires
+mostly on the legitimate case is dismissed by habit, and then it is still there when it matters and
+no longer read. `POST /api/sessions` now sets `warning` only when the same agent is asked for twice
+and the running session is handed back.
+
+*Accepted with a reason:* nothing now says out loud that a second agent is being started in a tree
+that already has one. `GET /api/cwds` still reports the live sessions per directory and the picker
+shows them, so the collision is visible **at the moment of choosing** rather than after the fact -
+which is the only moment it can change the decision. This is a deliberate loss of a notification,
+recorded rather than solved.
+
+*Not demonstrated:* both client changes are unshown on a device. The keyboard fit cannot be
+exercised on the Mac at all - the failure only exists where there is a soft keyboard - and nobody
+has yet tapped Close on a phone.

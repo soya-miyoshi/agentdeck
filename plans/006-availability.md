@@ -33,7 +33,7 @@ reconnect the client is already built to survive (plan 002), not a day of work.
 It does not cost nothing, and the difference matters for how readily the watchdog is allowed to
 act. The registry holds each session's `cwd`, agent and hook secret in memory only, so sessions
 that survive a restart come back with none of them: they are named by their raw id, they drop out
-of the per-directory lists `GET /api/cwds` serves and out of the two-agents-in-one-tree warning,
+of the per-directory lists `GET /api/cwds` serves,
 and every hook POST from a surviving claude session is rejected as unsigned, so that tab never
 reports `waiting` again while the session list still advertises `detectsWaiting`. A restart keeps
 the work and loses the telling-you-about-it, until the session is recreated. Persisting that

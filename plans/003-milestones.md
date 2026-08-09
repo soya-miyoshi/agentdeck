@@ -36,7 +36,7 @@ What it pins down beyond "the sessions survive":
   two are recovered: since `m2/session-metadata-survives-restart` the restarted server **adopts**
   the survivor from tmux, taking its `cwd` from `#{session_path}` and its agent from the id, so
   `GET /api/sessions` lists it again, `GET /api/cwds` counts it, the hub attaches and streams it,
-  and the two-agents-in-one-tree warning names it. Adoption is allowlist-checked on
+  and it is counted in the per-directory lists again. Adoption is allowlist-checked on
   `#{session_path}` exactly as ordinary listing is, so it is not a way onto the phone for a session
   anywhere else on the socket. (Before that item a survivor was **not listed at all**, and the tab
   stayed blank while the agent worked on.)
@@ -70,7 +70,7 @@ The tmux-backed session registry and the HTTP routes. Driven from `curl` only; n
   alternative
 - `cwd` allowlist validation on create: a short list of repositories actually worked in, never the
   whole `~/ghq` tree
-- `warning` when the cwd already has a live session
+- `warning` when the same agent is asked for twice in one cwd and the running one is handed back
 - Bearer token generated on first run, `0600`, in an alphabet `Sec-WebSocket-Protocol` accepts —
   unpadded base64url or hex, never padded base64 (plan 001)
 - Session ids: `<basename>-<agent>-<hash of absolute path>`, sanitised for tmux's naming rules,
@@ -90,8 +90,8 @@ still running with the same id and the same process, because the restarted serve
 from tmux (see M0, `m2/session-metadata-survives-restart` and `src/supervisor-crash.test.ts`) —
 with the one loss adoption cannot undo, the hook secret, reported as `waitingDetectionLost`; a
 session can be started under either the `claude` profile or the
-`shell` profile from the same endpoint; **two different agents in one `cwd` produce two sessions
-and a `warning`, while the same agent twice hands back the one already running**; and a session
+`shell` profile from the same endpoint; **two different agents in one `cwd` produce two sessions,
+while the same agent twice hands back the one already running with a `warning` saying so**; and a session
 whose command has exited still lists, as `exited`, with its code.
 
 ## M2 — One streaming tab

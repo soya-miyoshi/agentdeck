@@ -99,10 +99,6 @@ export class Registry {
       this.#states.delete(id);
     }
 
-    // Read the neighbours BEFORE creating, so the warning can name what was already there. After
-    // the call the new session is itself in the list and would have to be filtered out.
-    const neighbours = (await this.list()).filter((s) => s.cwd === cwd && s.id !== id);
-
     const prior = this.#meta.get(id);
     const minted = prior?.secret ?? newSecret();
     // tmux reports session_created in whole seconds, so the window opens at the last second
@@ -152,6 +148,11 @@ export class Registry {
       throw new Error(`session ${id} was created but tmux does not list it`);
     }
 
+    // The only warning left is the one that says the caller did not get what it asked for: a
+    // second session of the SAME agent lands on the running one. A neighbouring session of a
+    // different agent used to warn as well (plan 004); it was removed because the common
+    // neighbour is a shell, which is the operator's own terminal rather than a second process
+    // editing the tree, and the picker still shows what is live per directory before the choice.
     return attached
       ? {
           session,
@@ -159,15 +160,7 @@ export class Registry {
             `A ${agentId} session was already running in ${cwd}; you are attached to it rather ` +
             `than to a new one.`,
         }
-      : neighbours.length > 0
-        ? {
-            session,
-            warning:
-              `${neighbours.map((n) => n.agent).join(", ")} ${neighbours.length === 1 ? "is" : "are"} ` +
-              `already running in ${cwd}. Two processes editing one working tree produce conflicts ` +
-              `neither understands.`,
-          }
-        : { session };
+      : { session };
   }
 
   /**

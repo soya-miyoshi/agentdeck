@@ -56,8 +56,9 @@ interface Cwd {
 **`GET /api/cwds` exists because the client cannot construct a valid `cwd` on its own.** The
 allowlist is `AGENTDECK_MOUNTS` (plan 005) and is knowable only to the server; a phone user
 typing an absolute path into a soft keyboard is not a design. The new-session picker is built from this route — pick a directory, pick an agent — and
-`sessions` is what lets it show the two-agents-in-one-tree warning below *before* the session is
-created rather than in the response to creating it.
+`sessions` is what lets it show what is already live in a directory *before* the session is
+created. Since the neighbour warning was removed (plan 004) this is the only place a collision is
+shown at all, which is the place it can still change the decision.
 
 **Session ids are derived from the tmux session name, and that name is not free-form.** tmux
 rejects `.` and `:` in a session name, and a repo basename is not unique — two checkouts named
@@ -73,13 +74,13 @@ restart without anything being written down.
 **The agent id is in the key, not decoration.** Keyed on the path alone, a second create in a
 directory that already has a session would hit `new-session -A`, silently attach to the agent
 already running there, and return a `Session` whose `agent` field was a lie — which would make
-[plan 004](004-agent-profiles.md)'s "two agents in one working tree: warn, do not block"
-unreachable in the exact case it was written for. With the agent in the key the two cases separate
-cleanly:
+a second agent in one tree impossible to ask for at all. With the agent in the key the two cases
+separate cleanly:
 
-- **Same `cwd`, different agent.** A second session is created. `warning` names the other live
-  session in that directory, because two processes editing one working tree is worth saying out
-  loud even when it is legitimate.
+- **Same `cwd`, different agent.** A second session is created, with no `warning`. It used to name
+  the other live session in that directory; that was removed on 2026-08-09 (plan 004) because the
+  neighbour is usually a shell, and the picker shows what is live per directory before the choice
+  is made.
 - **Same `cwd`, same agent.** `-A` attaches to the session already there and the response *is*
   that session, with `warning` saying so. This is the case plan 004's argument justifies least —
   a second identical agent in one tree is more likely a forgotten tab than an intention — and
@@ -111,9 +112,9 @@ A `cwd` that is not on it is refused with a sentence naming what would have to c
 that refusal is the one a person meets most often — a repository cloned since the server
 started is not on the list, and cannot be until it is restarted.
 
-`warning` is set whenever the new session's `cwd` already has a live session, in either of the two
-shapes above — two agents in one working tree, which is allowed but worth surfacing, or the same
-agent handed back rather than started twice (plan 004).
+`warning` is set in one case: the same agent asked for twice in one `cwd`, where `-A` hands back
+the session already running rather than starting a second (plan 004). It is the response saying it
+did not do what was asked, not advice about the tree.
 
 ### `POST /api/probe`
 

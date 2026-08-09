@@ -190,16 +190,29 @@ the same files, producing conflicts neither understands, discovered later. Mulmo
 it outright ("one working tree runs one agent"), but enforcing that needs git worktree management,
 which the README lists as a non-goal.
 
-**Decision: warn, do not block.** `POST /api/sessions` returns a `warning` naming the other live
-session in that `cwd`. A read-only reviewer alongside a writer is legitimate, and the tool cannot
-tell which case it is looking at — refusing would be guessing, silence would be negligent.
+**Decision, as first written: warn, do not block.** `POST /api/sessions` returned a `warning`
+naming the other live session in that `cwd`. A read-only reviewer alongside a writer is legitimate,
+and the tool cannot tell which case it is looking at — refusing would be guessing, silence would be
+negligent.
 
-**This is only reachable because the session id includes the agent** (plan 002). Keyed on the path
+**Revised 2026-08-09, by Soya, after using it: the neighbour warning is removed.** The sentence
+above was written about two *agents*. In practice the neighbour is almost always the `shell`
+profile — the operator's own terminal in the repository they are working in — which is one process
+editing files, not two, and is exactly the case the last paragraph of this section already
+exempted. A warning that fires mostly on the legitimate case teaches the person to dismiss it, and
+a warning that is dismissed by habit is worse than none: it is still there when it matters and is
+no longer read. What remains is `GET /api/cwds`, which reports the live sessions per directory, so
+the collision is visible in the picker **at the moment of choosing** — which is when it can still
+change the decision — rather than in the response to a session that has already started.
+
+`POST /api/sessions` now sets `warning` in one case only: the same agent asked for twice in one
+`cwd`, where the caller is handed the session already running instead of a new one. That warning
+is not advice, it is the response saying it did not do what was asked.
+
+**The agent is still in the session id** (plan 002), and for the same reason. Keyed on the path
 alone, the second create would land on the same tmux session name, `new-session -A` would attach
 to the agent already running there, and the caller would get back a session claiming to be an
-agent it is not — the decision above silently replaced by a wrong one. The picker also shows the
-collision before it happens: `GET /api/cwds` reports the live sessions per directory, so the
-warning is available at the moment of choosing rather than only in the response.
+agent it is not. Removing the warning does not make a wrong `agent` field acceptable.
 
 Two sessions of the **same** agent in one tree still collide, deliberately. That is the case this
 section's argument justifies least — a reviewer and an implementer are different agents, while two

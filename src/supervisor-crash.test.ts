@@ -60,8 +60,8 @@ writeFileSync(
       command: "/bin/sh",
       args: ["-c", `printenv AGENTDECK_SECRET > ${secretFile}; exec sleep 100000`],
     },
-    // A second agent, so the two-agents-in-one-tree warning can be asked for by name. The
-    // warning is computed from `list()`, and `list()` is what a survivor drops out of.
+    // A second agent, so a create alongside the survivor can be asked for by name. What it
+    // proves is computed from `list()`, and `list()` is what a survivor drops out of.
     neighbour: { command: "/bin/sh", args: ["-c", "exec sleep 100000"] },
   }),
 );
@@ -397,17 +397,15 @@ void describe("the node process is killed and nothing brings it back", () => {
     }
   });
 
-  void test("a second agent in the same tree IS warned about the survivor", async () => {
-    // The failure mode that costs a working tree rather than a notification, and the reason the
-    // survivor being merely invisible was not survivable: `Registry.create` reads its neighbours
-    // from `list()`, so before adoption the phone was told nothing while the first agent was still
-    // running in that directory and still editing those files.
+  void test("a second agent in the same tree SEES the survivor in the lists", async () => {
+    // The reason the survivor being merely invisible was not survivable. This used to be asserted
+    // through the two-agents-in-one-tree warning, which was removed on 2026-08-09 (plan 004); the
+    // property it was standing in for is unchanged and is asserted directly below - a survivor
+    // that adoption missed drops out of `list()`, and everything built on `list()` then reports a
+    // directory as holding one session while an agent is still running in it and still editing
+    // those files.
     const body = await createSession("neighbour");
-    assert.match(
-      body.warning ?? "",
-      /shell is\s+already running/,
-      "the adopted survivor was not named in the two-agents-in-one-tree warning",
-    );
+    assert.equal(body.warning, undefined, "a neighbouring session warned");
     assert.ok(panes().includes(paneLine), "the second agent disturbed the surviving session");
 
     // And `GET /api/cwds` reports the directory as holding one session when it holds two.
