@@ -23,6 +23,7 @@ import type { TerminalHandle } from "./terminal-handle.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 import { clearToken, loadToken, saveToken } from "./token-store.ts";
 import TokenGate from "./TokenGate.vue";
+import { followVisualViewport } from "./viewport.ts";
 
 const token = ref(loadToken(window.localStorage));
 const gateMessage = ref<string>();
@@ -246,6 +247,15 @@ const gone = (sessionId: string): void => {
   connection.value?.detach(sessionId);
 };
 
+// Pinned to the visual viewport, so "the window" means the part of it the soft keyboard is not
+// covering. The pane's ResizeObserver refits the terminal from there.
+const shell = ref<HTMLDivElement>();
+let unfollow: (() => void) | undefined;
+watch(shell, (element) => {
+  unfollow?.();
+  unfollow = element === undefined ? undefined : followVisualViewport(element, window);
+});
+
 const wake = (): void => {
   if (document.visibilityState === "visible") connection.value?.poke();
 };
@@ -254,6 +264,7 @@ window.addEventListener("online", wake);
 onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", wake);
   window.removeEventListener("online", wake);
+  unfollow?.();
   connection.value?.stop();
 });
 
@@ -262,7 +273,7 @@ if (token.value !== undefined) start(token.value);
 
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
-  <div v-else class="app">
+  <div v-else ref="shell" class="app">
     <TabStrip :tabs="tabs" :active="active" @select="select" />
     <!-- Without this the deck can drive sessions but never start one. -->
     <NewSession
@@ -297,7 +308,15 @@ if (token.value !== undefined) start(token.value);
 .app {
   display: flex;
   flex-direction: column;
+  /* Fixed, and the height/translate are written by followVisualViewport. `100%` is only the
+     fallback for a browser with no visualViewport; on iOS it is the height that hides the key row
+     behind the keyboard. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 .panes {
   position: relative;
