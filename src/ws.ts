@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { buildSnapshot, planAttach } from "./attach.ts";
-import { parseClientMessage, paneRows, type ServerMessage } from "./protocol.ts";
+import { PANE_COLS, parseClientMessage, paneRows, type ServerMessage } from "./protocol.ts";
 import type { Session } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import type { SessionState } from "./tmux.ts";
@@ -226,6 +226,15 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle =>
     socket.on("pong", () => {
       client.alive = true;
     });
+
+    // The width this server's PTYs actually hold the panes at, before anything else and without
+    // waiting on tmux. The client has a `PANE_COLS` of its own, but it is compiled into a bundle
+    // that is rebuilt and restarted separately from this process - so on the phone a rebuilt client
+    // rendered 50 columns into a pane still wrapped at 40, and the ten columns of difference read
+    // as padding down the right-hand edge rather than as a version skew. Sent synchronously and not
+    // folded into the `sessions` frame below, which is async and allowed to fail: a capture that
+    // could not answer must not also cost the client its width.
+    send(socket, { t: "hello", cols: PANE_COLS });
 
     // The baseline, before any frame this client sends. Everything after it is a delta, and a
     // socket that missed deltas while it was down has no other way back to the truth: the state

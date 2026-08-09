@@ -384,7 +384,8 @@ void describe("the node process is killed and nothing brings it back", () => {
         timer.unref();
         ws.addEventListener("message", (event: MessageEvent) => {
           const frame = JSON.parse(String(event.data)) as { t: string; message?: string };
-          if (frame.t === "ping" || frame.t === "sessions") return;
+          // The heartbeat and the two open-time baseline frames are not answers to the attach.
+          if (frame.t === "ping" || frame.t === "sessions" || frame.t === "hello") return;
           clearTimeout(timer);
           resolve(frame);
         });

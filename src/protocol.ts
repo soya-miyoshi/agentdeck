@@ -23,6 +23,13 @@ import type { Session } from "./registry.ts";
  * written out twice - once in `hub.ts` and once in `TerminalPane.vue` - with nothing to keep them
  * equal. Two constants that must match and do not have to are the wrapping bug back again.
  *
+ * One file is still not enough on its own, because the two halves are BUILT and RESTARTED
+ * separately: `dist/client` is rebuilt by `pnpm build` and the server's copy is whatever the
+ * running process was started with. Changing this number and rebuilding without `make restart`
+ * therefore leaves a client rendering 50 columns into a pane tmux is still holding at 40, which
+ * looks like dead padding down the right-hand edge rather than like a version skew. So this is the
+ * client's value only until the server states its own - see the `hello` frame below.
+ *
  * 50 rather than the 40 it started at: the client scales the font so the columns fill the phone,
  * so the column count IS the font size, and 40 columns across a 393pt phone is 16px text. Soya
  * asked for smaller; 50 is about 13px there, which is what it looked like before the pane started
@@ -72,6 +79,11 @@ export type ClientMessage =
   | ResyncMessage;
 
 export type ServerMessage =
+  // The pane's width, stated on connect, before anything else. The client cannot work it out and
+  // must not assume it: what a pane is actually wrapped to is decided by the PTY this server
+  // attached with, and a client built after a `PANE_COLS` change runs against a server started
+  // before it every time someone rebuilds without restarting.
+  | { t: "hello"; cols: number }
   | { t: "snapshot"; sessionId: string; epoch: string; seq: number; history?: string; data: string }
   | { t: "chunk"; sessionId: string; epoch: string; seq: number; data: string }
   | { t: "state"; sessionId: string; state: SessionState; exitCode?: number }
@@ -95,6 +107,16 @@ export const isValidDimension = (value: unknown): value is number =>
   Number.isInteger(value) &&
   value >= MIN_DIMENSION &&
   value <= MAX_DIMENSION;
+
+/**
+ * The width to render at, given what a `hello` frame stated. Falls back to the compiled constant.
+ *
+ * The client runs no parser over a server frame, and this is a wire value used as a control
+ * parameter rather than as data - `terminal.resize(0, rows)` or `resize(NaN, rows)` is a pane that
+ * renders nothing at all, from a server that answered wrongly rather than not at all.
+ */
+export const usablePaneCols = (stated: unknown): number =>
+  isValidDimension(stated) ? stated : PANE_COLS;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

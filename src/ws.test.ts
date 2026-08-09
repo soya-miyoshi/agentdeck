@@ -5,6 +5,7 @@ import { after, before, describe, test } from "node:test";
 
 import { WebSocket } from "ws";
 
+import { PANE_COLS } from "./protocol.ts";
 import type { Session } from "./registry.ts";
 import { SessionStream } from "./stream.ts";
 import { attachWebSocketServer, type WsDeps } from "./ws.ts";
@@ -61,10 +62,11 @@ interface Client {
 const open = async (
   protocols: string | string[] = TOKEN,
   target = url,
-  // Every socket is sent the session list the moment it opens - the baseline a reconnecting phone
-  // has no other way back to. It is not what any of the tests below are reading, so it is dropped
-  // here rather than skipped past in each of them; the test that IS about it keeps it.
-  keepSessions = false,
+  // Every socket is sent the pane's width and then the session list the moment it opens - the
+  // baseline a reconnecting phone has no other way back to. Neither is what any of the tests below
+  // are reading, so both are dropped here rather than skipped past in each of them; the tests that
+  // ARE about them keep them.
+  keepBaseline = false,
 ): Promise<Client> => {
   const socket = new WebSocket(target, protocols, { origin: ORIGIN });
   const queue: Frame[] = [];
@@ -72,7 +74,7 @@ const open = async (
 
   socket.on("message", (raw: Buffer) => {
     const frame = JSON.parse(raw.toString("utf8")) as Frame;
-    if (!keepSessions && frame["t"] === "sessions") return;
+    if (!keepBaseline && (frame["t"] === "sessions" || frame["t"] === "hello")) return;
     queue.push(frame);
     notify?.();
   });
@@ -345,7 +347,7 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
   socket.on("message", (raw: Buffer) => {
     const frame = JSON.parse(raw.toString("utf8")) as Frame;
     // The open-time baseline, dropped for the same reason as in `open` above.
-    if (frame["t"] !== "sessions") frames.push(frame);
+    if (frame["t"] !== "sessions" && frame["t"] !== "hello") frames.push(frame);
   });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve);
@@ -567,7 +569,7 @@ void describe("a cold attach is told where it is before it is told what changed"
     socket.on("message", (raw: Buffer) => {
       const frame = JSON.parse(raw.toString("utf8")) as Frame;
       // The open-time baseline, dropped for the same reason as in `open` above.
-      if (frame["t"] !== "sessions") frames.push(frame);
+      if (frame["t"] !== "sessions" && frame["t"] !== "hello") frames.push(frame);
     });
     await new Promise<void>((resolve, reject) => {
       socket.once("open", resolve);
@@ -996,7 +998,47 @@ void describe("a socket is given the session list the moment it opens", () => {
     // this socket was down and will never be announced again. Without the baseline this socket
     // hears nothing at all, and the strip keeps showing whatever it last had.
     const client = await open(TOKEN, ownUrl, true);
-    assert.deepEqual(await client.next(), { t: "sessions", sessions: listed });
+    const [hello, sessions] = await client.take(2);
+    assert.equal(hello?.["t"], "hello");
+    assert.deepEqual(sessions, { t: "sessions", sessions: listed });
     client.socket.close();
+  });
+
+  void test("every socket is told the width the panes are actually wrapped to", async () => {
+    // The client has a PANE_COLS of its own, and it is compiled into a bundle rebuilt and
+    // restarted separately from this process - so on the phone a client built at 50 rendered 50
+    // columns into a pane tmux was still holding at 40, and the difference read as padding down
+    // the right-hand edge. The width is this server's fact, so this server states it.
+    const client = await open(TOKEN, ownUrl, true);
+    assert.deepEqual(await client.next(), { t: "hello", cols: PANE_COLS });
+    client.socket.close();
+  });
+
+  void test("the width does not depend on the session list, which is allowed to fail", async () => {
+    // `sessions` is built from tmux and can reject; its failure is caught and logged. Folding the
+    // width into that frame would have made one failing capture-pane cost the client its width
+    // too, which is a blank-looking pane produced by an unrelated fault.
+    const broken = createServer();
+    const brokenHandle = attachWebSocketServer(broken, {
+      token: TOKEN,
+      origin: ORIGIN,
+      streamFor: () => undefined,
+      listSessions: () => Promise.reject(new Error("tmux did not answer")),
+      captureHistory: async () => await Promise.resolve(""),
+      isAlternateScreen: async () => await Promise.resolve(false),
+      repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
+      sendInput: () => undefined,
+      applyPaneRows: () => undefined,
+    });
+    await new Promise<void>((done) => broken.listen(0, "127.0.0.1", done));
+    const brokenUrl = `ws://127.0.0.1:${String((broken.address() as AddressInfo).port)}`;
+    try {
+      const client = await open(TOKEN, brokenUrl, true);
+      assert.deepEqual(await client.next(), { t: "hello", cols: PANE_COLS });
+      client.socket.close();
+    } finally {
+      brokenHandle.close();
+      broken.close();
+    }
   });
 });

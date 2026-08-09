@@ -197,6 +197,7 @@ const connectClient = async (wsPort: number, sessionId: string): Promise<ClientU
         lastStateAt = Date.now();
       },
       sessions: () => undefined,
+      paneCols: () => undefined,
       error: () => undefined,
       status: (status) => {
         if (status === "open") opened = true;
@@ -407,10 +408,12 @@ void describe("the client-visible heartbeat, as the server sends it", () => {
       // On a timer, whatever the agent is doing: neither session wrote a byte for the whole wait,
       // and nothing here asked for anything.
       assert.deepEqual(
-        // `sessions` is not on a timer: it is sent once, when the socket opens, as the baseline a
-        // reconnecting phone has no other way back to. So it is excluded here rather than counted
-        // as traffic the heartbeat measurement is contaminated by.
-        frames.filter((frame) => frame["t"] !== "ping" && frame["t"] !== "sessions"),
+        // `hello` and `sessions` are not on a timer: they are sent once, when the socket opens, as
+        // the baseline a reconnecting phone has no other way back to. So they are excluded here
+        // rather than counted as traffic the heartbeat measurement is contaminated by.
+        frames.filter(
+          (frame) => frame["t"] !== "ping" && frame["t"] !== "sessions" && frame["t"] !== "hello",
+        ),
         [],
         "something other than the heartbeat arrived, so the heartbeat is not what was measured",
       );

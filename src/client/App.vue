@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { AgentSummary } from "../agent-profiles.ts";
 import type { Cwd } from "../cwds.ts";
+import { PANE_COLS } from "../protocol.ts";
 import type { Session } from "../registry.ts";
 import {
   closeSession,
@@ -39,6 +40,11 @@ const active = ref<string>();
 const status = ref<ConnectionStatus>("closed");
 const errors = ref<string[]>([]);
 const connection = shallowRef<Connection>();
+
+// The width every pane renders at. This bundle's own constant only until a socket says otherwise:
+// the pane is wrapped by the server's PTY, and the two halves are built and restarted separately,
+// so the compiled number is a guess that goes stale between `pnpm build` and `make restart`.
+const paneCols = ref(PANE_COLS);
 
 // Terminals are created for a tab the first time it is looked at, and kept afterwards. Eagerly
 // attaching every session would make an unlooked-at tab's default 80x24 the minimum the server
@@ -185,6 +191,9 @@ const start = (current: string): void => {
       sessions: (list) => {
         sessions.value = list;
         settle();
+      },
+      paneCols: (cols) => {
+        paneCols.value = cols;
       },
       error: (_sessionId, message) => {
         note(message);
@@ -355,6 +364,7 @@ if (token.value !== undefined) start(token.value);
         :key="id"
         :session-id="id"
         :visible="id === active"
+        :cols="paneCols"
         @ready="ready"
         @gone="gone"
         @input="typed"

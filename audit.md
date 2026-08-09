@@ -2015,3 +2015,51 @@ render 50 columns of a 40-column pane - reload the phone AFTER restarting, not b
 
 *Not demonstrated:* the phone. 13px at 50 columns is arithmetic, not an observation, and whether it
 is the size Soya wanted is exactly the thing only the device answers.
+
+## The pane width comes off the wire now, because two builds cannot be made to agree
+
+Soya reported "the right-hand padding bothers me" on a screenshot, and the padding was not padding.
+Measuring the screenshot rather than reading it - the method the earlier round wrote down - gave a
+character pitch of 14.42px across a 724px screenshot, so the client was rendering 50 columns and
+using the full width correctly. But the agent's own box border stopped at x=576, which is 40 of
+those columns. `tmux -L agentdeck list-panes` confirmed it: the window was 40x34.
+
+The cause is the previous entry's own "*Needs a restart:*" note, arriving as a defect. The server
+process had started at 20:37 and the `PANE_COLS` 40 -> 50 commit landed at 21:28, so `dist/client`
+was rebuilt at 50 while the running process still held its PTYs at 40. One constant in one file
+was not enough, because the two halves are BUILT and RESTARTED separately: a shared constant makes
+the source agree, not the two running programs.
+
+So the server now states the width on the wire - `{ t: "hello", cols }`, sent to every socket the
+moment it opens - and the client renders at that rather than at its own compiled copy. `PANE_COLS`
+in the bundle is now only the value used before the first frame lands.
+
+Three things about the shape, in case a later round wants to move it:
+
+- Sent synchronously, and NOT folded into the `sessions` frame beside it. That frame is built from
+  tmux and is allowed to fail; the failure is caught and logged. Carrying the width on it would let
+  one failed capture-pane cost a client its width too, which presents as a blank-looking pane
+  caused by something unrelated. There is a test for exactly that.
+- Re-stated by every socket rather than once. The failing case is a server restarted at a different
+  width under a page that has been open the whole time, and the reconnect is the only moment that
+  can tell it. A width learned once would leave the tab wrong until a reload.
+- Range-checked through `usablePaneCols`, the same treatment `ping`'s `intervalMs` gets and for the
+  same reason: the client runs no parser over a server frame, and this value is handed to
+  `terminal.resize`. Zero or NaN is a pane that renders nothing, produced by a server that answered
+  wrongly rather than not at all.
+
+*Verified live, server half:* a socket opened against the running deployment answers
+`{"t":"hello","cols":50}` as its first frame, and the tmux window is 50x30 after `make restart`.
+
+*Not demonstrated:* the phone, for the half that matters most. What a device would show is a pane
+that re-renders at the new width on reconnect without a page reload, and the only way to see it is
+to change `PANE_COLS`, rebuild, restart, and watch. The screenshot that started this round is the
+proof the bug existed; there is no screenshot yet of it not existing.
+
+*Residual, one transition wide:* a client built with this change against a server started before it
+gets no `hello` and falls back to its compiled constant - which is today's bug, once, for whoever
+is mid-upgrade. Nothing can close that from inside the protocol.
+
+*Pre-existing and untouched:* `the reconnection ladder, against the real transport` fails under
+full-suite load and passes when its file is run alone. Confirmed on a clean checkout before this
+work, so it is a load flake this change neither caused nor fixed. 904 of 905 green.

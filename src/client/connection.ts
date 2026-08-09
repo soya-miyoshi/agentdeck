@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerMessage } from "../protocol.ts";
+import { usablePaneCols, type ClientMessage, type ServerMessage } from "../protocol.ts";
 import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import type { TokenVerdict } from "./api.ts";
@@ -213,6 +213,15 @@ export interface ConnectionEvents {
   render: (sessionId: string, action: Extract<RenderAction, { kind: "repaint" | "write" }>) => void;
   state: (sessionId: string, state: SessionState, exitCode: number | undefined) => void;
   sessions: (sessions: Session[]) => void;
+  /**
+   * The width the panes are actually wrapped to, as the server states it on connect.
+   *
+   * Taken from the wire rather than from this bundle's own `PANE_COLS`, because the client and the
+   * server are built and restarted separately and the pane's width is the server's fact. Re-stated
+   * by every socket, so a reconnect to a restarted server corrects a client that was rendering at
+   * the old width.
+   */
+  paneCols: (cols: number) => void;
   /** A sentence written by the server, rendered verbatim - rewording it loses its advice. */
   error: (sessionId: string | undefined, message: string) => void;
   status: (status: ConnectionStatus) => void;
@@ -843,6 +852,11 @@ export class Connection {
       return;
     }
     switch (message.t) {
+      case "hello":
+        // Through the same range check `intervalMs` gets, and for the same reason: it is a wire
+        // value the terminal is resized by, not data handed to it.
+        this.#events.paneCols(usablePaneCols(message.cols));
+        return;
       case "snapshot":
         this.#apply(message.sessionId, receiveSnapshot(message));
         return;

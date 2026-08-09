@@ -36,6 +36,7 @@ import { promisify } from "node:util";
 
 import type { AgentSummary } from "../agent-profiles.ts";
 import { hookCommand } from "../claude-hooks.ts";
+import { PANE_COLS } from "../protocol.ts";
 import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
@@ -244,6 +245,8 @@ interface Driven {
   repaints: () => number;
   /** Kill the transport under the client, the way a phone losing signal does. */
   drop: () => void;
+  /** Every pane width the server has stated, in order: one per socket that opened. */
+  statedCols: number[];
   errors: string[];
 }
 
@@ -266,6 +269,8 @@ const drive = async (cwd: string): Promise<Driven> => {
 
   const terminal = paintedTerminal();
   const errors: string[] = [];
+  /** Every width this connection has been told, in order: one per socket that opened. */
+  const statedCols: number[] = [];
   let opens = 0;
   let live: SocketLike | undefined;
 
@@ -308,6 +313,7 @@ const drive = async (cwd: string): Promise<Driven> => {
       },
       state: () => undefined,
       sessions: () => undefined,
+      paneCols: (cols) => statedCols.push(cols),
       error: (_sessionId, message) => errors.push(message),
       status: () => undefined,
       unauthorized: () => errors.push("the token was rejected"),
@@ -324,11 +330,26 @@ const drive = async (cwd: string): Promise<Driven> => {
     opens: () => opens,
     repaints: () => terminal.clears(),
     drop: () => live?.close(),
+    statedCols,
     errors,
   };
 };
 
 void describe("an agent driven from the browser, end to end", () => {
+  void test("the real server states the width its pty holds the pane at", async () => {
+    // The whole point of the frame, against the real thing rather than a fake: the client is not
+    // allowed to render at its own compiled constant, because that constant belongs to a bundle
+    // built and restarted separately from the process that owns the pty. When they disagreed the
+    // phone showed a terminal drawn 50 columns wide into a pane wrapped at 40, and the ten
+    // columns of difference looked like a padding bug in the CSS.
+    const driven = await drive(work);
+    try {
+      assert.deepEqual(driven.statedCols, [PANE_COLS]);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
   void test("a keystroke reaches the agent and its output paints back", async () => {
     const driven = await drive(work);
     try {
@@ -474,6 +495,7 @@ const buildStrip = async (): Promise<Strip> => {
         );
       },
       sessions: (list) => (state.sessions = list),
+      paneCols: () => undefined,
       error: (_sessionId, message) => errors.push(message),
       status: () => undefined,
       unauthorized: () => errors.push("the token was rejected"),

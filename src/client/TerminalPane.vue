@@ -3,13 +3,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { PANE_COLS } from "../protocol.ts";
 import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
-// The deck is PANE_COLS wide, always, and that number is the SERVER's - imported rather than
-// written out again, because the agent lays its output out at the width the PTY reports and a
-// client rendering at a different one re-wraps every paragraph.
+// The deck's width is the SERVER's number, arriving as a prop rather than imported here, because
+// the agent lays its output out at the width the PTY reports and a client rendering at a different
+// one leaves the difference as dead margin. `App.vue` holds it and the socket states it.
 const BASE_FONT_SIZE = 13;
 
 /**
@@ -33,7 +32,7 @@ const RULER_RESERVE = 14;
  */
 const PROBE_FONT_SIZE = MIN_FONT_SIZE;
 
-const props = defineProps<{ sessionId: string; visible: boolean }>();
+const props = defineProps<{ sessionId: string; visible: boolean; cols: number }>();
 const emit = defineEmits<{
   ready: [sessionId: string, handle: TerminalHandle];
   gone: [sessionId: string];
@@ -93,7 +92,7 @@ const onTouchEnd = (): void => {
   carry = 0;
 };
 
-// Bring the font to the size at which PANE_COLS fills the width, then take the rows from what that
+// Bring the font to the size at which `cols` fills the width, then take the rows from what that
 // font actually measures. One pass cannot do both: the addon measures the font in effect, so the
 // rows for a font size just assigned are still the previous font's until it has been applied.
 //
@@ -123,11 +122,11 @@ const refit = (): void => {
     if (current !== PROBE_FONT_SIZE) return;
     // Too few columns to divide by means the pane is not laid out yet; measuring here would fix a
     // wrong ratio forever, since this is the only time it is read.
-    cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, PANE_COLS);
+    cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, props.cols);
     if (cellPerFontPx === undefined) return;
   }
 
-  const size = fontSizeFor(width, PANE_COLS, cellPerFontPx);
+  const size = fontSizeFor(width, props.cols, cellPerFontPx);
   if (Math.abs(size - current) > 0.05 && passes > 0) {
     passes -= 1;
     terminal.options.fontSize = size;
@@ -135,8 +134,8 @@ const refit = (): void => {
     pending = requestAnimationFrame(refit);
     return;
   }
-  terminal.resize(PANE_COLS, Math.max(1, proposed.rows));
-  emit("resize", props.sessionId, PANE_COLS, terminal.rows);
+  terminal.resize(props.cols, Math.max(1, proposed.rows));
+  emit("resize", props.sessionId, props.cols, terminal.rows);
 };
 
 onMounted(() => {
@@ -199,6 +198,18 @@ watch(
       passes = 4;
       refit();
     }
+  },
+);
+
+// The socket states the width after this pane may already have been mounted and sized, and states
+// it again on every reconnect - so a server restarted at a different width corrects the pane it is
+// already streaming to rather than only the next one opened. `cellPerFontPx` is a property of the
+// font and survives, so this costs one font pass and not a re-measure.
+watch(
+  () => props.cols,
+  () => {
+    passes = 4;
+    refit();
   },
 );
 

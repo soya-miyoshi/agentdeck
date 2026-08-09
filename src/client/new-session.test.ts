@@ -206,6 +206,7 @@ void describe("the new-session picker, against a real server", () => {
         },
         state: () => undefined,
         sessions: () => undefined,
+        paneCols: () => undefined,
         error: () => undefined,
         status: () => undefined,
         unauthorized: () => undefined,

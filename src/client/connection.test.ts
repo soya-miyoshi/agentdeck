@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { ServerMessage } from "../protocol.ts";
+import { PANE_COLS, type ServerMessage } from "../protocol.ts";
 import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW, PING_INTERVAL_MS } from "../ws.ts";
 import type { TokenVerdict } from "./api.ts";
 import {
@@ -37,6 +37,8 @@ interface Harness {
   pendingWindow: () => boolean;
   statuses: ConnectionStatus[];
   rendered: { sessionId: string; data: string; cleared: boolean }[];
+  /** Every pane width the server has stated, in order. */
+  paneCols: number[];
   errors: string[];
   unauthorized: number;
   /** What the HTTP probe says when a socket closes having carried nothing. */
@@ -97,6 +99,7 @@ const harness = (): Harness => {
     pendingWindow: () => state.timers.some((timer) => timer.delayMs === INPUT_WINDOW_MS),
     statuses: [],
     rendered: [],
+    paneCols: [],
     errors: [],
     unauthorized: 0,
     verdict: "ok",
@@ -112,6 +115,7 @@ const harness = (): Harness => {
     },
     state: () => undefined,
     sessions: () => undefined,
+    paneCols: (cols) => state.paneCols.push(cols),
     error: (_sessionId, message) => state.errors.push(message),
     status: (status) => state.statuses.push(status),
     unauthorized: () => {
@@ -923,6 +927,45 @@ void describe("the client-visible heartbeat", () => {
       assert.equal(h.sockets.length, 1, `intervalMs ${String(intervalMs)} dropped a live socket`);
       assert.equal(h.last().closed, false);
       assert.deepEqual(h.statuses, ["connecting", "open"]);
+    }
+  });
+
+  void test("the width the server states is what the client is told to render at", () => {
+    // Not this bundle's PANE_COLS. The client and the server are built and restarted separately,
+    // so the compiled constant is stale for as long as it takes to run `make restart` - which on
+    // the phone showed up as ten columns of dead padding down the right-hand edge, not as a
+    // version skew.
+    const h = openHarness();
+    h.last().deliver({ t: "hello", cols: 40 });
+    assert.deepEqual(h.paneCols, [40]);
+  });
+
+  void test("every socket re-states the width, so a restart at a new width is picked up", () => {
+    // The case that produced the bug: the server is restarted with a different PANE_COLS under a
+    // page that has been open the whole time. Only the reconnect can tell it, and a width learned
+    // once would leave the tab rendering at the old one until a reload.
+    const h = openHarness();
+    h.last().deliver({ t: "hello", cols: 40 });
+    h.last().handlers.closed();
+    h.fire(); // the reconnection backoff
+    h.last().handlers.opened();
+    h.last().deliver({ t: "hello", cols: 50 });
+    assert.deepEqual(h.paneCols, [40, 50]);
+  });
+
+  void test("a nonsense stated width falls back rather than rendering a pane of nothing", () => {
+    // Same shape as `intervalMs` above and for the same reason: `#receive` runs no parser over a
+    // server frame, and this value is handed to `terminal.resize`. A zero, a NaN or a string is a
+    // terminal with no columns - a blank tab produced by a server that answered wrongly.
+    const bad: unknown[] = [undefined, 0, -1, NaN, Infinity, 1.5, "50", null, 100_000];
+    for (const cols of bad) {
+      const h = openHarness();
+      h.last().deliver({ t: "hello", cols } as unknown as ServerMessage);
+      assert.deepEqual(
+        h.paneCols,
+        [PANE_COLS],
+        `cols ${String(cols)} was passed through instead of falling back`,
+      );
     }
   });
 
