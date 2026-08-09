@@ -279,6 +279,9 @@ void describe("the new-session picker, against a real server", () => {
   });
 });
 
+const picker = readFileSync(new URL("./NewSession.vue", import.meta.url), "utf8");
+const app = readFileSync(new URL("./App.vue", import.meta.url), "utf8");
+
 void describe("what the picker offers", () => {
   void test("says how many sessions a directory already has, before creating another", () => {
     const [empty, busy] = directoryChoices([
@@ -302,6 +305,13 @@ void describe("what the picker offers", () => {
     assert.equal(detects?.selectable, true);
   });
 
+  void test("offers no way to type a path or a command", () => {
+    // The one input the protocol forbids. `fetchCwds` exists because a phone user typing an
+    // absolute path into a soft keyboard is not a design, and a client naming a command is RCE.
+    assert.doesNotMatch(picker, /<(input|textarea)\b/);
+    assert.doesNotMatch(picker, /contenteditable/);
+  });
+
   void test("refuses Start until both halves are chosen from the offered lists", () => {
     const directories = directoryChoices([{ path: "/a/repo", name: "repo", sessions: [] }]);
     const agents = agentChoices([
@@ -311,5 +321,70 @@ void describe("what the picker offers", () => {
     assert.equal(canStart(directories, agents, "/a/repo", undefined), false);
     assert.equal(canStart(directories, agents, "/typed/by/hand", "sh"), false);
     assert.equal(canStart(directories, agents, "/a/repo", "sh"), true);
+  });
+});
+
+// The two phone properties m4/pwa set, at the source. src/pwa.test.ts holds them against the built
+// CSS but cannot say which element they belong to, and the picker is the newest control to need
+// both: the sheet is the last thing above the home indicator while it is open.
+void describe("the picker as a phone control", () => {
+  void test("every row and both buttons claim the 44px touch target", () => {
+    const rules = ["\\.toggle,\\s*\\n?\\.start", "\\.row"];
+    for (const selector of rules) {
+      const body = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(picker)?.[1] ?? "";
+      assert.notEqual(body, "", `NewSession.vue has no ${selector} rule`);
+      assert.match(body, /min-height:\s*var\(--touch-target\)/, `${selector} is thumb-sized`);
+    }
+  });
+
+  void test("the open sheet carries the safe-area insets on the edges with hardware", () => {
+    const sheet = /\.sheet\s*\{([^}]*)\}/.exec(picker)?.[1] ?? "";
+    assert.notEqual(sheet, "", "NewSession.vue has no .sheet rule");
+    for (const side of ["bottom", "left", "right"]) {
+      assert.match(sheet, new RegExp(`var\\(--safe-${side}\\)`), `the sheet ignores the ${side}`);
+    }
+  });
+
+  void test("the labels are words, and an unstartable agent is disabled rather than hidden", () => {
+    assert.doesNotMatch(picker, /\p{Extended_Pictographic}/u, "the picker uses an emoji");
+    for (const label of ["New session", "Close", "Directory", "Agent", "Start"]) {
+      assert.ok(picker.includes(label), `no text label for ${label}`);
+    }
+    // Disabled with the reason, not filtered out: hiding it answers "where did claude go" with
+    // nothing, and offering it live is a tab that dies the instant it opens.
+    assert.match(picker, /:disabled="!choice\.selectable"/);
+    assert.match(picker, /v-if="choice\.note"/);
+  });
+});
+
+// The last hop the modules above cannot reach: what App.vue does with what the server said. A
+// picker that creates correctly and then drops the warning is the invisible failure of the two.
+void describe("App.vue shows what the create returned", () => {
+  const startSession = /const startSession[\s\S]*?\n};/.exec(app)?.[0] ?? "";
+
+  void test("the picker is mounted with the server's lists and its own busy state", () => {
+    assert.match(app, /<NewSession/);
+    assert.match(app, /:cwds="cwds"/);
+    assert.match(app, /:agents="agents"/);
+    assert.match(app, /@open="loadCwds"/, "the allowlist is not reread when the sheet opens");
+  });
+
+  void test("the 201's warning is shown, not swallowed", () => {
+    assert.notEqual(startSession, "", "App.vue has no startSession()");
+    assert.match(startSession, /warning !== undefined\) note\(warning\)/);
+  });
+
+  void test("a refusal is shown in the server's own sentence", () => {
+    // `error.message` is what api.ts carried out of the response body unreworded. Anything else
+    // here - a fixed string, a prefix - is the advice the server wrote being thrown away.
+    assert.match(startSession, /note\(error instanceof Error \? error\.message :/);
+    // Except a rejected token, which is not a message to read but a session to end.
+    assert.match(startSession, /UnauthorizedError\) \{\s*\n\s*signOut\(/);
+  });
+
+  void test("a created session becomes the tab that is showing", () => {
+    assert.match(startSession, /select\(session\.id\)/);
+    // Replaced by id rather than appended: the attach case hands back a session already listed.
+    assert.match(startSession, /filter\(\(s\) => s\.id !== session\.id\)/);
   });
 });
