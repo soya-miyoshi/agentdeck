@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { buildSnapshot, planAttach } from "./attach.ts";
-import { parseClientMessage, paneSize, type ServerMessage } from "./protocol.ts";
+import { parseClientMessage, paneRows, type ServerMessage } from "./protocol.ts";
 import type { Session } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
 import type { SessionState } from "./tmux.ts";
@@ -98,7 +98,7 @@ export interface WsDeps {
   /** Raw bytes the user typed, straight to the PTY. */
   sendInput: (sessionId: string, data: string) => void;
   /** Apply the minimum-over-attached-clients size. */
-  applyPaneSize: (sessionId: string, cols: number, rows: number) => void;
+  applyPaneRows: (sessionId: string, rows: number) => void;
   /**
    * How often to ping. Defaults to PING_INTERVAL_MS.
    *
@@ -287,10 +287,10 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle =>
   const applySize = (sessionId: string): void => {
     const stream = deps.streamFor(sessionId);
     if (stream === undefined) return;
-    const size = paneSize(stream.clients.values());
+    const rows = paneRows(stream.clients.values());
     // undefined means nobody is attached, and an empty set resizes nothing: the pane keeps the
-    // last size anyone asked for.
-    if (size !== undefined) deps.applyPaneSize(sessionId, size.cols, size.rows);
+    // last size anyone asked for. A client's cols never reach here - see PANE_COLS.
+    if (rows !== undefined) deps.applyPaneRows(sessionId, rows);
   };
 
   const handleMessage = async (client: Client, raw: string): Promise<void> => {

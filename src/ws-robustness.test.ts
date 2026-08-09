@@ -49,7 +49,7 @@ before(async () => {
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () => await Promise.resolve({ data: "screen", seq: stream.buffer.headSeq }),
     sendInput: () => undefined,
-    applyPaneSize: () => undefined,
+    applyPaneRows: () => undefined,
   }).close;
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   port = (server.address() as AddressInfo).port;

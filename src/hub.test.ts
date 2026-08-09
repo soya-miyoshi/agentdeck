@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
-import { Hub } from "./hub.ts";
+import { Hub, PANE_COLS } from "./hub.ts";
 import type { SessionPty } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { SessionStream } from "./stream.ts";
@@ -264,11 +264,11 @@ void describe("routing to the right session", () => {
     await hub.sync();
 
     hub.sendInput(a.session.id, "typed into a");
-    hub.applyPaneSize(b.session.id, 60, 20);
+    hub.applyPaneRows(b.session.id, 20);
 
     assert.deepEqual(ptys.get(a.session.id)?.written, ["typed into a"]);
     assert.deepEqual(ptys.get(b.session.id)?.written, []);
-    assert.deepEqual(ptys.get(b.session.id)?.resized, [{ cols: 60, rows: 20 }]);
+    assert.deepEqual(ptys.get(b.session.id)?.resized, [{ cols: PANE_COLS, rows: 20 }]);
     assert.deepEqual(ptys.get(a.session.id)?.resized, []);
   });
 
@@ -276,7 +276,7 @@ void describe("routing to the right session", () => {
     // A client can address a session that has just gone; that is a race, not a fault.
     const { hub } = build();
     assert.doesNotThrow(() => hub.sendInput("no-such-session", "hello"));
-    assert.doesNotThrow(() => hub.applyPaneSize("no-such-session", 80, 24));
+    assert.doesNotThrow(() => hub.applyPaneRows("no-such-session", 24));
   });
 
   void test("scrollback comes from tmux for the session asked about", async () => {

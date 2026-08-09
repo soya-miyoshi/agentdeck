@@ -12,20 +12,27 @@ import type { SessionState, Tmux } from "./tmux.ts";
 // remembered set gets wrong.
 
 /**
- * Size a session's pane opens at before any browser client has said what it wants.
+ * The width of every pane, for the whole life of every session. Not a default: a constant.
  *
- * Phone-sized, because the phone is the only thing that attaches. It was 120x40, which had no
- * argument behind it and one visible cost: tmux does not reflow history, so every line written
- * before the first attach stayed in the scrollback wrapped at 120 and was wrapped a second time by
- * a client half that wide. `capture-pane -J` now makes that width irrelevant, and this makes it
- * close to right in the first place.
+ * tmux does not reflow scrollback. Whatever width the pane had when a line was written is frozen
+ * into the history at that width, so a pane whose width follows the attached client leaves a
+ * trail of differently-wrapped stretches behind it - and re-wrapping those at the phone's width
+ * is what breaks older output mid-column, no matter what the phone reports. Sizing to the
+ * viewport therefore cannot be made right; only never moving can. The client fixes itself at the
+ * same 40 and scales its font to fit, so what it renders matches what the agent laid out.
  *
- * The width is not measured, it is chosen: the client fixes itself at 40 columns and scales its
- * font to fit, so a session started before any client attaches should already be that wide. Rows
- * are still a guess - the remaining height over a ~15.6px line, once the tab strip and the key row
- * have taken theirs - and are superseded the moment a real client reports what it measured.
+ * 40 is a portrait phone's worth of a legible monospace, and the phone is the only thing that
+ * attaches.
  */
-const DEFAULT_COLS = 40;
+export const PANE_COLS = 40;
+
+/**
+ * Rows a pane opens at before any browser client has said what it wants.
+ *
+ * A guess - the remaining height over a ~15.6px line, once the tab strip and the key row have
+ * taken theirs - and superseded the moment a real client reports what it measured. Unlike the
+ * width, being wrong here costs nothing permanent: tmux reflows the screen's height freely.
+ */
 const DEFAULT_ROWS = 30;
 
 // A repaint is finished when tmux stops writing, and tmux does not say so. There is no marker in
@@ -90,7 +97,7 @@ export class Hub {
         new SessionPty({
           socket: this.#socket,
           sessionId,
-          cols: DEFAULT_COLS,
+          cols: PANE_COLS,
           rows: DEFAULT_ROWS,
         }));
   }
@@ -215,8 +222,9 @@ export class Hub {
     this.#ptys.get(sessionId)?.write(data);
   }
 
-  applyPaneSize(sessionId: string, cols: number, rows: number): void {
-    this.#ptys.get(sessionId)?.resize(cols, rows);
+  /** Rows follow the client; the width never moves, so history is only ever wrapped once. */
+  applyPaneRows(sessionId: string, rows: number): void {
+    this.#ptys.get(sessionId)?.resize(PANE_COLS, rows);
   }
 
   async captureHistory(sessionId: string, lines: number): Promise<string> {

@@ -1709,3 +1709,41 @@ only visible to a person attached by hand.
 *Not demonstrated:* the new 50x30 default is arithmetic, not a measurement - 13px monospace at
 about 7.8px per column against a ~390px portrait phone. It has not been checked against a device,
 and the first attach supersedes it, so being near is all it has to be.
+
+## The pane is 40 columns, and never anything else
+
+The phone showed older output broken mid-column when scrolled back, after a first attempt that only
+pinned the CLIENT at 40 columns. Pinning the client is not enough, and the reason is the same one
+already recorded above: tmux does not reflow scrollback. The pane's width followed whatever the
+attached clients reported (`paneSize`, the minimum over them), so a session's history is a trail of
+stretches each frozen at the width in force when it was written - the 50-column default before the
+first attach, then whatever a client asked for, then whatever it asked for after a rotation or a
+second tab. Re-wrapping that at the phone's width can only ever be right for the newest stretch.
+`capture-pane -J` repairs the lines tmux itself wrapped, which is why this was invisible until a
+long scrollback was read on a device.
+
+**Fixed:** the width is a server-owned constant, `PANE_COLS = 40` in `src/hub.ts`, applied at
+session creation and on every resize. A client's `cols` no longer reaches the pane at all:
+`paneSize` became `paneRows` and returns only the minimum row count, and `Hub.applyPaneSize` became
+`applyPaneRows`. Rows still follow the clients - tmux reflows height freely and nothing is frozen
+by it.
+
+**Fixed:** `TerminalPane` fixes xterm at 40 columns and scales its font to whatever makes 40 fill
+the width, taking only the rows from the fit addon. The font pass repeats on an animation frame
+because the addon measures the font in effect, not the one just assigned, and is capped at four
+passes: flooring to whole pixels lets two sizes each propose the other.
+
+*Accepted with a reason:* a second tmux client attached by hand can still move the window's width,
+because `window-size` is left at tmux's default. Making it `manual` would freeze the rows too, and
+`tmux.conf` is host-executed. Recorded rather than solved.
+
+*Accepted with a reason:* sessions that already exist keep the mis-wrapped history they accumulated
+under the old behaviour. Nothing can reflow it; it ages out of the 10000-line limit.
+
+*Not demonstrated:* the phone. The suite is green (901) and the font arithmetic is reasoned, not
+measured on a device - which is exactly what the first attempt at this was, and it was wrong.
+
+*Noted:* `src/client/end-to-end.test.ts`, "the server process is restarted under an open client",
+failed once on a run where the whole suite took 54s instead of 21s, and passed alone and on the
+next full run. Timing, not the change - but it is a real flake and it is written down rather than
+re-run until quiet.

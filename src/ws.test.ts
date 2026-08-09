@@ -17,7 +17,7 @@ let url: string;
 let closeWs: () => void;
 let stream: SessionStream;
 const input: string[] = [];
-const sizes: { cols: number; rows: number }[] = [];
+const rowsApplied: number[] = [];
 
 before(async () => {
   stream = new SessionStream({ sessionId: "s1" });
@@ -32,7 +32,7 @@ before(async () => {
     repaint: async () =>
       await Promise.resolve({ data: "repainted screen", seq: stream.buffer.headSeq }),
     sendInput: (_id, data) => input.push(data),
-    applyPaneSize: (_id, cols, rows) => sizes.push({ cols, rows }),
+    applyPaneRows: (_id, rows) => rowsApplied.push(rows),
   }).close;
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   url = `ws://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
@@ -130,7 +130,7 @@ const privateServer = async (
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint,
     sendInput: () => undefined,
-    applyPaneSize: () => undefined,
+    applyPaneRows: () => undefined,
   }).close;
   await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
   return {
@@ -265,22 +265,22 @@ void describe("input and resize", () => {
     client.socket.close();
   });
 
-  void test("the pane is sized to the minimum over attached clients", async () => {
-    const wide = await open();
-    wide.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 200, rows: 50 }));
-    await wide.take(2);
+  void test("the pane is sized to the shortest attached client, and its cols are ignored", async () => {
+    const tall = await open();
+    tall.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 200, rows: 50 }));
+    await tall.take(2);
 
-    const narrow = await open();
-    narrow.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 60, rows: 20 }));
-    await narrow.take(2);
+    const short = await open();
+    short.socket.send(JSON.stringify({ t: "attach", sessionId: "s1", cols: 60, rows: 20 }));
+    await short.take(2);
 
-    assert.deepEqual(sizes.at(-1), { cols: 60, rows: 20 }, "the narrower client must win");
+    assert.equal(rowsApplied.at(-1), 20, "the shorter client must win");
 
-    // Detaching the small one lets the pane grow back.
-    narrow.socket.close();
+    // Detaching the short one lets the pane grow back.
+    short.socket.close();
     await new Promise((r) => setTimeout(r, 150));
-    assert.deepEqual(sizes.at(-1), { cols: 200, rows: 50 });
-    wide.socket.close();
+    assert.equal(rowsApplied.at(-1), 50);
+    tall.socket.close();
   });
 });
 
@@ -306,11 +306,11 @@ void describe("refusals", () => {
 
   void test("a bad resize is refused without touching the pane", async () => {
     const client = await open();
-    const before = sizes.length;
+    const before = rowsApplied.length;
     client.socket.send(JSON.stringify({ t: "resize", sessionId: "s1", cols: -5, rows: 24 }));
     const message = await client.next();
     assert.equal(message["t"], "error");
-    assert.equal(sizes.length, before);
+    assert.equal(rowsApplied.length, before);
     client.socket.close();
   });
 });
@@ -335,7 +335,7 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () => await Promise.resolve({ data: "", seq: ownStream.buffer.headSeq }),
     sendInput: () => undefined,
-    applyPaneSize: () => undefined,
+    applyPaneRows: () => undefined,
     ...overrides,
   }).close;
   await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
@@ -879,7 +879,7 @@ void describe("a state change goes to every open socket, not only the attached o
       isAlternateScreen: async () => await Promise.resolve(false),
       repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
       sendInput: () => undefined,
-      applyPaneSize: () => undefined,
+      applyPaneRows: () => undefined,
     });
     await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
     ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;
@@ -979,7 +979,7 @@ void describe("a socket is given the session list the moment it opens", () => {
       isAlternateScreen: async () => await Promise.resolve(false),
       repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
       sendInput: () => undefined,
-      applyPaneSize: () => undefined,
+      applyPaneRows: () => undefined,
     });
     await new Promise<void>((done) => own.listen(0, "127.0.0.1", done));
     ownUrl = `ws://127.0.0.1:${String((own.address() as AddressInfo).port)}`;

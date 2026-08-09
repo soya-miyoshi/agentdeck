@@ -22,6 +22,10 @@ const host = ref<HTMLDivElement>();
 let terminal: Terminal | undefined;
 let fit: FitAddon | undefined;
 let observer: ResizeObserver | undefined;
+// Font passes left before the size in hand is accepted as good enough. Flooring to whole pixels
+// means two sizes can each propose the other, and a pane that re-measures forever renders nothing.
+let passes = 0;
+let pending: number | undefined;
 
 // One finger's position and the fraction of a row it has not yet paid for. xterm has no touch
 // scrolling of its own - `.xterm-screen` sits over `.xterm-viewport`, so a drag on the text reaches
@@ -63,20 +67,28 @@ const onTouchEnd = (): void => {
   carry = 0;
 };
 
+// Bring the font to the size at which COLUMNS fills the width, then take the rows from what that
+// font actually measures. One pass cannot do both: the addon measures the font in effect, so the
+// rows for a font size just assigned are still the previous font's until it has been applied.
 const refit = (): void => {
-  // A hidden pane has no size, and fitting it would report 0x0 as this client's constraint - which
-  // the server takes as the minimum over attached clients and applies to everybody's pane.
+  // A hidden pane has no size, and fitting it would report 0 rows as this client's constraint -
+  // which the server takes as the minimum over attached clients and applies to everybody's pane.
   if (!props.visible || terminal === undefined || fit === undefined) return;
-  // Only the rows come from the addon. Cell width scales with the font, so the font size that makes
-  // exactly COLUMNS fit is the current one times (columns it proposed / COLUMNS).
   const proposed = fit.proposeDimensions();
   if (proposed === undefined || proposed.cols <= 0 || proposed.rows <= 0) return;
-  const scaled = (terminal.options.fontSize ?? BASE_FONT_SIZE) * (proposed.cols / COLUMNS);
-  const size = Math.max(6, Math.min(24, Math.floor(scaled)));
-  if (size !== terminal.options.fontSize) terminal.options.fontSize = size;
-  const rows = fit.proposeDimensions()?.rows ?? proposed.rows;
-  terminal.resize(COLUMNS, Math.max(1, rows));
-  emit("resize", props.sessionId, terminal.cols, terminal.rows);
+  // Cell width scales with the font, so the size that fits COLUMNS is the current one times
+  // (columns this font proposed / COLUMNS).
+  const current = terminal.options.fontSize ?? BASE_FONT_SIZE;
+  const size = Math.max(6, Math.min(24, Math.floor(current * (proposed.cols / COLUMNS))));
+  if (size !== current && passes > 0) {
+    passes -= 1;
+    terminal.options.fontSize = size;
+    // Measure again once the new font is in effect, rather than sizing to the old one's rows.
+    pending = requestAnimationFrame(refit);
+    return;
+  }
+  terminal.resize(COLUMNS, Math.max(1, proposed.rows));
+  emit("resize", props.sessionId, COLUMNS, terminal.rows);
 };
 
 onMounted(() => {
@@ -99,6 +111,7 @@ onMounted(() => {
   terminal = term;
   fit = addon;
   observer = new ResizeObserver(() => {
+    passes = 4;
     refit();
   });
   if (host.value !== undefined) {
@@ -127,17 +140,22 @@ onMounted(() => {
     // their form from the terminal rather than from a guess about what is running.
     applicationCursorKeys: () => term.modes.applicationCursorKeysMode,
   });
+  passes = 4;
   refit();
 });
 
 watch(
   () => props.visible,
   (visible) => {
-    if (visible) refit();
+    if (visible) {
+      passes = 4;
+      refit();
+    }
   },
 );
 
 onBeforeUnmount(() => {
+  if (pending !== undefined) cancelAnimationFrame(pending);
   observer?.disconnect();
   host.value?.removeEventListener("touchstart", onTouchStart);
   host.value?.removeEventListener("touchmove", onTouchMove);

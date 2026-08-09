@@ -61,7 +61,7 @@ before(async () => {
     isAlternateScreen: async () => await Promise.resolve(false),
     repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
     sendInput: (_id, data) => input.push(data),
-    applyPaneSize: () => undefined,
+    applyPaneRows: () => undefined,
     pingIntervalMs: TEST_PING_MS,
   }).close;
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));

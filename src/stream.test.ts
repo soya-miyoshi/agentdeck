@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { paneSize } from "./protocol.ts";
+import { paneRows } from "./protocol.ts";
 import { SessionStream, WORKING_LINGER_MS } from "./stream.ts";
 
 /** A clock the test drives, so cadence is exercised without waiting for wall-clock time. */
@@ -142,12 +142,12 @@ void describe("chunks and the buffer", () => {
   });
 });
 
-void describe("attached clients drive the pane size", () => {
+void describe("attached clients drive the pane height", () => {
   void test("the pane is the minimum over attached clients", () => {
     const { stream } = build();
     stream.attach("phone", 60, 40);
     stream.attach("laptop", 200, 50);
-    assert.deepEqual(paneSize(stream.clients.values()), { cols: 60, rows: 40 });
+    assert.equal(paneRows(stream.clients.values()), 40);
   });
 
   void test("detaching releases the constraint and the pane grows back", () => {
@@ -155,22 +155,22 @@ void describe("attached clients drive the pane size", () => {
     stream.attach("phone", 60, 40);
     stream.attach("laptop", 200, 50);
     stream.detach("phone");
-    assert.deepEqual(paneSize(stream.clients.values()), { cols: 200, rows: 50 });
+    assert.equal(paneRows(stream.clients.values()), 50);
   });
 
   void test("with nobody attached the pane keeps whatever it had", () => {
     const { stream } = build();
     stream.attach("phone", 60, 40);
     stream.detach("phone");
-    assert.equal(paneSize(stream.clients.values()), undefined);
+    assert.equal(paneRows(stream.clients.values()), undefined);
   });
 
   void test("a resize from a detached client constrains nothing", () => {
-    // Otherwise a client that went away could hold a pane narrow for everyone still looking.
+    // Otherwise a client that went away could hold a pane short for everyone still looking.
     const { stream } = build();
     stream.attach("laptop", 200, 50);
     stream.resize("ghost", 20, 5);
-    assert.deepEqual(paneSize(stream.clients.values()), { cols: 200, rows: 50 });
+    assert.equal(paneRows(stream.clients.values()), 50);
   });
 
   void test("the stream reads output whether or not anyone is attached", () => {

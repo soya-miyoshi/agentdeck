@@ -447,7 +447,7 @@ export const main = async (): Promise<void> => {
     isAlternateScreen: async (id) => await hub.isAlternateScreen(id),
     repaint: async (id) => await hub.repaint(id),
     sendInput: (id, data) => hub.sendInput(id, data),
-    applyPaneSize: (id, cols, rows) => hub.applyPaneSize(id, cols, rows),
+    applyPaneRows: (id, rows) => hub.applyPaneRows(id, rows),
   });
 
   // Attach to whatever tmux already has before serving, so the first request sees real state

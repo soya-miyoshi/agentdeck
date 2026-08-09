@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { paneSize, parseClientMessage } from "./protocol.ts";
+import { paneRows, parseClientMessage } from "./protocol.ts";
 
 const ok = (raw: unknown) => {
   const result = parseClientMessage(JSON.stringify(raw));
@@ -96,36 +96,31 @@ void describe("refusals are sentences, and nonsense never reaches the session", 
   });
 });
 
-void describe("pane size is the minimum over attached clients", () => {
-  void test("one client gets its own size", () => {
-    assert.deepEqual(paneSize([{ cols: 80, rows: 24 }]), { cols: 80, rows: 24 });
+void describe("pane rows are the minimum over attached clients", () => {
+  void test("one client gets its own row count", () => {
+    assert.equal(paneRows([{ rows: 24 }]), 24);
   });
 
-  void test("two clients get the smaller of each dimension, independently", () => {
-    // Not the smaller client - the smaller of each dimension. A tall narrow phone and a short
-    // wide laptop must not produce a pane neither can display.
-    assert.deepEqual(
-      paneSize([
-        { cols: 200, rows: 20 },
-        { cols: 60, rows: 60 },
-      ]),
-      { cols: 60, rows: 20 },
-    );
+  void test("two clients get the smaller row count", () => {
+    // The width is not negotiated at all - it is PANE_COLS - because tmux freezes each width it
+    // has had into the scrollback, so a width that follows the viewport can only ever be right
+    // for the newest stretch of history.
+    assert.equal(paneRows([{ rows: 20 }, { rows: 60 }]), 20);
   });
 
   void test("no clients resizes nothing", () => {
     // With no clients attached the pane keeps the last size anyone asked for, so this must be
     // undefined rather than a default that would silently reflow an unwatched session.
-    assert.equal(paneSize([]), undefined);
+    assert.equal(paneRows([]), undefined);
   });
 
   void test("a client detaching lets the pane grow back", () => {
     const attached = new Map([
-      ["phone", { cols: 60, rows: 40 }],
-      ["laptop", { cols: 200, rows: 50 }],
+      ["phone", { rows: 40 }],
+      ["laptop", { rows: 50 }],
     ]);
-    assert.deepEqual(paneSize(attached.values()), { cols: 60, rows: 40 });
+    assert.equal(paneRows(attached.values()), 40);
     attached.delete("phone");
-    assert.deepEqual(paneSize(attached.values()), { cols: 200, rows: 50 });
+    assert.equal(paneRows(attached.values()), 50);
   });
 });

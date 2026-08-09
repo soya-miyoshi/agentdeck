@@ -150,27 +150,24 @@ export const parseClientMessage = (raw: string): { message: ClientMessage } | { 
 };
 
 /**
- * The pane size for a session: the minimum over CURRENTLY attached clients.
+ * The pane's row count for a session: the minimum over CURRENTLY attached clients.
  *
- * One tmux client backs N browser clients, so sizing to the newest would let a phone that was
- * just unlocked reflow somebody else's tab under them. The two ways of being wrong are not
- * equal: a pane smaller than the viewport wastes screen and is obvious, while a pane wider than
- * the viewport wraps every line and is unreadable - and only the first is recoverable by looking
- * at it. tmux's own default is the opposite (`window-size latest`), so this is our arithmetic.
+ * Only rows. The width is a constant the server owns (`PANE_COLS`), because tmux does not reflow
+ * scrollback: every width the pane has ever had is frozen into the history at that width, and a
+ * client re-wrapping it at its own width is what makes older output break mid-column. A width
+ * that never moves is the only version of this with no wrong answer.
  *
- * An empty set resizes nothing: with no clients attached the pane keeps the last size anyone
- * asked for, which is why this returns undefined rather than a default.
+ * Rows still follow the clients, and the minimum rather than the newest: one tmux client backs N
+ * browser clients, so sizing to the newest would truncate somebody else's tab under them. An
+ * empty set resizes nothing - the pane keeps the last size anyone asked for - which is why this
+ * returns undefined rather than a default.
  */
-export const paneSize = (
-  sizes: Iterable<{ cols: number; rows: number }>,
-): { cols: number; rows: number } | undefined => {
-  let cols = Number.POSITIVE_INFINITY;
+export const paneRows = (sizes: Iterable<{ rows: number }>): number | undefined => {
   let rows = Number.POSITIVE_INFINITY;
   let any = false;
   for (const size of sizes) {
     any = true;
-    cols = Math.min(cols, size.cols);
     rows = Math.min(rows, size.rows);
   }
-  return any ? { cols, rows } : undefined;
+  return any ? rows : undefined;
 };
