@@ -3,10 +3,11 @@
 <!--
   m4/launchd-watchdog: the LaunchAgent that runs scripts/watchdog.mjs on a timer.
 
-  THIS FILE IS NOT INSTALLED. It lives in the repository and nothing on this Mac loads it. The
-  operator installs it themselves; the exact commands are in README.md under "The watchdog".
-  Copying it into ~/Library/LaunchAgents is what makes it survive a logout and a reboot, and that
-  is deliberately a person's decision rather than an agent's.
+  THIS FILE IS NEVER THE ONE launchd LOADS. It lives in the repository; what launchd reads is a
+  COPY at ~/Library/LaunchAgents, made by the operator. The exact commands are in README.md under
+  "The watchdog". Making that copy is what makes the job survive a logout and a reboot, and it is
+  deliberately a person's decision rather than an agent's - so edits here reach the running timer
+  only when a person copies them across.
 
   A LaunchAgent, not a LaunchDaemon: it must run as the user, in the user's GUI session. tmux is
   a daemon of this user's, `osascript` needs a session to draw a notification in, and a daemon
@@ -20,12 +21,13 @@
   INSTALLING THIS CHANGES WHAT `scripts/` IS. Until now `scripts/` was agent-writable and
   host-executed on a trigger a PERSON pulls - `pnpm install`'s postinstall, or running one by hand
   - which is what makes the `git status` / `git diff` review before those commands a control at
-  all. ProgramArguments points at a file inside the checkout, so once this is loaded the trigger
-  is a timer: an agent that appends a line to scripts/watchdog.mjs has it executed as you, in your
-  GUI session, within 60 seconds and again after every reboot, with no human action - and the same
-  edit chooses the command line the watchdog then spawns as the server. To keep the review gating
-  what it says it gates, copy the script out of the checkout (`~/.agentdeck/bin/watchdog.mjs`) and
-  point ProgramArguments there. README.md's "Installing it" says the same. THE COPY BUYS REVIEW
+  all. Point ProgramArguments at a file inside the checkout and the trigger becomes a timer: an
+  agent that appends a line to scripts/watchdog.mjs has it executed as you, in your GUI session,
+  within 60 seconds and again after every reboot, with no human action - and the same edit chooses
+  the command line the watchdog then spawns as the server. So ProgramArguments below names the COPY
+  at `~/.agentdeck/bin/watchdog.mjs`, and the install step is `cp`. Re-copy after every change to
+  scripts/watchdog.mjs, or the timer goes on running the old one - that is the price of the gate.
+  README.md's "Installing it" says the same. THE COPY BUYS REVIEW
   SCOPE, NOT WRITE PROTECTION: ~/.agentdeck/bin and the mise node named below are both writable by
   this uid, so anything running as you can still rewrite the script and the interpreter - and
   outside the checkout, `git status` / `git diff` cannot see that edit either. Only a root-owned
@@ -44,11 +46,13 @@
     <key>Label</key>
     <string>com.agentdeck.watchdog</string>
 
-    <!-- mise's node, by absolute path: launchd gets no shell and therefore no shims. -->
+    <!-- mise's node, by absolute path: launchd gets no shell and therefore no shims. The script is
+         the COPY outside the checkout, per the block above and README.md's "Installing it";
+         AGENTDECK_REPO below is how that copy finds src/server.ts. -->
     <key>ProgramArguments</key>
     <array>
       <string>/Users/you/.local/share/mise/installs/node/22/bin/node</string>
-      <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck/scripts/watchdog.mjs</string>
+      <string>/Users/you/.agentdeck/bin/watchdog.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -61,9 +65,10 @@
       README's Environment table tells you to set has to be repeated here, or the recovery quietly
       replaces your server with one that is emptier and less protected:
 
-        AGENTDECK_MOUNTS    absent, the allowlist is empty - every live session is filtered out of
-                            /api/sessions and every create is refused. The watchdog REFUSES to
-                            start a server without it and notifies instead.
+        AGENTDECK_ROOTS     or AGENTDECK_MOUNTS - either is a source of startable directories, and
+                            with NEITHER the allowlist is empty: every live session is filtered out
+                            of /api/sessions and every create is refused. The watchdog REFUSES to
+                            start a server without one of them and notifies instead.
         AGENTDECK_PROFILES  absent, nothing is startable. Same refusal.
         AGENTDECK_ORIGIN    absent, the Origin check on every /api route and every /ws upgrade is
                             OFF. Same refusal - a recovery is not allowed to hand back a server
@@ -71,9 +76,9 @@
                             origin you set it to by hand.
 
       AGENTDECK_TOKEN_FILE and AGENTDECK_AGENT_STATE_DIR belong here too if you moved them off
-      their defaults, and AGENTDECK_REPO if you followed the README and pointed ProgramArguments at
-      a copy of the script outside the checkout - a copy cannot find src/server.ts by sitting next
-      to it. The node directory is on PATH so the spawned server finds the same runtime; if
+      their defaults. AGENTDECK_REPO is already set below, because ProgramArguments names the copy
+      outside the checkout. The node directory is on PATH so the spawned server finds the same
+      runtime; if
       `tmux` is only in /opt/homebrew/bin on this Mac, the recovered server resolves it from a
       writable directory, which audit.md records.
 
@@ -95,12 +100,19 @@
       <string>7777</string>
       <key>TMUX_SOCKET</key>
       <string>agentdeck</string>
-      <!-- One entry per REPOSITORY, comma separated. Not the ghq owner directory: that would
-           allowlist every repo you own, which is broader than the list it replaced. -->
-      <key>AGENTDECK_MOUNTS</key>
-      <string>REPLACE_ME</string>
+      <!-- The ghq root, walked on every check, so a repository cloned while the deck runs is
+           startable without a restart. This IS broader than the per-repository list it replaced:
+           anything under it holding a `.git` becomes startable, including a directory an agent
+           makes. Recorded in audit.md rather than hidden. Colon-separated; use AGENTDECK_MOUNTS
+           instead, or as well, to name individual directories that live outside any root. -->
+      <key>AGENTDECK_ROOTS</key>
+      <string>/Users/you/ghq</string>
       <key>AGENTDECK_PROFILES</key>
       <string>/Users/you/.agentdeck/agents.json</string>
+      <!-- The checkout holding src/server.ts. Required because ProgramArguments names the copy at
+           ~/.agentdeck/bin, and a copy cannot find the server by sitting next to it. -->
+      <key>AGENTDECK_REPO</key>
+      <string>/Users/you/ghq/github.com/soya-miyoshi/agentdeck</string>
       <!-- The https://<host>.ts.net address the phone opens. Wrong-but-present is worse than
            absent: the server 403s every browser request and every socket upgrade while
            /api/health, which is answered before the origin check, keeps returning 200. -->

@@ -13,6 +13,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -642,7 +643,7 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
     assert.match(text, /<key>StartInterval<\/key>\s*<integer>60<\/integer>/);
     // launchd expands nothing, so a relative path or a `~` here is a job that silently never
     // runs. Both script paths and the node binary are absolute.
-    assert.match(text, /<string>\/Users\/[^<]*\/scripts\/watchdog\.mjs<\/string>/);
+    assert.match(text, /<string>\/Users\/[^<]*watchdog\.mjs<\/string>/);
     assert.doesNotMatch(text, /<string>~/);
   });
 
@@ -665,17 +666,38 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
     assert.deepEqual(dirs.slice(0, 4), ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
   });
 
-  void test("nothing loaded it: this repository installs no LaunchAgent", () => {
-    // The hard constraint on this item. The operator installs it; an agent does not. If this
-    // fails, something has been left behind that survives a reboot.
-    const installed = join(process.env["HOME"] ?? "", "Library", "LaunchAgents");
-    assert.equal(
-      existsSync(join(installed, "com.agentdeck.watchdog.plist")),
-      false,
-      "a LaunchAgent was installed into ~/Library/LaunchAgents",
-    );
-    const listed = spawnSync("launchctl", ["list", "com.agentdeck.watchdog"], { encoding: "utf8" });
-    assert.notEqual(listed.status, 0, "com.agentdeck.watchdog is loaded in launchd");
+  void test("nothing in this repository installs it: the copy and the load are a person's", () => {
+    // The hard constraint on this item, asserted about the REPOSITORY rather than about this Mac.
+    // It used to probe ~/Library/LaunchAgents and `launchctl list`, which made it a test of the
+    // machine it ran on: it went red the moment the operator did what the README tells them to do,
+    // and it would have stayed green on a machine where an agent installed the job under a
+    // different label. What must stay true is that no automated trigger here performs the install.
+    const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
+    assert.doesNotMatch(pkg, /launchctl/, "a package script would run the install unattended");
+    assert.doesNotMatch(pkg, /LaunchAgents/);
+    const mise = readFileSync(join(repoRoot, "mise.toml"), "utf8");
+    assert.doesNotMatch(mise, /launchctl/, "a mise task would run the install unattended");
+    for (const script of readdirSync(join(repoRoot, "scripts"))) {
+      if (script === "com.agentdeck.watchdog.plist") continue;
+      const text = readFileSync(join(repoRoot, "scripts", script), "utf8");
+      assert.doesNotMatch(
+        text,
+        /launchctl\s+(bootstrap|load|enable|kickstart)/,
+        `scripts/${script} loads the LaunchAgent itself`,
+      );
+    }
+  });
+
+  void test("ProgramArguments names the copy outside the checkout, not scripts/", () => {
+    // Installed, launchd's trigger is a timer rather than a person, so a file inside the checkout
+    // would be agent-writable code executed as the operator within 60 seconds of an edit.
+    const text = readFileSync(plist, "utf8");
+    const program = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+    assert.ok(program, "the plist declares no ProgramArguments");
+    assert.doesNotMatch(program, /\/scripts\/watchdog\.mjs/, "launchd would run the checkout copy");
+    assert.match(program, /\/\.agentdeck\/bin\/watchdog\.mjs/);
+    // A copy cannot find src/server.ts by sitting next to it, so the repo has to be named.
+    assert.match(text, /<key>AGENTDECK_REPO<\/key>\s*<string>[^<]+<\/string>/);
   });
 
   void test("the README writes down the exact launchctl commands the operator runs", () => {
@@ -939,25 +961,46 @@ void describe("the environment the recovered server gets is the plist's, and it 
     killListener(port);
   });
 
-  void test("no AGENTDECK_MOUNTS: it starts nothing, exits non-zero, and says why", async () => {
+  void test("no source of directories at all: it starts nothing, exits non-zero, and says why", async () => {
     const outcome = pass(port, { AGENTDECK_MOUNTS: undefined });
     assert.equal(outcome.status, 1, "a refusal exited 0, so launchd would see success");
-    assert.match(outcome.stdout, /refusing to start the server: AGENTDECK_MOUNTS not set/);
+    assert.match(
+      outcome.stdout,
+      /refusing to start the server: AGENTDECK_MOUNTS or AGENTDECK_ROOTS not set/,
+    );
     assert.doesNotMatch(outcome.stdout, /started the server/);
     assert.equal(listenerPid(port), null, "it started a server with no allowlist");
     const seen = await notifiedEventually(/will NOT start one/);
-    assert.match(seen, /AGENTDECK_MOUNTS/);
+    assert.match(seen, /AGENTDECK_ROOTS/);
     assert.match(seen, /tmux sessions are untouched/);
     assert.equal(state().startRefused, true);
   });
 
+  void test("either variable alone satisfies it: roots without mounts is not the thing missing", () => {
+    // The pair is one source of startable directories, not two independent requirements. Asserted
+    // because the refusal used to name AGENTDECK_MOUNTS specifically, which made a roots-only
+    // plist - the one `make start` now produces - a server the watchdog would never recover.
+    // Profiles are dropped as well so this pass still refuses and starts nothing: what is under
+    // test is WHICH name the refusal reaches for, not whether it can boot a server.
+    seedState();
+    const outcome = pass(port, {
+      AGENTDECK_MOUNTS: undefined,
+      AGENTDECK_ROOTS: work,
+      AGENTDECK_PROFILES: undefined,
+    });
+    assert.equal(outcome.status, 1);
+    assert.match(outcome.stdout, /refusing to start the server: AGENTDECK_PROFILES not set/);
+    assert.doesNotMatch(outcome.stdout, /AGENTDECK_ROOTS/);
+  });
+
   void test("it says it once: the next pass logs the refusal and does not notify again", () => {
+    seedState({ startRefused: true });
     const before = notified();
     const outcome = pass(port, { AGENTDECK_MOUNTS: undefined, AGENTDECK_PROFILES: undefined });
     assert.equal(outcome.status, 1);
     assert.match(
       outcome.stdout,
-      /refusing to start the server: AGENTDECK_MOUNTS, AGENTDECK_PROFILES/,
+      /refusing to start the server: AGENTDECK_MOUNTS or AGENTDECK_ROOTS, AGENTDECK_PROFILES/,
     );
     assert.equal(notified(), before, "a banner a minute is the crash-loop in another medium");
   });
@@ -978,7 +1021,7 @@ void describe("the environment the recovered server gets is the plist's, and it 
     // The file this is really about: whatever is not in this block is not set on the recovered
     // server, and the watchdog can only refuse for what it knows to look for.
     const text = readFileSync(plist, "utf8");
-    for (const name of ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"]) {
+    for (const name of ["AGENTDECK_ROOTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"]) {
       assert.match(
         text,
         new RegExp(`<key>${name}</key>\\s*<string>[^<]+</string>`),
@@ -991,7 +1034,7 @@ void describe("the environment the recovered server gets is the plist's, and it 
     const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
     const installing = readme.slice(readme.indexOf("### Installing it"));
     assert.match(installing, /AGENTDECK_ORIGIN/);
-    assert.match(installing, /AGENTDECK_MOUNTS/);
+    assert.match(installing, /AGENTDECK_ROOTS/);
     assert.match(installing, /AGENTDECK_PROFILES/);
   });
 });
@@ -1177,5 +1220,78 @@ void describe("exposure is watched, not just availability", () => {
     const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /tailscale serve is configured for the port/);
     assert.match(notified(), /now publishes port/, "exposure appeared silently");
+  });
+});
+
+void describe("the server an operator started is recognised, not called a squatter", () => {
+  // `make start`, `make restart` and `pnpm start` all produce
+  // `node --env-file-if-exists=.env src/server.ts` - node and script BOTH relative. Matching only
+  // the watchdog's own absolute spawn made every server a person ever started unrecognisable: it
+  // was reported as a squatter, alerted about, and never supervised. Measured against the live
+  // deck, whose pid the watchdog would have refused to touch, before this test existed.
+  let ours: ReturnType<typeof spawn>;
+  let stranger: ReturnType<typeof spawn>;
+  let port = "";
+  let strangerPort = "";
+
+  before(async () => {
+    port = await freePort();
+    strangerPort = await freePort();
+    freshTranscript("identity");
+    seedState();
+    const dir = join(stubRepo, "src");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "server.ts"), healthyStub(port));
+    ours = spawn(process.execPath, ["--env-file-if-exists=.env", "src/server.ts"], {
+      cwd: stubRepo,
+      stdio: "ignore",
+    });
+    for (let i = 0; i < 80 && listenerPid(port) === null; i++) await sleep(50);
+    assert.notEqual(listenerPid(port), null, "the relatively-started stub never came up");
+
+    stranger = spawn(process.execPath, ["-e", healthyStub(strangerPort)], { stdio: "ignore" });
+    for (let i = 0; i < 80 && listenerPid(strangerPort) === null; i++) await sleep(50);
+    assert.notEqual(listenerPid(strangerPort), null, "the stranger never came up");
+  });
+
+  after(() => {
+    ours.kill("SIGKILL");
+    stranger.kill("SIGKILL");
+  });
+
+  void test("a relatively-started server is ours, and the pass supervises it", () => {
+    const outcome = pass(port, asStubRepo);
+    assert.doesNotMatch(
+      outcome.stdout,
+      /is not agentdeck/,
+      "the watchdog called the operator's own server a squatter and supervised nothing",
+    );
+    assert.match(outcome.stdout, /\/api\/health answered 200/);
+    assert.equal(outcome.status, 0);
+  });
+
+  void test("the checkout is decided by the cwd, so another checkout's server is not ours", () => {
+    // The relative form carries no checkout in its argv. Without the working directory a second
+    // agentdeck - a worktree, a clone - would be adopted, stopped and restarted by this one.
+    seedState();
+    const outcome = pass(port, { AGENTDECK_REPO: work });
+    assert.match(outcome.stdout, /is not agentdeck/);
+    assert.equal(outcome.status, 1);
+  });
+
+  void test("a stranger on the port is still a squatter: not killed, not blessed", async () => {
+    seedState();
+    const outcome = pass(strangerPort, asStubRepo);
+    assert.match(outcome.stdout, /is not agentdeck/);
+    assert.equal(outcome.status, 1);
+    assert.match(await notifiedEventually(/not agentdeck/), /your call/);
+    // Answering /api/health healthily must not buy a stranger the watchdog's blessing, and the
+    // watchdog must not SIGKILL a process of the operator's that it cannot identify.
+    assert.notEqual(
+      listenerPid(strangerPort),
+      null,
+      "the watchdog killed a process it did not own",
+    );
+    assert.doesNotMatch(outcome.stdout, /started the server/);
   });
 });

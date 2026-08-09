@@ -394,31 +394,34 @@ the only answer.
 
 ### Installing it
 
-**The repository does not install this.** Nothing has run `launchctl` on this machine and no plist
-has been copied into `~/Library/LaunchAgents`, so none of the launchd half — the timer firing,
-`RunAtLoad`, recovery after a reboot — has been demonstrated. Read the plist first: check the node
-binary, both script paths and the log path against your own checkout, since launchd expands neither
-`~` nor `$PATH`.
+**The repository does not install this** — no package script, mise task or other script here runs
+`launchctl`, and `src/watchdog.test.ts` asserts that. The install is the operator's, by hand. Read
+the plist first: check the node binary, both script paths and the log path against your own
+checkout, since launchd expands neither `~` nor `$PATH`.
 
 **Fill in the environment block as well as the paths.** The watchdog spawns the server with its own
 environment, so under launchd the plist _is_ the server's environment and nothing you exported in
 the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
 Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
-protected than the one it replaced. Those three — `AGENTDECK_MOUNTS`, `AGENTDECK_PROFILES` and
-`AGENTDECK_ORIGIN` — are the ones the watchdog refuses to start a server without: it logs it and
+protected than the one it replaced. Three things — a source of directories (`AGENTDECK_ROOTS` or
+`AGENTDECK_MOUNTS`, either alone will do), `AGENTDECK_PROFILES` and `AGENTDECK_ORIGIN` — are what
+the watchdog refuses to start a server without: it logs it and
 puts a banner up instead of quietly producing a server with an empty allowlist, no agents or no
 Origin check. Add `AGENTDECK_TOKEN_FILE` and
-`AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults.
+`AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults. `AGENTDECK_REPO` is already in
+the plist and has to stay, because `ProgramArguments` names the copy outside the checkout.
 
-The watchdog still names `AGENTDECK_MOUNTS` specifically, not `AGENTDECK_ROOTS`, so a plist carrying
-only roots is one it refuses to start. `scripts/` and the plist are the operator's to edit; until
-they are, an installed watchdog needs `AGENTDECK_MOUNTS` set even though the server no longer does.
+**A `.env` is not part of this.** `make start` loads one; the watchdog spawns
+`node src/server.ts` with no `--env-file`, so the plist is the whole environment and anything you
+keep in `.env` has to be repeated there or the recovered server does not have it.
 
 **Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
 repository, which agents working here can write — as you, every 60 seconds, with no human action.
 Everywhere else `scripts/` is executed by a command a person types after the review under
-[Toolchain](#toolchain); a timer is not. So copy the script out of the checkout and point
-`ProgramArguments` at the copy. **The copy buys review scope, not write protection.** Both files
+[Toolchain](#toolchain); a timer is not. So `ProgramArguments` names a copy outside the checkout
+and the install step is a `cp` — which also means **every later change to `scripts/watchdog.mjs`
+has to be copied across by hand**, or the timer goes on running the old one. That re-copy is the
+gate, not an oversight. **The copy buys review scope, not write protection.** Both files
 launchd executes stay writable by this uid — `~/.agentdeck/bin/watchdog.mjs` and the mise node
 named as `ProgramArguments[0]` — so anything running as you can still rewrite the script and the
 interpreter, and because the copy lives outside the checkout that edit is one `git status` and
@@ -432,10 +435,13 @@ can write it, which is why a latched pass still probes and re-alerts hourly inst
 
 ```sh
 mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs
-# then edit ProgramArguments to name ~/.agentdeck/bin/watchdog.mjs (absolute, launchd expands no ~)
-# and set AGENTDECK_REPO to the checkout, since the copy can no longer find src/server.ts by
-# sitting next to it
 cp scripts/com.agentdeck.watchdog.plist ~/Library/LaunchAgents/
+# AGENTDECK_ORIGIN is REPLACE_ME in the repository copy on purpose - the tailnet name is this
+# machine's, not the project's. Fill it in the INSTALLED copy; the watchdog treats the sentinel
+# exactly as it treats an absent value, and refuses to start a server rather than one with the
+# Origin check off.
+plutil -replace EnvironmentVariables.AGENTDECK_ORIGIN -string "https://<host>.ts.net" \
+  ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
 launchctl kickstart -p gui/$(id -u)/com.agentdeck.watchdog   # run one pass now
 launchctl print gui/$(id -u)/com.agentdeck.watchdog          # is it loaded, what did it exit

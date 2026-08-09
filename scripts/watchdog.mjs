@@ -8,7 +8,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Overridable so the tests drive milliseconds instead of waiting on the real values. Production
@@ -166,10 +166,46 @@ const commandOf = async (pid) =>
     );
   });
 
-/** Whether a pid is OUR server: this node running this repo's src/server.ts. */
+/** A pid's working directory, or "" if it cannot be read. Needed because the server is routinely
+ *  started with a RELATIVE script path, which the argv alone cannot resolve to a checkout. */
+const cwdOf = async (pid) =>
+  await new Promise((resolve) => {
+    execFile(
+      LSOF,
+      ["-a", "-d", "cwd", "-Fn", "-p", String(pid)],
+      { timeout: TOOL_TIMEOUT_MS },
+      (error, stdout) => {
+        if (error) return resolve("");
+        const line = stdout.split("\n").find((entry) => entry.startsWith("n"));
+        resolve(line === undefined ? "" : line.slice(1));
+      },
+    );
+  });
+
+const SERVER_SCRIPT = join("src", "server.ts");
+
+/**
+ * Whether a pid is OUR server: a node running THIS checkout's src/server.ts.
+ *
+ * Two shapes, because two things start it. The watchdog's own spawn is absolute on both counts.
+ * `make start`, `make restart` and `pnpm start` are not - `ps` reports them as
+ * `node --env-file-if-exists=.env src/server.ts` - so for those the checkout is decided by the
+ * process's working directory. Matching only the absolute shape made every server an operator
+ * ever started unrecognisable: the watchdog called it a squatter, alerted, and supervised nothing.
+ */
 const isOurServer = async (pid) => {
   const command = await commandOf(pid);
-  return command.includes(process.execPath) && command.includes(join(repoRoot, "src", "server.ts"));
+  if (command === "") return false;
+  const target = join(repoRoot, SERVER_SCRIPT);
+  if (command.includes(process.execPath) && command.includes(target)) return true;
+  const tokens = command.split(" ").filter((token) => token !== "");
+  if (basename(tokens[0] ?? "") !== "node") return false;
+  const script = tokens.find(
+    (token) => token === SERVER_SCRIPT || token.endsWith(`/${SERVER_SCRIPT}`),
+  );
+  if (script === undefined) return false;
+  const cwd = await cwdOf(pid);
+  return cwd !== "" && resolvePath(cwd, script) === target;
 };
 
 /** The pid holding the port, only if it is our server. Anything else is reported as a squatter:
@@ -212,17 +248,23 @@ const probe = async () => {
 // Starting and restarting
 // -----------------------------------------------------------------------------------------
 
-// What the server may not be started without: no mounts is an empty allowlist, no profiles is
-// nothing startable, no origin is the Origin check off on every /api route and /ws upgrade.
-const REQUIRED_ENV = ["AGENTDECK_MOUNTS", "AGENTDECK_PROFILES", "AGENTDECK_ORIGIN"];
+// What the server may not be started without: no directories is an empty allowlist, no profiles is
+// nothing startable, no origin is the Origin check off on every /api route and /ws upgrade. The
+// first is a pair rather than a name - either variable is a source of startable directories.
+const REQUIRED_ENV = [
+  ["AGENTDECK_MOUNTS", "AGENTDECK_ROOTS"],
+  ["AGENTDECK_PROFILES"],
+  ["AGENTDECK_ORIGIN"],
+];
 // Unset OR still the plist's sentinel. A placeholder is worse than an absence: a wrong
 // AGENTDECK_ORIGIN 403s every browser request while /api/health keeps answering 200, so the
 // watchdog would log a green pass forever against a server the phone cannot use.
+const isSet = (name) => {
+  const value = process.env[name] ?? "";
+  return value !== "" && !value.includes("REPLACE_ME");
+};
 const missingEnv = () =>
-  REQUIRED_ENV.filter((name) => {
-    const value = process.env[name] ?? "";
-    return value === "" || value.includes("REPLACE_ME");
-  });
+  REQUIRED_ENV.filter((group) => !group.some(isSet)).map((group) => group.join(" or "));
 
 /** Start the server detached so it outlives this pass. The log is 0600 because it can carry a
  *  first run's token. */

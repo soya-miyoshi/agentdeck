@@ -2151,3 +2151,62 @@ account does not change this either: agents would go on sharing a uid with each 
 and were left alone. An installed watchdog therefore refuses to start a server configured with
 roots only. The watchdog is not installed, so nothing is broken today; the README says so rather
 than leaving it to be found.
+
+## The watchdog identified its own server by a shape nothing on this Mac produces
+
+Preparing the LaunchAgent for a real install turned up a defect that made the whole thing inert.
+`isOurServer` required the `ps` line to contain node's absolute path AND the absolute path of
+`src/server.ts`. Every server an operator has ever started here - `make start`, `make restart`,
+`pnpm start` - reports as `node --env-file-if-exists=.env src/server.ts`, relative on both counts.
+Only a server the watchdog itself had spawned could match.
+
+*Measured on the live deck, before and after, with the notifier stubbed.* The version at HEAD, given
+a fully populated environment:
+
+```
+port 7777 is held by pid 22488, which is not agentdeck
+  it is running: node --env-file-if-exists=.env src/server.ts
+  and tailscale serve is publishing that port on the tailnet
+exit 1
+```
+
+plus a critical modal telling the operator a stranger was published on their tailnet. That is every
+pass, forever: exit 1 before the probe, no supervision, and a false security alert about the deck
+itself. After the fix, same server, same environment: `node process 22488 holds it` /
+`/api/health answered 200 in 16ms` / exit 0.
+
+*What was changed:* `isOurServer` now accepts a second shape - argv[0] whose basename is `node`,
+some token that is or ends in `src/server.ts`, and that token resolving against the PROCESS'S OWN
+working directory (read with `lsof -d cwd`) to this checkout's server. The absolute shape is still
+matched first and unchanged. `REQUIRED_ENV`'s first entry became the pair
+`AGENTDECK_MOUNTS`/`AGENTDECK_ROOTS`, either satisfying it, so a roots-only plist is recoverable.
+The plist declares `AGENTDECK_ROOTS`, `AGENTDECK_REPO`, and points `ProgramArguments` at
+`~/.agentdeck/bin/watchdog.mjs` rather than at the checkout.
+
+*The cwd is what keeps this narrow.* Without it the relative form has no checkout in its argv, so a
+second agentdeck - a worktree, a second clone, a test run - would be adopted, stopped and restarted
+by this one. Asserted as its own test rather than left as a comment. A stranger on the port is
+still a squatter, still neither killed nor blessed, also now asserted: that path had no test at all.
+
+*A test that measured the machine was replaced.* `nothing loaded it: this repository installs no
+LaunchAgent` probed `~/Library/LaunchAgents` and `launchctl list`, so it went red the moment the
+operator did what the README instructs, and it would have stayed green against an agent that
+installed the job under another label. It now asserts the property that matters and is actually
+this repository's: no `package.json` script, no mise task and no file in `scripts/` runs
+`launchctl bootstrap|load|enable|kickstart`. This is the same mistake CLAUDE.md already records
+about a test that probed the operator's real `ts.net` name.
+
+*Verified:* 928/928, typecheck, lint, `plutil -lint`, and the two live passes above.
+
+*Not demonstrated, and it is the important half:* launchd. Nothing has been installed - no plist in
+`~/Library/LaunchAgents`, nothing in `launchctl list`, no watchdog log in `~/Library/Logs`. The
+timer firing, `RunAtLoad`, and recovery after a reboot remain exactly as undemonstrated as they
+were, because `launchctl` is the operator's to run. What is demonstrated is one pass, by hand,
+against the real server.
+
+*Residual, unchanged by any of this:* the copy at `~/.agentdeck/bin` buys review scope, not write
+protection - it and the mise node are both writable by this uid - and the watchdog still spawns
+`src/server.ts` from the checkout, so a recovery executes agent-writable code as the operator
+either way. Installing it also means every later edit to `scripts/watchdog.mjs` must be copied
+across by hand or the timer keeps running the old one; that re-copy IS the gate, and it is a
+standing way for the two to drift apart silently.
