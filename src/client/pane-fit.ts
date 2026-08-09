@@ -36,8 +36,8 @@ export const cellRatio = (
  * The font size at which `columns` cells fill `width`, clamped, and NOT rounded to a whole pixel.
  *
  * Rounding was the defect this replaced. A font floored to the pixel below is up to a whole step
- * of cell width narrow on every column, and at 40 columns that is tens of pixels of dead margin
- * down the right-hand edge of the phone.
+ * of cell width narrow on every column, and across a pane full of them that is tens of pixels
+ * of dead margin down the right-hand edge of the phone.
  *
  * One pixel is held back from the width: a cell that rounds up rather than down inside the
  * terminal clips the last column, and a column that is present but unreadable is worse than a

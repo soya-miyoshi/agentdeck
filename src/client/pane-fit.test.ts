@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { PANE_COLS } from "../protocol.ts";
 import { cellRatio, fontSizeFor, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./pane-fit.ts";
 
-// A simulated terminal, so the property under test is "the 40 columns fill the pane" rather than
-// any particular arithmetic. `advance` is the font's cell width per pixel of font size; 0.6 is
-// about what a monospace face gives, and the tests do not depend on the value.
+// A simulated terminal, so the property under test is "the columns fill the pane" rather than any
+// particular arithmetic. `advance` is the font's cell width per pixel of font size; 0.6 is about
+// what a monospace face gives, and the tests do not depend on the value.
+//
+// The real PANE_COLS, not a number of this file's own: the width the deck actually ships at is the
+// one worth holding these properties at, and it has already moved once.
 const RESERVE = 14;
-const COLUMNS = 40;
+const COLUMNS = PANE_COLS;
 
 const proposeCols = (width: number, fontSize: number, advance: number): number =>
   Math.max(2, Math.floor((width - RESERVE) / (fontSize * advance)));
 
-// What the pane would actually look like: the pixels the 40 columns occupy, and what is left over.
+// What the pane would actually look like: the pixels the columns occupy, and what is left over.
 const leftover = (width: number, fontSize: number, advance: number): number =>
   width - COLUMNS * fontSize * advance;
 
@@ -24,7 +28,7 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
     // The residual is not zero and cannot be: the only measurement available is a WHOLE column
     // count, so the cell width read back is high by up to one column's share of the pane. Taking
     // the high estimate is deliberate - it makes the font too small rather than too large, and too
-    // large clips the fortieth column. The bound is therefore about one cell AT THE PROBE SIZE,
+    // large clips the last column. The bound is therefore about one cell AT THE PROBE SIZE,
     // which is why the probe is the smallest font the deck will use.
     for (const width of [320, 360, 375, 390, 393, 402, 430, 744, 820]) {
       for (const advance of [0.5, 0.55, 0.6, 0.62, 0.667]) {
@@ -44,16 +48,15 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
     }
   });
 
-  void test("a pane too wide for 40 legible columns keeps its margin rather than shouting", () => {
-    // Landscape and iPad. 40 columns across 744px is 18px cells, which is furniture rather than
-    // text, so the clamp holds and the rest of the pane stays empty. Recorded because it looks
-    // exactly like the bug above and is not it: the deck is 40 columns by decision, and the
-    // alternative to a margin here is text sized for a room.
+  void test("a pane too wide for legible columns keeps its margin rather than shouting", () => {
+    // A desktop-sized window. Filling it with PANE_COLS would need text sized for a room, so the
+    // clamp holds and the rest of the pane stays empty. Recorded because it looks exactly like the
+    // bug above and is not it: the deck is a fixed column count by decision.
     const advance = 0.6;
-    const ratio = cellRatio(744, RESERVE, proposeCols(744, MIN_FONT_SIZE, advance), 6, COLUMNS);
+    const ratio = cellRatio(1400, RESERVE, proposeCols(1400, MIN_FONT_SIZE, advance), 6, COLUMNS);
     assert.ok(ratio !== undefined);
-    assert.equal(fontSizeFor(744, COLUMNS, ratio), MAX_FONT_SIZE);
-    assert.ok(leftover(744, MAX_FONT_SIZE, advance) > 100);
+    assert.equal(fontSizeFor(1400, COLUMNS, ratio), MAX_FONT_SIZE);
+    assert.ok(leftover(1400, MAX_FONT_SIZE, advance) > 100);
   });
 
   void test("the columns never overflow the pane, which would clip the last one", () => {
@@ -108,15 +111,33 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
   });
 
   void test("the font is not rounded to a whole pixel, which is what left the margin", () => {
+    // Over a spread of widths, not one: what flooring costs is the size's fractional part times
+    // the column count, so at SOME widths it costs almost nothing and the bug hides. The defect is
+    // the worst case, and a test pinned to a single width is a test that a later change to
+    // PANE_COLS can silently turn into a tautology - which is exactly what it did at 50.
     const advance = 0.6;
-    const ratio = cellRatio(393, RESERVE, proposeCols(393, MIN_FONT_SIZE, advance), 6, COLUMNS);
-    assert.ok(ratio !== undefined);
-    const size = fontSizeFor(393, COLUMNS, ratio);
-    assert.notEqual(size, Math.floor(size), "a whole-pixel size means the rounding is back");
-    // And the floor it replaced really is worse on this width, by most of a column of text.
+    let worst = 0;
+    let fractional = false;
+    for (const width of [320, 360, 375, 390, 393, 402, 430]) {
+      const ratio = cellRatio(
+        width,
+        RESERVE,
+        proposeCols(width, MIN_FONT_SIZE, advance),
+        6,
+        COLUMNS,
+      );
+      assert.ok(ratio !== undefined);
+      const size = fontSizeFor(width, COLUMNS, ratio);
+      if (size !== Math.floor(size)) fractional = true;
+      worst = Math.max(
+        worst,
+        leftover(width, Math.floor(size), advance) - leftover(width, size, advance),
+      );
+    }
+    assert.ok(fractional, "every size came out whole, so the rounding is back");
     assert.ok(
-      leftover(393, Math.floor(size), advance) - leftover(393, size, advance) > 5,
-      "flooring the font should cost visible margin, or this test proves nothing",
+      worst > 10,
+      `flooring only ever cost ${String(worst)}px, so this test proves nothing`,
     );
   });
 });

@@ -3,7 +3,8 @@ import { describe, test } from "node:test";
 
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
-import { Hub, PANE_COLS } from "./hub.ts";
+import { Hub } from "./hub.ts";
+import { PANE_COLS } from "./protocol.ts";
 import type { SessionPty } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { SessionStream } from "./stream.ts";

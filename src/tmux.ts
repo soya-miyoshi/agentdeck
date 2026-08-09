@@ -595,7 +595,7 @@ export class Tmux {
    *
    * NO `-J`, deliberately, and it was passed here for two rounds of this bug. `-J` joins the rows
    * tmux wrapped back into one logical line, which is right when the client's width differs from
-   * the pane's - it lets the client re-wrap. It is wrong now: the pane is a fixed 40 (`PANE_COLS`)
+   * the pane's - it lets the client re-wrap. It is wrong now: the pane is a fixed `PANE_COLS`
    * and so is the client, so the capture is already at the client's width and joining can only
    * damage it. And it damages more than long lines. tmux sets a row's wrap flag whenever the text
    * filled the row and kept going, which a TUI does on every full-width line it draws, so `-J`

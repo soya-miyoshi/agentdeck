@@ -1,3 +1,4 @@
+import { PANE_COLS } from "./protocol.ts";
 import { SessionPty } from "./pty.ts";
 import type { Registry } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
@@ -10,21 +11,6 @@ import type { SessionState, Tmux } from "./tmux.ts";
 // agreeing with the first, and the interesting cases - a session created by a human in a
 // terminal, a session whose agent exited while nobody was looking - are exactly the ones a
 // remembered set gets wrong.
-
-/**
- * The width of every pane, for the whole life of every session. Not a default: a constant.
- *
- * tmux does not reflow scrollback. Whatever width the pane had when a line was written is frozen
- * into the history at that width, so a pane whose width follows the attached client leaves a
- * trail of differently-wrapped stretches behind it - and re-wrapping those at the phone's width
- * is what breaks older output mid-column, no matter what the phone reports. Sizing to the
- * viewport therefore cannot be made right; only never moving can. The client fixes itself at the
- * same 40 and scales its font to fit, so what it renders matches what the agent laid out.
- *
- * 40 is a portrait phone's worth of a legible monospace, and the phone is the only thing that
- * attaches.
- */
-export const PANE_COLS = 40;
 
 /**
  * Rows a pane opens at before any browser client has said what it wants.

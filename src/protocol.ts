@@ -9,6 +9,27 @@ import type { Session } from "./registry.ts";
 // has the token is still a program that can send nonsense, and a `resize` with cols: -1 or a
 // `seq` of "banana" must be a refusal rather than an exception three layers down.
 
+/**
+ * The width of every pane, for the whole life of every session. Not a default: a constant.
+ *
+ * tmux does not reflow scrollback. Whatever width the pane had when a line was written is frozen
+ * into the history at that width, so a pane whose width follows the attached client leaves a
+ * trail of differently-wrapped stretches behind it - and re-wrapping those at the phone's width
+ * is what breaks older output mid-column, no matter what the phone reports. Sizing to the
+ * viewport therefore cannot be made right; only never moving can. The client fixes itself at the
+ * SAME number and scales its font to fit, so what it renders matches what the agent laid out.
+ *
+ * It lives here, in the protocol, because the two halves agreeing is the whole point and it was
+ * written out twice - once in `hub.ts` and once in `TerminalPane.vue` - with nothing to keep them
+ * equal. Two constants that must match and do not have to are the wrapping bug back again.
+ *
+ * 50 rather than the 40 it started at: the client scales the font so the columns fill the phone,
+ * so the column count IS the font size, and 40 columns across a 393pt phone is 16px text. Soya
+ * asked for smaller; 50 is about 13px there, which is what it looked like before the pane started
+ * using the full width.
+ */
+export const PANE_COLS = 50;
+
 export interface AttachMessage {
   t: "attach";
   sessionId: string;

@@ -3,12 +3,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
+import { PANE_COLS } from "../protocol.ts";
 import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
-// The deck is 40 columns wide, always. An agent's output is laid out by the agent at the width the
-// PTY reports, and a width that moves with the device wraps the same paragraph differently on each.
-const COLUMNS = 40;
+// The deck is PANE_COLS wide, always, and that number is the SERVER's - imported rather than
+// written out again, because the agent lays its output out at the width the PTY reports and a
+// client rendering at a different one re-wraps every paragraph.
 const BASE_FONT_SIZE = 13;
 
 /**
@@ -25,9 +26,10 @@ const RULER_RESERVE = 14;
  * The font size the cell width is measured at, once.
  *
  * `proposeDimensions` reports whole columns, so the cell width read back from it carries the error
- * of that floor - and at a font that nearly fills the pane, 40 columns is all the resolution there
- * is and the error is a percent and a half. Measured at the smallest font instead, the same floor
- * lands across a hundred-odd columns and the ratio is good to well under one percent.
+ * of that floor - and at a font that nearly fills the pane, the pane's own column count is all
+ * the resolution there is, so the error is a percent or two. Measured at the smallest font instead,
+ * the same floor lands across several times as many columns and the ratio is good to well under one
+ * percent.
  */
 const PROBE_FONT_SIZE = MIN_FONT_SIZE;
 
@@ -91,12 +93,12 @@ const onTouchEnd = (): void => {
   carry = 0;
 };
 
-// Bring the font to the size at which COLUMNS fills the width, then take the rows from what that
+// Bring the font to the size at which PANE_COLS fills the width, then take the rows from what that
 // font actually measures. One pass cannot do both: the addon measures the font in effect, so the
 // rows for a font size just assigned are still the previous font's until it has been applied.
 //
 // The size is NOT rounded to a whole pixel. It was, and a floored font is up to a whole step of
-// cell width narrower than the pane on every one of 40 columns - 19 CSS pixels of dead margin,
+// cell width narrower than the pane on every column - 19 CSS pixels of dead margin,
 // measured off a phone, on top of the 14 the addon reserves.
 const refit = (): void => {
   // A hidden pane has no size, and fitting it would report 0 rows as this client's constraint -
@@ -121,11 +123,11 @@ const refit = (): void => {
     if (current !== PROBE_FONT_SIZE) return;
     // Too few columns to divide by means the pane is not laid out yet; measuring here would fix a
     // wrong ratio forever, since this is the only time it is read.
-    cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, COLUMNS);
+    cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, PANE_COLS);
     if (cellPerFontPx === undefined) return;
   }
 
-  const size = fontSizeFor(width, COLUMNS, cellPerFontPx);
+  const size = fontSizeFor(width, PANE_COLS, cellPerFontPx);
   if (Math.abs(size - current) > 0.05 && passes > 0) {
     passes -= 1;
     terminal.options.fontSize = size;
@@ -133,8 +135,8 @@ const refit = (): void => {
     pending = requestAnimationFrame(refit);
     return;
   }
-  terminal.resize(COLUMNS, Math.max(1, proposed.rows));
-  emit("resize", props.sessionId, COLUMNS, terminal.rows);
+  terminal.resize(PANE_COLS, Math.max(1, proposed.rows));
+  emit("resize", props.sessionId, PANE_COLS, terminal.rows);
 };
 
 onMounted(() => {

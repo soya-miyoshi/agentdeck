@@ -6,7 +6,7 @@ import { join } from "node:path";
 //
 // The agent reads the file itself; nothing here goes near the terminal stream. That is the whole
 // reason this is a file on disk rather than a wire format: a screenshot pasted into a pty is
-// megabytes of base64 typed at an agent's prompt, and the pane is 40 columns wide.
+// megabytes of base64 typed at an agent's prompt, and the pane is `PANE_COLS` wide.
 
 /**
  * What may be written, and as what extension.

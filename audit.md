@@ -1981,3 +1981,37 @@ Worth keeping for the next one: the thing that made it agree was measuring the s
 instead of reading it. Two independent numbers came out of that - 33pt of dead width, and the key
 row's 4pt padding as the scale reference - and both causes were then found in source rather than
 guessed at. The three earlier scrollback rounds were all reasoned about and all wrong.
+
+## PANE_COLS 40 -> 50, and the two copies of it that had to agree
+
+Once the pane started using the full width, the font grew: the client sizes the font so the columns
+fill the phone, which makes the column count the font-size control. 40 columns on a 393pt phone is
+about 16px of text. Soya asked for smaller, so 50, which is about 13px there - close to what it
+looked like before the margin was reclaimed, but now with ten more columns rather than dead space.
+
+The change surfaced a defect that was already there. `PANE_COLS` lived in `hub.ts` and the client
+wrote `const COLUMNS = 40` of its own, with NOTHING keeping them equal. Two constants that must
+match and are not required to are the wrapping bug in waiting: a client rendering at a width the
+pane is not is exactly what the scrollback rounds above were about. It now lives in `protocol.ts` -
+browser-safe, type-only imports, already imported by the client - and both halves import it.
+
+`pane-fit.test.ts` now takes `COLUMNS` from `PANE_COLS` too, so the properties are held at the
+width the deck actually ships rather than at a number of the test's own.
+
+That change made a test fail, which is the test working. "Flooring the font costs visible margin"
+was pinned to one width, and what flooring costs is the fractional part of the size times the
+column count - at 393px and 50 columns the fraction happened to be 0.05, so the cost was 1.5px and
+the assertion that the OLD behaviour was bad became false. A test that a later constant change can
+quietly turn into a tautology is worse than no test. It now takes the worst case over seven phone
+widths, which is the actual claim.
+
+*Consequence, not a defect:* scrollback written while the pane was 40 columns stays wrapped at 40.
+tmux does not reflow, which is the whole reason the width is a constant, so existing history will
+show short lines until it scrolls away. New output is 50.
+
+*Needs a restart:* the pane width is applied by the server when it attaches, so `make restart` is
+what moves live sessions to 50. The built client is already 50, so until then the client would
+render 50 columns of a 40-column pane - reload the phone AFTER restarting, not before.
+
+*Not demonstrated:* the phone. 13px at 50 columns is arithmetic, not an observation, and whether it
+is the size Soya wanted is exactly the thing only the device answers.
