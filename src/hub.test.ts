@@ -283,7 +283,8 @@ void describe("routing to the right session", () => {
     const { hub, registry } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     await hub.sync();
-    assert.equal(await hub.captureHistory(session.id, 100), "history\n");
+    // CR LF, because the hub hands this to a terminal rather than to a file - see `forTerminal`.
+    assert.equal(await hub.captureHistory(session.id, 100), "history\r\n");
   });
 });
 

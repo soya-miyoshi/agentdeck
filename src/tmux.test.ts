@@ -6,7 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 
-import { BASE_ENV_NAMES, baseEnv, isEmptyTmux, isMissingSession, Tmux } from "./tmux.ts";
+import {
+  BASE_ENV_NAMES,
+  baseEnv,
+  isEmptyTmux,
+  isMissingSession,
+  Tmux,
+  forTerminal,
+} from "./tmux.ts";
 
 const SEP = "\u001f";
 
@@ -462,7 +469,9 @@ void describe("capture and repaint", () => {
     // -e keeps the ANSI escapes, which is what makes tmux usable as the scrollback store.
     const { tmux, calls } = fake({ "capture-pane": "old output\n" });
     const out = await tmux.captureHistory("s", 2000);
-    assert.equal(out, "old output\n");
+    // CR LF out, LF in: capture-pane separates lines the way a file does and the terminal it is
+    // written into is not in convertEol mode. See `forTerminal`.
+    assert.equal(out, "old output\r\n");
     const call = calls[0];
     assert.ok(call, "capture-pane was never called");
     assert.ok(call.includes("-e"));
@@ -830,5 +839,52 @@ void describe("what a session's shell puts back, which the name list does not bo
       /dotfiles `HOME` points at/,
       "the README does not say that a credential in the dotfiles reaches the session anyway",
     );
+  });
+});
+
+void describe("captured scrollback is turned into bytes a terminal can be written with", () => {
+  // The shapes here are what tmux 3.7b actually returned from a 40-column pane, not invented ones:
+  // `printf "%-40s\n" PADDED` captures with -J as the word plus spaces out to 40, LF-separated,
+  // and a coloured full-width line keeps its opening SGR and no closing one.
+  void test("a line padded to the pane width comes back its own length", () => {
+    assert.equal(
+      forTerminal(`PADDED-A${" ".repeat(32)}\nPADDED-B${" ".repeat(32)}`),
+      "PADDED-A\r\nPADDED-B",
+    );
+  });
+
+  void test("what a client wraps is decided by the text, not by the padding", () => {
+    // The defect the phone showed: at 40 columns a padded line is exactly a row, so the next line
+    // starts in the middle of it - spaces and breaks mid-line in scrollback while the live stream
+    // was fine.
+    const captured = forTerminal(`> ask${" ".repeat(35)}\nanswer${" ".repeat(34)}`);
+    for (const line of captured.split("\r\n")) {
+      assert.ok(line.length <= 40, `"${line}" is still padded out to the pane width`);
+    }
+  });
+
+  void test("lines are separated the way a PTY separates them", () => {
+    // capture-pane gives LF alone and the terminal is not in convertEol mode, so without this the
+    // scrollback renders as a staircase - each line indented by the length of the one above.
+    assert.equal(forTerminal("one\ntwo\nthree"), "one\r\ntwo\r\nthree");
+  });
+
+  void test("a capture that already ends its lines with CR LF is not given a second CR", () => {
+    assert.equal(forTerminal("one\r\ntwo"), "one\r\ntwo");
+  });
+
+  void test("a colour that is closed at the end of the line stays closed", () => {
+    // Stripping the spaces must not take the reset with them, or the colour bleeds into whatever
+    // the client draws next.
+    assert.equal(forTerminal("\u001b[32mgreen   \u001b[0m"), "\u001b[32mgreen\u001b[0m");
+  });
+
+  void test("spaces inside a line are text and are left alone", () => {
+    assert.equal(forTerminal("a   b   c"), "a   b   c");
+    assert.equal(forTerminal("  indented"), "  indented");
+  });
+
+  void test("a blank line stays a blank line rather than becoming nothing to join", () => {
+    assert.equal(forTerminal("one\n    \ntwo"), "one\r\n\r\ntwo");
   });
 });

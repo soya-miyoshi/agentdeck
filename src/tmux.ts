@@ -130,6 +130,36 @@ export const exactTarget = (id: string): string => `=${id}`;
  */
 export const exactWindowTarget = (id: string): string => `=${id}:`;
 
+/**
+ * Turn what `capture-pane` prints into bytes a terminal can be written with.
+ *
+ * Two things, and each was a defect on the phone's scrollback while the live stream looked fine:
+ *
+ * Trailing spaces. `-J` joins wrapped lines, which is why it is passed, but it also "preserves
+ * trailing spaces for each line" (tmux's own words). A TUI pads nearly every line it draws out to
+ * the pane width, so history comes back as fixed-width lines - at whatever width the pane had then
+ * - and re-wrapping those at the phone's width puts a break and a run of spaces in the middle of
+ * lines that were never that long. Escape sequences after the padding are kept, so a colour is
+ * still closed where the pane closed it. What is lost is the coloured fill to the right of a box,
+ * in SCROLLBACK only: the live pane is a repaint, not a capture, and does not come through here.
+ *
+ * Line endings. capture-pane separates lines with LF alone. A PTY writes CR LF, which is why the
+ * terminal is not in convertEol mode, so an LF-only history moves down without returning to column
+ * one and the scrollback renders as a staircase - each line indented by the length of the one
+ * above it.
+ *
+ * Both measured against tmux 3.7b in a 40-column pane, not reasoned about: `printf "%-40s\n"
+ * PADDED` captures with `-J` as the word plus 32 spaces and with no CR anywhere.
+ */
+export const forTerminal = (captured: string): string =>
+  captured
+    .split("\n")
+    // The CR comes off first so the join can put exactly one back, whatever the capture used.
+    .map((line) => line.replace(/\r$/, ""))
+    // eslint-disable-next-line no-control-regex -- ESC is exactly the character being matched.
+    .map((line) => line.replace(/ +((?:\u001b\[[0-9;]*m)*)$/, "$1"))
+    .join("\r\n");
+
 // A field separator that cannot appear in the values being formatted. tmux format strings are
 // substituted before we see them, so a separator a session name could contain would let a
 // crafted name forge extra fields.
@@ -569,24 +599,36 @@ export class Tmux {
     }
   }
 
-  /** Scrollback that has already left the pane. Lines, not terminal state - see plan 002. */
+  /**
+   * Scrollback that has already left the pane. Lines, not terminal state - see plan 002.
+   *
+   * Unpadded, because `-J` does two things and only one of them is wanted: it joins wrapped lines,
+   * and it "preserves trailing spaces for each line" (tmux's own words). A TUI pads nearly every
+   * line it draws out to the pane width, so the history comes back as fixed-width lines - at
+   * whatever width the pane had then - and re-wrapping those at the phone's width puts a break and
+   * a run of spaces in the middle of lines that were never that long. Verified against tmux 3.7b:
+   * `printf "%-40s\n" PADDED` in a 40-column pane captures with `-J` as PADDED plus 32 spaces,
+   * and without `-J` as PADDED alone.
+   */
   async captureHistory(id: string, lines: number): Promise<string> {
     try {
-      return await this.#tmux([
-        "capture-pane",
-        "-p",
-        "-e",
-        // -J joins a line tmux wrapped back into one line, so the client re-wraps it at ITS width.
-        // Without it every wrap arrives as a hard newline at whatever width the pane had when the
-        // text was written, and the phone's scrollback breaks long lines mid-column.
-        "-J",
-        "-t",
-        exactWindowTarget(id),
-        "-S",
-        `-${String(lines)}`,
-        "-E",
-        "-1",
-      ]);
+      return forTerminal(
+        await this.#tmux([
+          "capture-pane",
+          "-p",
+          "-e",
+          // -J joins a line tmux wrapped back into one line, so the client re-wraps it at ITS
+          // width. Without it every wrap arrives as a hard newline at whatever width the pane had
+          // when the text was written, and the phone's scrollback breaks long lines mid-column.
+          "-J",
+          "-t",
+          exactWindowTarget(id),
+          "-S",
+          `-${String(lines)}`,
+          "-E",
+          "-1",
+        ]),
+      );
     } catch (error) {
       if (isMissingSession(error) || isEmptyTmux(error)) return "";
       throw error;

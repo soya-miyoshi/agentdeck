@@ -1747,3 +1747,40 @@ measured on a device - which is exactly what the first attempt at this was, and 
 failed once on a run where the whole suite took 54s instead of 21s, and passed alone and on the
 next full run. Timing, not the change - but it is a real flake and it is written down rather than
 re-run until quiet.
+
+## The scrollback, which is where the wrapping was actually wrong
+
+The 40-column work above did not fix what the phone was showing. The report that located it: the
+live stream wraps correctly, and only the HISTORY has spaces in the middle of lines and breaks in
+the wrong places. That rules out the pane width - the live pane and the history come from the same
+pane - and points at `capture-pane`, which is the only thing the history goes through.
+
+Two defects, both measured against tmux 3.7b in a real 40-column pane rather than reasoned about.
+
+**Fixed: `-J` preserves trailing spaces.** It is passed to join wrapped lines, which is wanted, but
+the man page's other half is "and preserves trailing spaces for each line". A TUI pads nearly every
+line it draws out to the pane width, so `printf "%-40s\n" PADDED` captures as the word plus 32
+spaces. Every such line arrives at the client already exactly a row long - or longer, if it was
+padded when the pane was wider - so the client breaks it and starts the next line in the middle of
+the row. `Tmux.captureHistory` now strips the padding, keeping any escape sequence that follows it
+so a colour is still closed where the pane closed it.
+
+**Fixed: `capture-pane` separates lines with LF alone.** A PTY writes CR LF, which is why the
+terminal is not in `convertEol` mode - so an LF-only history moved down without returning to column
+one, and the scrollback rendered as a staircase, each line indented by the length of the one above.
+Nothing in the pipeline had ever normalised it. This is very likely the "spaces in odd places" half
+of the report, and it had been there since the history frame existed.
+
+Both live in `forTerminal` in `src/tmux.ts`, applied only to captured history. The live pane is a
+repaint, not a capture, and does not pass through it.
+
+Checked end to end against a real pane, not only in unit tests: the raw capture of a 40-column pane
+contained zero CR bytes and a longest line of 241; after `forTerminal` every line is its own text's
+length, there is one CR per LF, the padded box line is 10 characters instead of 45, and a genuinely
+long 79-character line is still one line for the client to wrap at 40.
+
+*Accepted with a reason:* the coloured fill to the right of a TUI's box is lost in scrollback. The
+padding is what carries it, and the padding is the defect. The live pane keeps it.
+
+*Not demonstrated:* the phone, again. Two rounds of this have now been reasoned correct and been
+wrong on the device, and the thing that found the real cause both times was Soya looking at it.
