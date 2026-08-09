@@ -10,7 +10,6 @@ import {
   fetchAgents,
   fetchCwds,
   fetchSessions,
-  fetchTurns,
   UnauthorizedError,
   uploadImage,
   verifyToken,
@@ -23,8 +22,6 @@ import KeyRow from "./KeyRow.vue";
 import NewSession from "./NewSession.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
-import type { Turn } from "../turn-log.ts";
-import TurnHistory from "./TurnHistory.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 import { clearToken, loadToken, saveToken } from "./token-store.ts";
@@ -51,68 +48,6 @@ const handles = new Map<string, TerminalHandle>();
 
 const tabs = computed(() => toTabs(sessions.value, agents.value));
 const reconnecting = computed(() => status.value === "reconnecting");
-
-// The answers, kept for the active session only. Plan 007 puts them behind a fetch rather than a
-// socket frame, so there is nothing to keep in sync - the list is whatever the last GET returned.
-const historyOpen = ref(false);
-const turns = ref<Turn[]>([]);
-const turnsTruncated = ref(false);
-const turnsLoading = ref(false);
-const turnsError = ref<string>();
-
-const logsTurns = computed(() => {
-  const id = active.value;
-  if (id === undefined) return false;
-  const session = sessions.value.find((candidate) => candidate.id === id);
-  return agents.value.find((agent) => agent.id === session?.agent)?.logsTurns ?? false;
-});
-
-const loadTurns = async (): Promise<void> => {
-  const id = active.value;
-  const current = token.value;
-  if (id === undefined || current === undefined) return;
-  turnsLoading.value = true;
-  turnsError.value = undefined;
-  try {
-    const page = await fetchTurns(current, id);
-    // The tab may have changed while this was in flight, and answering the wrong session's
-    // question with this one's answers is worse than showing nothing.
-    if (active.value !== id) return;
-    turns.value = page.turns;
-    turnsTruncated.value = page.truncated;
-  } catch (error) {
-    if (error instanceof UnauthorizedError) {
-      signOut("The deck rejected the token. Paste it again.");
-      return;
-    }
-    turnsError.value = error instanceof Error ? error.message : "could not load the answers";
-  } finally {
-    turnsLoading.value = false;
-  }
-};
-
-const openHistory = (): void => {
-  historyOpen.value = true;
-  turns.value = [];
-  void loadTurns();
-};
-
-// A turn ending is a transition the strip is already told about, so this is the refetch plan 002
-// chose instead of a second delivery path for the same fact. Only while the list is being looked
-// at: a closed overlay has nothing to keep current.
-watch(
-  () =>
-    active.value === undefined
-      ? undefined
-      : tabs.value.find((tab) => tab.id === active.value)?.state,
-  (state, previous) => {
-    if (historyOpen.value && state === "idle" && previous === "working") void loadTurns();
-  },
-);
-
-watch(active, () => {
-  historyOpen.value = false;
-});
 
 const note = (message: string): void => {
   // Newest first, and bounded: an error surface that grows without limit becomes the page.
@@ -393,25 +328,24 @@ if (token.value !== undefined) start(token.value);
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
     <TabStrip :tabs="tabs" :active="active" @select="select" @close="(id) => void endSession(id)" />
-    <div class="actions">
-      <!-- Offered only for an agent that reports its own turns: an empty list for an agent that
-           never will reads as broken (plan 004). -->
-      <button v-if="logsTurns" class="answers" type="button" @click="openHistory">Answers</button>
-      <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
-      <UploadImage
-        v-if="active !== undefined"
-        :busy="uploading"
-        @pick="(file) => void sendImage(file)"
-      />
-    </div>
-    <!-- Without this the deck can drive sessions but never start one. -->
+    <!-- Without this the deck can drive sessions but never start one. Image rides in the same bar
+         because it is the other thing done TO a session, not a mode of the terminal below. -->
     <NewSession
       :cwds="cwds"
       :agents="agents"
       :busy="starting"
       @open="loadCwds"
       @start="(cwd, agent) => void startSession(cwd, agent)"
-    />
+    >
+      <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
+      <template #beside>
+        <UploadImage
+          v-if="active !== undefined"
+          :busy="uploading"
+          @pick="(file) => void sendImage(file)"
+        />
+      </template>
+    </NewSession>
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
     <p v-for="message in errors" :key="message" class="banner error">{{ message }}</p>
@@ -425,14 +359,6 @@ if (token.value !== undefined) start(token.value);
         @gone="gone"
         @input="typed"
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
-      />
-      <TurnHistory
-        v-if="historyOpen"
-        :turns="turns"
-        :truncated="turnsTruncated"
-        :loading="turnsLoading"
-        :error="turnsError"
-        @close="historyOpen = false"
       />
     </main>
     <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
@@ -465,20 +391,6 @@ if (token.value !== undefined) start(token.value);
      background between the two. */
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
-}
-.actions {
-  display: flex;
-  align-items: center;
-}
-.answers {
-  margin: 0 0.75rem 0.25rem;
-  border: 0;
-  border-radius: 0.4rem;
-  padding: 0.35rem 0.8rem;
-  background: #39405060;
-  color: #d7dae0;
-  font: inherit;
-  font-size: 0.85rem;
 }
 .banner {
   margin: 0;

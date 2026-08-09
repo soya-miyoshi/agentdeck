@@ -36,9 +36,15 @@ const start = (): void => {
 
 <template>
   <div class="picker">
-    <button class="toggle" type="button" @click="toggle">
-      {{ open ? "Close" : "New session" }}
-    </button>
+    <!-- The bar is the deck's one row of session-level actions. The slot is where a sibling action
+         sits so it reads as the same level as `New session` rather than as a stray button above
+         it; the sheet below still spans the full width. -->
+    <div class="bar">
+      <button class="toggle" type="button" @click="toggle">
+        {{ open ? "Close" : "New session" }}
+      </button>
+      <slot name="beside" />
+    </div>
     <div v-if="open" class="sheet">
       <p class="label">Directory</p>
       <p v-if="directories.length === 0" class="none">
@@ -84,10 +90,16 @@ const start = (): void => {
   border-bottom: 1px solid #2a2e35;
   background: #14161a;
 }
+.bar {
+  display: flex;
+  align-items: stretch;
+  /* The toggle takes the rest, so a sibling action keeps only the width its label needs. */
+  padding-right: var(--safe-right);
+  padding-left: var(--safe-left);
+}
 .toggle,
 .start {
   min-height: var(--touch-target);
-  width: 100%;
   padding: 0 0.75rem;
   border: 0;
   background: #1b1e24;
@@ -95,7 +107,13 @@ const start = (): void => {
   font: inherit;
   text-align: left;
 }
+.toggle {
+  /* Takes the row and leaves the slotted action its label's width. Basis 0, not auto: an `auto`
+     basis is the label's own width, and `New session` plus a sibling then overflows a phone. */
+  flex: 1 1 0;
+}
 .start {
+  width: 100%;
   margin-top: 0.5rem;
   background: #24406b;
   text-align: center;

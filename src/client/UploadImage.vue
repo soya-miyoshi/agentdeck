@@ -31,14 +31,14 @@ const picked = (event: Event): void => {
 
 <style scoped>
 .upload {
-  align-self: flex-start;
-  margin: 0 0.75rem 0.25rem;
+  /* Sits in the New session bar, so it is flush with it rather than a floating chip: no margin,
+     no radius, and the same height, which is also the one-handed touch target. */
+  flex: 0 0 auto;
   border: 0;
-  border-radius: 0.4rem;
-  /* Same target as the key row: this is reached one-handed too. */
+  border-left: 1px solid #2a2e35;
   min-height: var(--touch-target);
-  padding: 0.35rem 0.8rem;
-  background: #39405060;
+  padding: 0 0.9rem;
+  background: #1b1e24;
   color: #d7dae0;
   font: inherit;
   font-size: 0.85rem;

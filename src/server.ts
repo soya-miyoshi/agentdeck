@@ -23,7 +23,6 @@ import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
 import { readTailnet, tailnetAdvice } from "./tailnet.ts";
 import { generateToken } from "./token.ts";
-import { TurnLog } from "./turn-log.ts";
 import { UploadStore } from "./uploads.ts";
 import { attachWebSocketServer } from "./ws.ts";
 
@@ -235,13 +234,7 @@ export const main = async (): Promise<void> => {
   // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
   // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of
   // bind mounts; the list outlived the mounts.
-  // What each session was asked and what it finally answered (plan 007). Beside the token and the
-  // agent state rather than in a second state directory, and it outlives the tmux session it
-  // describes - the session id is a pure function of (path, agent), so a session recreated in the
-  // same repository finds its own history.
-  const turns = new TurnLog(env("AGENTDECK_TURNS_DIR", join(homedir(), ".agentdeck", "turns")));
-
-  // Images the phone sends into a session. Beside the token and the turn log rather than inside
+  // Images the phone sends into a session. Beside the token and the agent state rather than inside
   // any repository: a screenshot is not the work, and a session's tree is what a git remote
   // protects.
   const uploads = new UploadStore(
@@ -425,7 +418,6 @@ export const main = async (): Promise<void> => {
         origin: process.env["AGENTDECK_ORIGIN"],
         probe: async () => await probeTmux(socket),
         streamFor: (id) => hub.streamFor(id),
-        turns,
         uploads,
         onStateDeclared: (id, state) => {
           // `POST /api/hooks/:id` is the one route not behind the user's token - it is

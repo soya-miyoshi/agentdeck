@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { AgentProfile } from "./agent-profiles.ts";
 import { summarise } from "./agent-profiles.ts";
-import { HOOK_MAX_BODY_BYTES, mapHookEvent, turnFromHookEvent } from "./claude-hooks.ts";
+import { HOOK_MAX_BODY_BYTES, mapHookEvent } from "./claude-hooks.ts";
 import type { CwdAllowlist } from "./cwds.ts";
 import type { Registry } from "./registry.ts";
 import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
@@ -12,8 +12,6 @@ import type { SessionState } from "./tmux.ts";
 import { bearerFrom, tokenMatches } from "./token.ts";
 import type { UploadStore } from "./uploads.ts";
 import { UnsupportedImageError } from "./uploads.ts";
-import type { TurnLog } from "./turn-log.ts";
-import { MAX_TURNS } from "./turn-log.ts";
 
 // A terminal server is remote code execution by design. MulmoTerminal binds loopback for exactly
 // that reason and has no auth of its own - safe only while nothing remote can connect at all,
@@ -49,12 +47,6 @@ export interface HttpDeps {
    * sync. Plan 002: `state` is pushed, not polled, and a hook exists to arrive AT the transition.
    */
   onStateDeclared?: (sessionId: string, state: SessionState) => void;
-  /**
-   * The turn store (plan 007). Optional: without it the hook route still decides state, and the
-   * turns route answers an empty list rather than an error - a deployment with no history is a
-   * supported one, not a broken one.
-   */
-  turns?: TurnLog;
   /**
    * Where an image from the phone is written. Optional: without it the route answers 501 rather
    * than the deck failing to start, so a deployment that does not want files on disk simply has
@@ -175,15 +167,6 @@ export const createHandler = (deps: HttpDeps) => {
         return { status: 400, body: { error: "hook payload was not JSON" } };
       }
 
-      // The turn log's half, before the state decision, because a payload that changes no state
-      // can still carry text worth keeping - and because losing an answer to an early return is
-      // the failure this feature exists to avoid.
-      const part = turnFromHookEvent(payload);
-      if (part?.kind === "ask") deps.turns?.noteAsk(id, part.promptId, part.prompt, Date.now());
-      if (part?.kind === "answer") {
-        deps.turns?.recordAnswer(id, part.promptId, part.answer, Date.now());
-      }
-
       const { state, reason } = mapHookEvent(payload);
       if (state === undefined) {
         // An event whose meaning has not been established changes nothing and says so. Logging it
@@ -263,20 +246,6 @@ export const createHandler = (deps: HttpDeps) => {
           return { status: 404, body: { error: error.message } };
         throw error;
       }
-    }
-
-    // The turn log (plan 007). An unknown session, an agent with no turn-reporting mechanism and a
-    // session that has not finished a turn all answer the same empty list: the absence of history
-    // is not the absence of a session, and the client decides what to offer from `logsTurns` on
-    // the agent, which it already has.
-    const turns = /^\/api\/sessions\/([^/]+)\/turns$/.exec(path);
-    if (method === "GET" && turns) {
-      const id = decodeURIComponent(turns[1] ?? "");
-      const asked = Number(url.searchParams.get("limit"));
-      const limit =
-        Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), MAX_TURNS) : MAX_TURNS;
-      const found = deps.turns?.read(id, limit) ?? { turns: [], truncated: false };
-      return { status: 200, body: found };
     }
 
     // An image from the phone, written to disk so the agent can be handed a path. The bytes are

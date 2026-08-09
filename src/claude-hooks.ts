@@ -2,17 +2,27 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { SessionState } from "./tmux.ts";
-import { MAX_FIELD_CHARS } from "./turn-log.ts";
 
 /**
  * Body limit for `POST /api/hooks/:id`, larger than every other route's.
  *
- * A hook payload now carries the turn's text (plan 007), and the fields are already cut to
- * `MAX_FIELD_CHARS` code points by the hook command before it sends. Two of those at three bytes
- * per character is the size this has to clear, and it is the reason the number is not the 64KB
- * the rest of the API uses. Bounded above by the route's own rate limit either way.
+ * A hook payload carries the turn's text whether or not anything here reads it, and the fields are
+ * already cut to `MAX_FIELD_CHARS` code points by the hook command before it sends. Two of those
+ * at three bytes per character is the size this has to clear, and it is the reason the number is
+ * not the 64KB the rest of the API uses. Bounded above by the route's own rate limit either way.
  */
 export const HOOK_MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Where the hook command cuts the payload's two long fields, in code points rather than bytes.
+ *
+ * Nothing reads that text since the turn log was removed, but the agent still sends it, so this is
+ * what keeps a long answer from producing a body the route refuses - and a refused body loses the
+ * STATUS frame for that turn, which is the half still wanted. Code points because a byte cut
+ * splits a multi-byte character; the number is chosen so two such fields fit inside the limit
+ * above at three bytes per character.
+ */
+export const MAX_FIELD_CHARS = 16 * 1024;
 
 /** What the hook command buffers before giving up: enough to parse and trim a large payload. */
 const HOOK_READ_LIMIT = 1024 * 1024;
@@ -124,45 +134,6 @@ export const mapHookEvent = (
   }
 
   return { state: undefined, reason: `unrecognised event ${event}: no state changed` };
-};
-
-// ---------------------------------------------------------------------------------------------
-// The turn log's half of the same payloads (plan 007).
-
-/** One half of a turn, as read out of a hook payload. */
-export type TurnPart =
-  | { kind: "ask"; promptId: string; prompt: string }
-  | { kind: "answer"; promptId: string; answer: string };
-
-/**
- * Read the turn text out of a payload, or undefined when there is none in it.
- *
- * `prompt_id` is the same value on both events - verified in `fixtures/claude-turns.jsonl` - so
- * the two halves join on a key the agent supplies rather than on a timestamp guess.
- *
- * `last_assistant_message` is the agent's final text block verbatim: 3776 characters of markdown
- * in the captured long turn, and correct for a Japanese one. What it holds when a turn's last
- * block is a tool call rather than text could not be captured, so a missing, non-string or empty
- * value returns undefined here and logs nothing, rather than writing an entry whose shape was
- * assumed.
- */
-export const turnFromHookEvent = (payload: unknown): TurnPart | undefined => {
-  if (!isRecord(payload)) return undefined;
-  const promptId = payload["prompt_id"];
-  if (typeof promptId !== "string" || promptId === "") return undefined;
-
-  const event = payload["hook_event_name"];
-  if (event === "UserPromptSubmit") {
-    const prompt = payload["prompt"];
-    if (typeof prompt !== "string" || prompt === "") return undefined;
-    return { kind: "ask", promptId, prompt };
-  }
-  if (event === "Stop") {
-    const answer = payload["last_assistant_message"];
-    if (typeof answer !== "string" || answer === "") return undefined;
-    return { kind: "answer", promptId, answer };
-  }
-  return undefined;
 };
 
 // ---------------------------------------------------------------------------------------------

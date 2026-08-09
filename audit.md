@@ -1879,3 +1879,40 @@ the comment so the next person does not put it back.
 
 *Not demonstrated:* the phone. The arithmetic is checked and the suite is green, but whether the
 labels are legible at 0.8rem in a real hand is a device question.
+
+## Answers removed, and Image moved onto the New session bar
+
+Soya's call: the turn history is not wanted for now. Removed to the UI-and-API depth, deliberately
+not further - the hook plumbing that carries it also carries `waiting`, which is what tells the
+phone which session needs a person, and that stays.
+
+Gone: `src/turn-log.ts`, `TurnHistory.vue`, `turn-history.ts`, `fetchTurns`/`TurnPage`,
+`turnFromHookEvent`, `GET /api/sessions/:id/turns`, the `turns` dependency on the HTTP handler and
+its construction in `server.ts`, and `logsTurns` on `AgentSummary`. `turn-log.test.ts`,
+`turn-capture.test.ts` and `turns-route.test.ts` went with them.
+
+Kept, and worth naming because it looks like leftovers:
+
+- `src/ring-buffer.ts` is NOT the turn log. It is the terminal scrollback buffer behind
+  `stream.ts` and `attach.ts`, and only shared a plan number.
+- `MAX_FIELD_CHARS` and the hook command's trimming of `prompt` / `last_assistant_message`. The
+  agent still SENDS that text; nothing reads it now, but an untrimmed payload is a body the route
+  refuses, and a refused body loses the status frame for that turn as well. The constant moved from
+  `turn-log.ts` into `claude-hooks.ts`, where the only remaining reader of it lives.
+- `HOOK_MAX_BODY_BYTES` at 256KB, for the same reason.
+- `fixtures/claude-turns.jsonl`, still the fixture `turn-transport.test.ts` sizes itself against.
+
+The layout: `Image` was a chip in an `.actions` strip of its own between the tab strip and
+`New session`, which read as a floating control belonging to nothing. `NewSession.vue` now has a
+`.bar` holding the toggle and a `beside` slot, and `App.vue` puts `UploadImage` in it. The toggle
+is `flex: 1 1 0` and the upload `flex: 0 0 auto`, so Image keeps its label's width and New session
+takes the rest; the sheet still opens full width below. The bar carries the horizontal safe insets,
+which the toggle did not have when it was edge to edge.
+
+`pnpm build` succeeds and the suite is 892 green in 21s. One run before that failed
+`the server process is restarted under an open client` in `end-to-end.test.ts` on a 49s pass of the
+suite - the same timing flake already recorded above, which passes alone and on a normal-speed run.
+The server was booted by hand afterwards to check it still starts without the turn store: it does.
+
+*Not demonstrated:* the phone. Whether the two buttons share the bar legibly at a real width, and
+whether losing Answers is actually wanted once it is gone, are both device questions.

@@ -28,7 +28,6 @@ const agent = (id: string, detectsWaiting: boolean): AgentSummary => ({
   id,
   name: id,
   available: true,
-  logsTurns: false,
   detectsWaiting,
 });
 

@@ -50,8 +50,6 @@ export interface AgentSummary {
   name: string;
   available: boolean;
   detectsWaiting: boolean;
-  /** This agent reports its turn text, so its sessions have a history to show (plan 007). */
-  logsTurns: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -195,10 +193,6 @@ export const summarise = (
   // working/idle/exited and never claims `waiting`. The client shows its tab without a needs-you
   // indicator rather than inventing one. Fewer states, never a wrong one.
   detectsWaiting: profile.waiting !== undefined,
-  // Derived, never configured: `hook` is the only mechanism that carries the agent's own words
-  // (plan 004). A `log` or `screen` profile knows when the turn ended and not what it said, and
-  // cutting an answer out of a rendered screen is the inference this project refuses.
-  logsTurns: profile.waiting?.via === "hook",
 });
 
 /** The environment a session is spawned with: passthrough by NAME, plus what the server adds. */

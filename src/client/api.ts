@@ -1,13 +1,6 @@
 import type { AgentSummary } from "../agent-profiles.ts";
 import type { Cwd } from "../cwds.ts";
 import type { Session } from "../registry.ts";
-import type { Turn } from "../turn-log.ts";
-
-export interface TurnPage {
-  turns: Turn[];
-  truncated: boolean;
-}
-
 // The REST half. Every request carries the bearer token; a 401 is not a network failure and is
 // raised as its own type so the caller can drop the token and show the paste field rather than
 // retry.
@@ -84,16 +77,6 @@ export const fetchSessions = async (token: string): Promise<Session[]> =>
 
 export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
   (await request<{ agents: AgentSummary[] }>(token, "/api/agents")).agents;
-
-/**
- * What this session was asked and what it answered, newest first (plan 007).
- *
- * Answers an empty list for a session with no history rather than failing, so the caller has one
- * path: an agent that does not report turns and an agent that has not finished one look the same
- * from here, and `logsTurns` is what tells them apart before the call is made.
- */
-export const fetchTurns = async (token: string, sessionId: string): Promise<TurnPage> =>
-  await request<TurnPage>(token, `/api/sessions/${encodeURIComponent(sessionId)}/turns`);
 
 /** The directories a session may be started in. The picker's left half; nothing is typed. */
 export const fetchCwds = async (token: string): Promise<Cwd[]> =>

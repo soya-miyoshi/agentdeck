@@ -4,13 +4,13 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 
-import { hookCommand } from "./claude-hooks.ts";
-import { MAX_FIELD_CHARS } from "./turn-log.ts";
+import { hookCommand, MAX_FIELD_CHARS } from "./claude-hooks.ts";
 
 // The hook COMMAND, run through a real shell against a real socket, because everything
-// interesting about it happens outside this process. Plan 007 put the turn's text into a payload
-// that used to carry an event name and nothing else, and the size of that text is what makes the
-// transport worth testing rather than reading.
+// interesting about it happens outside this process. The agent sends a payload carrying the turn's
+// text whether or not anything reads it, and the size of that text is what makes the transport
+// worth testing rather than reading: an untrimmed payload is refused by the route, and the STATUS
+// frame for that turn is lost with it.
 
 let server: Server;
 let port = 0;
