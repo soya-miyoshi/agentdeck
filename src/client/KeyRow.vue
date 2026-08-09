@@ -18,17 +18,18 @@ defineEmits<{ key: [key: KeyName] }>();
 </script>
 
 <template>
-  <!-- `mousedown.prevent` / `touchstart.prevent`: the terminal must keep focus, or the soft
-       keyboard closes under the user every time they reach for Esc. -->
+  <!-- Emitted on `pointerdown`, not `click`. `preventDefault` on a touch event suppresses the
+       synthetic click iOS would have sent, so a `@click` handler behind `@touchstart.prevent`
+       never fires on a phone - which is where this row is the whole point. Reported from a real
+       device: every cap dead. `.prevent` still has to be here or the terminal loses focus and the
+       soft keyboard closes under the thumb reaching for Esc. -->
   <div class="row">
     <button
       v-for="cap in caps"
       :key="cap.key"
       class="cap"
       type="button"
-      @mousedown.prevent
-      @touchstart.prevent
-      @click="$emit('key', cap.key)"
+      @pointerdown.prevent="$emit('key', cap.key)"
     >
       {{ cap.label }}
     </button>
@@ -37,9 +38,7 @@ defineEmits<{ key: [key: KeyName] }>();
       :class="{ latched: ctrlLatched }"
       type="button"
       :aria-pressed="ctrlLatched"
-      @mousedown.prevent
-      @touchstart.prevent
-      @click="$emit('key', 'ctrl')"
+      @pointerdown.prevent="$emit('key', 'ctrl')"
     >
       Ctrl
     </button>
