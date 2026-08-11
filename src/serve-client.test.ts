@@ -199,6 +199,13 @@ after(() => {
     }
   }
   if (child !== undefined) child.kill("SIGKILL");
+  // The tmux server the spawned server started outlives it: `exit-empty off` keeps a tmux holding
+  // no sessions alive until something signals it. Killing the node process alone leaked one a run.
+  try {
+    execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+  } catch {
+    // No server on that socket is the desired end state.
+  }
   for (const dir of [home, work]) rmSync(dir, { recursive: true, force: true });
 });
 

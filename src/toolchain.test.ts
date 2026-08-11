@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +164,30 @@ void describe("the dependency budget", () => {
     for (const name of ["vitest", "jest", "mocha", "tap", "ava", "tsx", "ts-node"]) {
       assert.ok(!(name in declared), `${name} is declared; the runner is meant to be node:test`);
     }
+  });
+});
+
+void describe("the suite does not leak tmux servers", () => {
+  // A server booted with TMUX_SOCKET set turns `exit-empty off` on the tmux it starts, so that tmux
+  // survives every process the test kills and lives until something signals it. Two files got this
+  // wrong and 236 abandoned tmux servers, 325MB and 3233 sockets had accumulated before anyone
+  // looked. Source-level because the runner's workers each own their sockets: nothing inside one
+  // worker can count what another leaked.
+  void test("every test file that names a TMUX_SOCKET also kills that server", async () => {
+    const testDir = join(repoRoot, "src");
+    const names = await readdir(testDir, { recursive: true });
+    const offenders: string[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".test.ts")) continue;
+      const source = await readFile(join(testDir, name), "utf8");
+      if (!source.includes("TMUX_SOCKET")) continue;
+      if (!source.includes("kill-server")) offenders.push(name);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      `these files boot a server with its own tmux socket and never kill it: ${offenders.join(", ")}`,
+    );
   });
 });
 

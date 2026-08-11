@@ -28,6 +28,11 @@ import { decodeLines, qrBlockLines } from "./fixtures/qr-decoder.ts";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const serverPath = join(repoRoot, "src", "server.ts");
 
+// Named once because teardown has to kill the tmux server this socket names, not just the node
+// process that started it: the server sets `exit-empty off`, so a tmux holding no sessions lives
+// until something signals it.
+const socket = `agentdeck-qr-${String(process.pid)}`;
+
 const temps: string[] = [];
 const children: ChildProcess[] = [];
 const ptys: IPty[] = [];
@@ -75,7 +80,7 @@ const boot = async (
     HOME: home,
     TERM: "xterm-256color",
     LC_ALL: "en_US.UTF-8",
-    TMUX_SOCKET: `agentdeck-qr-${String(process.pid)}`,
+    TMUX_SOCKET: socket,
     AGENTDECK_PORT: String(port),
     AGENTDECK_MOUNTS: temp("agentdeck-qr-work-"),
     ...(origin === undefined ? {} : { AGENTDECK_ORIGIN: origin }),
@@ -166,6 +171,13 @@ after(() => {
     } catch {
       // Already gone.
     }
+  }
+  // The tmux server outlives every process above. Without this each run left one behind for good,
+  // and 118 runs had accumulated 118 of them.
+  try {
+    execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+  } catch {
+    // No server on that socket is the desired end state.
   }
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
 });
