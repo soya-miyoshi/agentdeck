@@ -2479,3 +2479,28 @@ what saves MCP cleanup on close; it is not, and both are true independently.
 
 *Verified:* 13/13 in `reap.test.ts`, with the new case checked by disabling the KEEP filter and
 watching it go red before restoring it.
+
+## Processes moved into the New session bar
+
+*The panel was in the wrong place, and the reason is not taste.* Its toggle sat at the bottom edge
+between the panes and the key row - as far from the session-level actions as this layout allows -
+while what it answers ("what is this machine still running") is the same level as starting a
+session. The toggle is now the third control in the New session bar and the list hangs below that
+bar as a sheet, the same shape the picker already uses.
+
+*Open state moved from `ProcessList` to `App`*, because the button and the panel are no longer one
+element. The collapsed default existed to keep `GET /api/processes` - a `ps` of the whole machine -
+off the hot path; that property is preserved differently, by `v-if` on the component, so it reads
+once on mount and is not mounted at all while closed.
+
+*Not demonstrated on a phone, and this is a layout change.* `961/961` green, `pnpm build` clean, the
+server serves the new bundle hash and `/api/processes` answers - but no client component in this
+repo is ever mounted in a test, so nothing here has rendered the bar. Two things a device decides
+and this machine does not: whether three controls plus `New session` still fit at 40 columns without
+the toggle's `flex: 1 1 0` collapsing its label, and whether the sheet clears the notch (it carries
+`--safe-right`/`--safe-left`, not `--safe-bottom`, because the key row is still below it).
+
+*A restart was spent to serve the new build*, and the deck was already running when it happened.
+Every session that was live lost its hook secret, so `waiting` detection is dead for those agents
+until each is restarted - the known cost of `make restart`, recorded here because it was paid
+without being asked for.
