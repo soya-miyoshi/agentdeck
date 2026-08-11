@@ -2210,3 +2210,97 @@ protection - it and the mise node are both writable by this uid - and the watchd
 either way. Installing it also means every later edit to `scripts/watchdog.mjs` must be copied
 across by hand or the timer keeps running the old one; that re-copy IS the gate, and it is a
 standing way for the two to drift apart silently.
+
+## The suite was leaking tmux servers, and a reaper for what outlives a session
+
+Started from an operator report that `python` and `esbuild` keep running after a task ends and hold
+CPU and memory. Those processes had already been killed by hand before anything could look at them,
+so that specific case is undiagnosed and stays undiagnosed. Looking for them turned up a different
+leak that was measurable on the spot.
+
+*What was actually there.* 236 abandoned tmux servers, all `ppid 1`, the oldest over two days old,
+every one of them holding **zero** sessions, 325MB of RSS between them, beside 3233 socket files in
+`/private/tmp/tmux-501`. They are agentdeck's own test suite. `first-run-qr.test.ts` and
+`serve-client.test.ts` boot a real server with `TMUX_SOCKET` set; the server sets `exit-empty off`,
+which is what keeps a tmux holding no sessions alive; and both `after()` hooks killed the node
+process and never the tmux server. Every other tmux-using test file in the repository
+(`snapshot`, `host-boundary`, `sync-crash`, `supervisor-crash`, `tailnet`, `de-containerise`) calls
+`kill-server`. Two files did not, at two per run, for 118 runs.
+
+Honest about the symptom it does not explain: those 236 processes sit at 0.0% CPU. They are a memory
+and file-descriptor leak, not the CPU burn that prompted the report.
+
+*Fixed*, with the `after()` hooks each killing their socket's server, and a guard in
+`toolchain.test.ts` asserting that every test file naming a `TMUX_SOCKET` also kills one. The guard
+was checked by reintroducing the bug and watching it go red, and the fix by counting tmux servers
+before and after a run of both files: 27 pass, delta 0, where the old code gave delta 2. The guard is
+source-level because each test worker owns its own sockets, so nothing inside one worker can count
+what another leaked.
+
+*The reaper*, `scripts/reap.mjs`, collects three classes: orphaned processes that were working under
+a root, tmux servers in the `agentdeck-*` namespace holding no sessions, and socket files with
+nothing behind them. It reports by default; `--kill` is a separate word, and `make reap-kill` a
+separate target, so acting is always typed on purpose.
+
+*The predicate came from a reproduction, not from reasoning.* A pane was started, three pythons
+launched inside it, and the pane killed. The plain `&` ones died with the pane; only the `nohup` one
+survived, as `ppid 1` with no controlling terminal. That is the shape - but `ppid 1` and no terminal
+on their own describe every launchd daemon on this machine, `endpointsecurityd` and `automountd`
+among them, so **the root test is the whole safety argument** and the tool exits 2 rather than run
+without one.
+
+*The dry run earned its keep on the first pass.* Among the candidates was `pnpm dev`, 17 hours old,
+`ppid 1` because the terminal that started it had closed, cwd under a root - with `turbo`, `vite`,
+`wrangler` and an `esbuild` service alive underneath it. Every condition called it garbage. A tool
+that killed by default would have killed a working dev server on its first run. The exemption added
+for it is that a process whose SUBTREE holds a listening socket is serving something, judged over
+the tree because the listener is two levels below the process being judged.
+
+*Two defects were found in the tool by running it rather than reading it.* A pass took 14.6 seconds,
+because the cwd of every candidate was one `lsof` each; batched into a single `-Fpn` call over all
+pids it is 0.84 seconds, with an identical verdict. And `lsof` failing was indistinguishable from
+"nothing is listening", which silently switched OFF the dev-server exemption - on a loaded machine,
+which is exactly when `lsof` is slow and when there is most to lose. It now returns `null` for "could
+not ask" and abandons the whole class rather than guess, saying so in the output and in `--json`.
+
+*What this does not do, and will not.*
+
+- **The reported symptom is not covered.** A `python` still running as a descendant of a LIVE claude
+  session has a living parent, so no condition here matches it, and none can: agentdeck cannot tell a
+  long-running process an agent started on purpose from one it forgot about. Only the orphaned shape
+  - the session or pane is gone, the process is not - is collectable. Whether the operator's case was
+  that shape is unknown, because it was killed before it could be looked at.
+- **An orphan that changed directory out of the roots is missed.** Measured on the reproduction's own
+  fixture, whose cwd was a scratch directory: the reaper would not have touched it. This is the
+  deliberate direction of the trade - the alternative to the root test is signalling system daemons.
+- **The tmux half only sees the `agentdeck-*` namespace**, so a leaked server on any other socket
+  name is invisible to it. It is also never the live `TMUX_SOCKET`, whatever that socket holds.
+- **Nothing is installed on a timer.** It is a command. Wiring it into the watchdog would make an
+  unattended job kill processes as the operator, which is the opposite of the decision recorded for
+  the port squatter ("Not restarting and not killing it - that is your call"), and reversing that is
+  a person's call and a plan, not a side effect of this work.
+*The new suite had to be paid for, and the first version was too expensive.* `ps` reports elapsed
+time in whole seconds, so a fixture is zero seconds old for its first second and no age bound above
+zero can match it - without a wait the cases pass by finding nothing. One wait per case made the file
+14 seconds long, and the full run went from one failure to six, all of them in the wall-clock-bound
+`watchdog` and `supervisor-crash` suites. That is precisely the starvation this repository already
+capped `--test-concurrency` for. Rebuilt with one root and one socket namespace PER CASE - so cases
+cannot destroy each other's fixtures and their order is free - the fixtures are built once and
+waited for once, and the file is 6 seconds.
+
+*Verified:* the reproduction above, the before/after tmux counts, the guard red then green, 10/10 in
+`reap.test.ts`, the dry run against the live machine, and three full runs measured against a
+pre-change baseline:
+
+| | tests | pass | fail | failing case | duration |
+| --- | --- | --- | --- | --- | --- |
+| before these changes | 928 | 927 | 1 | `the reconnection ladder, against the real transport` | 49.3s |
+| after, run 1 | 939 | 938 | 1 | the same one | 49.2s |
+| after, run 2 | 939 | 938 | 1 | the same one | 49.3s |
+
+The one failure is the load flake the `test-concurrency` entry above already records as neither
+caused nor fixed there; it fails identically without any of this work in the tree, so this is eleven
+tests added at no measurable cost. It is still a failing suite, and it is still not green.
+
+*Nothing was reaped on this machine.* The 236 servers, the 2979 dead socket files and the four
+orphans are all still running, for the operator to point `make reap-kill` at.

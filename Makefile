@@ -11,7 +11,7 @@ PORT := $(or $(AGENTDECK_PORT),$(shell sed -n 's/^AGENTDECK_PORT=//p' .env 2>/de
 # truncated: the boot warnings about the allowlist and the tailnet are the reason to look at it.
 LOG := $(or $(AGENTDECK_LOG),$(HOME)/.agentdeck/server.log)
 
-.PHONY: start stop restart mounts check
+.PHONY: start stop restart mounts check reap reap-kill
 
 # Refuses rather than starting with an empty allowlist, which boots fine and then has no directory
 # to start a session in - a failure the phone reports as "no directories are allowlisted".
@@ -66,3 +66,17 @@ mounts:
 
 check:
 	pnpm typecheck && pnpm lint && pnpm test
+
+# What has been abandoned under the roots: orphaned processes, tmux servers holding no sessions, and
+# socket files with nothing behind them. Reports and kills nothing, which is the point - read it
+# before running `reap-kill`, because a dev server whose terminal has closed looks like a leftover
+# from every angle but one.
+reap:
+	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the reaper would have no boundary and refuses to run. Is ghq installed?"; exit 1; }
+	@AGENTDECK_ROOTS="$(ROOTS)" node scripts/reap.mjs
+
+# The same pass, acting. Kept as a separate target rather than a flag on `reap` so that killing is
+# always something typed on purpose.
+reap-kill:
+	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the reaper would have no boundary and refuses to run. Is ghq installed?"; exit 1; }
+	@AGENTDECK_ROOTS="$(ROOTS)" node scripts/reap.mjs --kill

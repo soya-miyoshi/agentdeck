@@ -29,6 +29,36 @@ If something genuinely warrants adversarial review, say so and let Soya decide. 
 - **A test may not depend on the machine it runs on.** One probed the operator's real `ts.net` name
   and broke the moment the deck was actually deployed.
 
+## Clearing up what sessions leave behind
+
+Agents leave processes running. A `nohup`ed build, a polling loop, a tmux server a killed test never
+reaped - they lose their parent, keep their memory, and nothing collects them. 236 abandoned tmux
+servers and 525MB had accumulated before anyone looked.
+
+```
+make reap        # what is collectable, and nothing else happens
+make reap-kill   # the same pass, acting
+```
+
+**Run `make reap` when the Mac feels slow, or every so often between pieces of work.** It is a
+report: read it, then decide. It is safe to run at any time and it is safe to suggest.
+
+**Never run `make reap-kill` without showing the operator the `make reap` output first and being
+told to go ahead.** It signals processes as the operator. The predicate is careful - four conditions
+must all hold, and a tree with a listening socket in it is spared - but the first dry run on this
+machine still turned up a working `pnpm dev` that three of the four conditions called garbage.
+
+What it will not collect, so do not promise it will:
+
+- **A leftover whose claude session is still alive.** Its parent is alive, so no condition matches,
+  and none can: nothing here can tell a long-running process an agent started on purpose from one it
+  forgot about. Only the orphaned shape is collectable.
+- **Anything outside the roots.** A process that changed directory out of `AGENTDECK_ROOTS` is
+  missed. That is the deliberate direction of the trade: `ppid 1` with no terminal describes every
+  launchd daemon on the machine, and the roots are the only thing separating them.
+
+It is a command, not a timer, and that is a decision rather than an omission - see `audit.md`.
+
 ## Guardrails that are not negotiable
 
 - **Six runtime dependencies, and the budget is SPENT** (`node-pty`, `ws`, `vue`, `@xterm/xterm`,
