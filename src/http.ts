@@ -5,6 +5,7 @@ import type { AgentProfile } from "./agent-profiles.ts";
 import { summarise } from "./agent-profiles.ts";
 import { HOOK_MAX_BODY_BYTES, mapHookEvent } from "./claude-hooks.ts";
 import type { CwdAllowlist } from "./cwds.ts";
+import { sessionProcesses } from "./processes.ts";
 import type { Registry } from "./registry.ts";
 import { CwdNotAllowedError, UnknownAgentError } from "./registry.ts";
 import type { SessionStream } from "./stream.ts";
@@ -53,6 +54,12 @@ export interface HttpDeps {
    * no upload button that works.
    */
   uploads?: UploadStore;
+  /**
+   * Each live session's pane process, for GET /api/processes. Optional: without it the route
+   * answers an empty list rather than the deck failing to start, because a view of what a session
+   * is running is worth nothing if its absence takes the terminal with it.
+   */
+  panePids?: () => Promise<{ sessionId: string; panePid: number }[]>;
 }
 
 interface Handled {
@@ -290,6 +297,15 @@ export const createHandler = (deps: HttpDeps) => {
     if (method === "GET" && path === "/api/agents") {
       const agents = [...deps.profiles.values()].map((profile) => summarise(profile));
       return { status: 200, body: { agents } };
+    }
+
+    // What each session is actually running. The deck is the only thing on this Mac that knows
+    // which pane belongs to which session, which is the whole reason this is a route rather than a
+    // `ps` someone runs.
+    if (method === "GET" && path === "/api/processes") {
+      if (deps.panePids === undefined) return { status: 200, body: { sessions: [] } };
+      const sessions = await sessionProcesses(await deps.panePids());
+      return { status: 200, body: { sessions } };
     }
 
     if (method === "GET" && path === "/api/cwds") {

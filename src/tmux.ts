@@ -484,6 +484,39 @@ export class Tmux {
   }
 
   /**
+   * Each session's pane process id, which is the root of everything that session is running.
+   *
+   * Only this socket's panes, which is what makes the answer agentdeck's business: the operator's
+   * own tmux runs on the default socket and its sessions are none of this server's concern. An
+   * empty list for "no server" or "no sessions", the same as `list()`.
+   */
+  async panePids(): Promise<{ sessionId: string; panePid: number }[]> {
+    let stdout: string;
+    try {
+      stdout = await this.#tmux([
+        "list-panes",
+        "-a",
+        "-F",
+        ["#{session_name}", "#{pane_pid}"].join(SEP),
+      ]);
+    } catch (error) {
+      if (isEmptyTmux(error)) return [];
+      throw error;
+    }
+    const found: { sessionId: string; panePid: number }[] = [];
+    for (const line of stdout.split("\n")) {
+      if (!line.includes(SEP)) continue;
+      const at = line.lastIndexOf(SEP);
+      const panePid = Number(line.slice(at + SEP.length).trim());
+      const sessionId = line.slice(0, at);
+      if (sessionId !== "" && Number.isInteger(panePid) && panePid > 1) {
+        found.push({ sessionId, panePid });
+      }
+    }
+    return found;
+  }
+
+  /**
    * Every session tmux holds, with the fields the state machine needs.
    *
    * `#{pane_dead}` and `#{pane_dead_status}` are the definitive signal - a process that exited

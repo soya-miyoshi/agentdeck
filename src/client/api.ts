@@ -78,6 +78,28 @@ export const fetchSessions = async (token: string): Promise<Session[]> =>
 export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
   (await request<{ agents: AgentSummary[] }>(token, "/api/agents")).agents;
 
+export interface ProcessRow {
+  pid: number;
+  ppid: number;
+  ageSeconds: number;
+  rssKb: number;
+  cpuPercent: number;
+  command: string;
+  depth: number;
+}
+
+export interface SessionProcesses {
+  sessionId: string;
+  panePid: number;
+  processes: ProcessRow[];
+  childCount: number;
+  childRssKb: number;
+}
+
+/** What each live session is running. Read on demand, never polled: it is a `ps` per call. */
+export const fetchProcesses = async (token: string): Promise<SessionProcesses[]> =>
+  (await request<{ sessions: SessionProcesses[] }>(token, "/api/processes")).sessions;
+
 /** The directories a session may be started in. The picker's left half; nothing is typed. */
 export const fetchCwds = async (token: string): Promise<Cwd[]> =>
   (await request<{ cwds: Cwd[] }>(token, "/api/cwds")).cwds;

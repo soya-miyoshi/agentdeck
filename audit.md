@@ -2304,3 +2304,73 @@ tests added at no measurable cost. It is still a failing suite, and it is still 
 
 *Nothing was reaped on this machine.* The 236 servers, the 2979 dead socket files and the four
 orphans are all still running, for the operator to point `make reap-kill` at.
+
+## The reaper on a timer, and the classes the operator widened it to
+
+Follow-up to the entry above, all of it the operator's decision after seeing what the first version
+refused to touch. Three widenings and one new view, in one pass of work.
+
+*A dev server is garbage now.* The exemption that spared a tree holding a listening socket was the
+thing the first dry run was built around - it is what stopped a working `pnpm dev` being killed. The
+operator's answer was that a dev server does not need to be running, so it is off by default and
+`AGENTDECK_REAP_SPARE_LISTENERS=1` puts it back. The measured consequence on this machine: that
+`pnpm dev` moved from spared to a 16-process, 1.5GB tree on the list.
+
+*Trees, not roots.* Signalling only the top of an orphan reparents its children to launchd, where
+they look like fresh orphans and survive until some later pass catches them. `pnpm dev` is four
+levels deep - turbo, then vite and wrangler, then an esbuild service - so "kill the orphan" was
+collecting one process out of sixteen. It now signals the whole subtree, deepest first.
+
+*What a LIVE agent started.* The class the first version called impossible, and it is still
+impossible to do *correctly* - nothing can tell a process an agent started on purpose from one it
+forgot about. The operator chose to over-collect. The pane process is never signalled, because on
+this deck that IS the agent and killing it ends the session; everything below it is, which on this
+machine means an agent's `@playwright/mcp` servers die once an hour and the session loses them until
+it starts them again. That is accepted, not overlooked. `AGENTDECK_REAP_PANE_CHILDREN=0` turns it
+off.
+
+*The premise for that class was half wrong, and checking it changed the design.* The operator's
+words were that everything attached to tmux is effectively something claude started through
+agentdeck. True of agentdeck's own socket: its one pane's process IS `claude`, forked by the deck's
+tmux server. Not true of tmux: the operator's personal tmux on the DEFAULT socket had five sessions
+- `agentdeck`, `arukutomaru-store`, `blogs`, `cloudflare-os`, `zenn` - of their own shells. A
+literal reading would have killed all of them. The class is bounded to `-L ${TMUX_SOCKET}` and
+nothing else.
+
+*On a timer, gated by the server rather than by launchd.* `AGENTDECK_REAP_INTERVAL_MS`, default one
+hour, announced on boot because it kills processes and a silent one would be indefensible; `0` turns
+it off. The deck is the gate the operator asked for - "while the node server is running" - and it
+needs no install step, which matters because the watchdog's LaunchDaemon is still not installed.
+Passes never overlap: a pass that outlives its interval would have a second one signalling the same
+pids, and the second's "SURVIVED" would be the first's grace period.
+
+*`GET /api/processes` and a `Processes` panel*, so what a session is running can be seen before it
+is collected. The deck is the only thing on this Mac that knows which pane belongs to which session,
+which is why it is a route and not a `ps` someone runs. Closed by default and read on demand - it
+costs a whole-machine `ps` per call. The count and size shown are of what is BELOW the pane, not the
+tree: an idle agent holding 800MB is what the session IS, and including it would make every session
+look like the worst offender.
+
+*Three defects, each found by running the thing rather than reading it.*
+
+- **A killed pane child became a zombie and was reported as SURVIVED.** Its parent is deliberately
+  left alive and a `/bin/sleep` parent never calls `wait`, so `kill(pid, 0)` kept succeeding. A
+  zombie holds no memory and runs nothing; reporting it as a survivor is a false alarm about the one
+  thing this output exists to tell an operator. Both the tool and its tests now read `ps -o state=`.
+- **The test fixture for that class was killing itself.** `sh -c 'sleep & wait'` returns as soon as
+  its child dies, so the case failed claiming the pane had been reaped while the report directly
+  above the assertion showed it had not. `exec` after backgrounding models the real thing: an agent
+  outlives its MCP server.
+- **A `tsc`-only failure that `node --test` cannot see.** `assert.deepEqual(said, [])` narrows the
+  array to `never[]` for the rest of the function, so the next `push` stops compiling while the test
+  still runs green. Worth naming because the suite passing is not the same as the tree compiling.
+
+*Verified:* 12/12 in `reap.test.ts`, 6/6 in `reap-schedule.test.ts` including a real server booting,
+reaping a real orphan and saying so, 11/11 in `processes.test.ts` including the route and one pass
+against the real `ps`, plus the dry run on the live machine that produced the numbers above.
+
+*Not demonstrated.* The panel has been type-checked and built but **not seen on the phone**, and
+this repository's own history says that is where the defects are - the dead key row, the missing
+session picker. The hourly pass has not been observed on the live deck either: the running server is
+still the old build, deliberately not restarted, so nothing here has yet killed an MCP server in
+anger. Both need a person.

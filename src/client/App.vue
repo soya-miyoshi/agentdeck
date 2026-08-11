@@ -21,6 +21,7 @@ import { downscale } from "./image.ts";
 import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 import KeyRow from "./KeyRow.vue";
 import NewSession from "./NewSession.vue";
+import ProcessList from "./ProcessList.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -371,6 +372,9 @@ if (token.value !== undefined) start(token.value);
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
       />
     </main>
+    <!-- What each session has left running. Below the panes and closed by default: it answers a
+         question about the machine, not about the terminal being watched. -->
+    <ProcessList :token="token" />
     <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
          needs. Without it the deck is a window onto a process waiting for an answer. -->
     <KeyRow :ctrl-latched="ctrlLatched" @key="pressKey" />

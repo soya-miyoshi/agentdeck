@@ -35,29 +35,40 @@ Agents leave processes running. A `nohup`ed build, a polling loop, a tmux server
 reaped - they lose their parent, keep their memory, and nothing collects them. 236 abandoned tmux
 servers and 525MB had accumulated before anyone looked.
 
+**The running server already does this every hour**, and says so on boot. `make reap` is the same
+pass without acting, and is what to look at first.
+
 ```
 make reap        # what is collectable, and nothing else happens
 make reap-kill   # the same pass, acting
 ```
 
-**Run `make reap` when the Mac feels slow, or every so often between pieces of work.** It is a
-report: read it, then decide. It is safe to run at any time and it is safe to suggest.
+It collects four things: orphaned process TREES that were working under a root, **everything an
+agent started inside a live pane**, tmux servers in the `agentdeck-*` namespace holding no sessions,
+and socket files with nothing behind them. `GET /api/processes` and the phone's `Processes` panel
+show the third of those before it is collected.
+
+**Run `make reap` when the Mac feels slow.** It is a report: safe to run, safe to suggest.
 
 **Never run `make reap-kill` without showing the operator the `make reap` output first and being
-told to go ahead.** It signals processes as the operator. The predicate is careful - four conditions
-must all hold, and a tree with a listening socket in it is spared - but the first dry run on this
-machine still turned up a working `pnpm dev` that three of the four conditions called garbage.
+told to go ahead.**
 
-What it will not collect, so do not promise it will:
+Three things about the defaults, all of them the operator's decision and all of them surprising:
 
-- **A leftover whose claude session is still alive.** Its parent is alive, so no condition matches,
-  and none can: nothing here can tell a long-running process an agent started on purpose from one it
-  forgot about. Only the orphaned shape is collectable.
-- **Anything outside the roots.** A process that changed directory out of `AGENTDECK_ROOTS` is
-  missed. That is the deliberate direction of the trade: `ppid 1` with no terminal describes every
-  launchd daemon on the machine, and the roots are the only thing separating them.
+- **A running dev server is collected.** The exemption that spared a tree holding a listening socket
+  is off (`AGENTDECK_REAP_SPARE_LISTENERS=1` restores it). A `pnpm dev` whose terminal has closed is
+  garbage here, and it goes with its whole tree - turbo, vite, wrangler, esbuild.
+- **What a LIVE agent started is collected**, which includes its MCP servers. The pane process
+  itself - the agent - is never touched, but a session loses whatever those servers provided until
+  it restarts them. `AGENTDECK_REAP_PANE_CHILDREN=0` limits collection to what has actually lost
+  its parent.
+- **Only agentdeck's own tmux socket is in scope.** The operator's personal tmux runs on the default
+  socket and had five sessions of their own shells on it when this was written. Nothing here may
+  reach that, and "everything attached to tmux" would have swept all of it.
 
-It is a command, not a timer, and that is a decision rather than an omission - see `audit.md`.
+What it still will not collect: anything whose working directory is outside the roots. `ppid 1` with
+no controlling terminal describes every launchd daemon on this Mac, and the roots are the only thing
+separating them - so an orphan that changed directory elsewhere is missed on purpose.
 
 ## Guardrails that are not negotiable
 
