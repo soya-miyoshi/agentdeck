@@ -237,6 +237,19 @@ to `~/.agentdeck/server.log` (`AGENTDECK_LOG`). The agents are untouched either 
 restart costs is each running session's hook secret, so `waiting` detection stays dead for those
 sessions until their agents are restarted.
 
+`make up` starts the deck **with the watchdog supervising it**, which `start` and `restart` do not.
+`scripts/watchdog.mjs` is one pass and launchd is what repeats it, so this is a loop that runs a
+pass every 60 seconds (`AGENTDECK_WATCHDOG_EVERY`) for as long as it lives — it does **not** survive
+a reboot or a logout, which is exactly what the LaunchDaemon in `scripts/` is for. There is no
+separate server start: a pass against a port with nothing on it starts one, so bringing up the
+supervisor brings up the deck through the same code path that will recover it later. `.env` is
+sourced into the loop rather than only into a server, because the watchdog spawns `src/server.ts`
+itself with no `--env-file` and a server it recovers inherits the loop's environment.
+
+`make down` stops the loop and then the server, in that order — the other way round is the watchdog
+dutifully restarting what was just stopped. `make stop` says so loudly if the loop is running, since
+otherwise it reads as `stop` being broken when the server reappears a minute later.
+
 Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
 your session appears.
 
