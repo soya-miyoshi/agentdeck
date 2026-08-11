@@ -1,15 +1,14 @@
 <script setup lang="ts">
-// What each session is running, on a phone. Closed by default and read only when opened: the route
-// costs a `ps` of the whole machine, so polling it would be a background cost for a view nobody is
-// looking at most of the time.
+// What each session is running, on a phone. The caller mounts this only while the panel is open,
+// and it reads once on mount: the route costs a `ps` of the whole machine, so polling it would be a
+// background cost for a view nobody is looking at most of the time.
 
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 
 import { fetchProcesses, type SessionProcesses } from "./api.ts";
 
 const props = defineProps<{ token: string }>();
 
-const open = ref(false);
 const loading = ref(false);
 const error = ref("");
 const sessions = ref<SessionProcesses[]>([]);
@@ -38,66 +37,58 @@ const load = async (): Promise<void> => {
   }
 };
 
-const toggle = (): void => {
-  open.value = !open.value;
-  if (open.value) void load();
-};
+onMounted(() => {
+  void load();
+});
 </script>
 
 <template>
   <div class="processes">
-    <button type="button" class="head" :aria-expanded="open" @click="toggle">
-      {{ open ? "▾" : "▸" }} Processes
+    <button type="button" class="refresh" :disabled="loading" @click="void load()">
+      {{ loading ? "Reading…" : "Refresh" }}
     </button>
-    <div v-if="open" class="body">
-      <button type="button" class="refresh" :disabled="loading" @click="void load()">
-        {{ loading ? "Reading…" : "Refresh" }}
-      </button>
-      <p v-if="error" class="error">{{ error }}</p>
-      <p v-else-if="!loading && sessions.length === 0" class="empty">No live sessions.</p>
-      <section v-for="session in sessions" :key="session.sessionId" class="session">
-        <h3>
-          {{ session.sessionId }}
-          <!-- The count and size are of what is BELOW the pane, which is what the session has
-               accumulated rather than what it is. -->
-          <span class="tally">
-            {{ session.childCount }} child(ren), {{ mb(session.childRssKb) }}
-          </span>
-        </h3>
-        <ul>
-          <li
-            v-for="row in session.processes"
-            :key="row.pid"
-            :style="{ paddingLeft: `${String(row.depth * 12)}px` }"
-            :class="{ pane: row.depth === 0 }"
-          >
-            <span class="meta">{{ age(row.ageSeconds) }} · {{ mb(row.rssKb) }}</span>
-            <span class="command">{{ row.command }}</span>
-          </li>
-        </ul>
-      </section>
-    </div>
+    <p v-if="error" class="error">{{ error }}</p>
+    <p v-else-if="!loading && sessions.length === 0" class="empty">No live sessions.</p>
+    <section v-for="session in sessions" :key="session.sessionId" class="session">
+      <h3>
+        {{ session.sessionId }}
+        <!-- The count and size are of what is BELOW the pane, which is what the session has
+             accumulated rather than what it is. -->
+        <span class="tally"> {{ session.childCount }} child(ren), {{ mb(session.childRssKb) }} </span>
+      </h3>
+      <ul>
+        <li
+          v-for="row in session.processes"
+          :key="row.pid"
+          :style="{ paddingLeft: `${String(row.depth * 12)}px` }"
+          :class="{ pane: row.depth === 0 }"
+        >
+          <span class="meta">{{ age(row.ageSeconds) }} · {{ mb(row.rssKb) }}</span>
+          <span class="command">{{ row.command }}</span>
+        </li>
+      </ul>
+    </section>
   </div>
 </template>
 
 <style scoped>
+/* Hangs below the New session bar, whose toggle opens it, so it is a sheet like the picker's
+   rather than a strip at the far end of the app from its own control. */
 .processes {
-  border-top: 1px solid #333;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0 calc(0.6rem + var(--safe-right)) 0.6rem calc(0.6rem + var(--safe-left));
+  background: #14161a;
+  border-bottom: 1px solid #2a2e35;
   font-size: 0.8rem;
 }
-.head,
 .refresh {
+  min-height: var(--touch-target);
   background: none;
   border: none;
   color: inherit;
   font: inherit;
   padding: 0.4rem 0.6rem;
-  cursor: pointer;
-}
-.body {
-  max-height: 40vh;
-  overflow-y: auto;
-  padding: 0 0.6rem 0.6rem;
 }
 .session h3 {
   font-size: 0.8rem;

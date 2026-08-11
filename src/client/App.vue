@@ -271,6 +271,11 @@ const typed = (sessionId: string, data: string): void => {
   send(data);
 };
 
+// Open state lives here rather than in ProcessList, because the control that opens it sits in the
+// New session bar and the list it opens hangs below that bar. Unmounted while closed, which is what
+// keeps the `ps` of the whole machine to the moments someone is asking for it.
+const processesOpen = ref(false);
+
 const uploading = ref(false);
 
 /**
@@ -347,8 +352,18 @@ if (token.value !== undefined) start(token.value);
       @open="loadCwds"
       @start="(cwd, agent) => void startSession(cwd, agent)"
     >
-      <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
       <template #beside>
+        <!-- What each session has left running. In the bar because it is a question about the
+             machine the sessions run on, at the same level as starting one. -->
+        <button
+          class="beside"
+          type="button"
+          :aria-expanded="processesOpen"
+          @click="processesOpen = !processesOpen"
+        >
+          Processes
+        </button>
+        <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
         <UploadImage
           v-if="active !== undefined"
           :busy="uploading"
@@ -356,6 +371,7 @@ if (token.value !== undefined) start(token.value);
         />
       </template>
     </NewSession>
+    <ProcessList v-if="processesOpen" :token="token" />
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
     <p v-for="message in errors" :key="message" class="banner error">{{ message }}</p>
@@ -372,9 +388,6 @@ if (token.value !== undefined) start(token.value);
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
       />
     </main>
-    <!-- What each session has left running. Below the panes and closed by default: it answers a
-         question about the machine, not about the terminal being watched. -->
-    <ProcessList :token="token" />
     <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
          needs. Without it the deck is a window onto a process waiting for an answer. -->
     <KeyRow :ctrl-latched="ctrlLatched" @key="pressKey" />
@@ -405,6 +418,18 @@ if (token.value !== undefined) start(token.value);
      background between the two. */
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
+}
+/* Flush with the New session bar rather than a chip floating on it, same as UploadImage's button. */
+.beside {
+  flex: 0 0 auto;
+  min-height: var(--touch-target);
+  padding: 0 0.9rem;
+  border: 0;
+  border-left: 1px solid #2a2e35;
+  background: #1b1e24;
+  color: #d7dae0;
+  font: inherit;
+  font-size: 0.85rem;
 }
 .banner {
   margin: 0;
