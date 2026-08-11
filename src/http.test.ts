@@ -50,7 +50,7 @@ let registry: Registry;
 before(async () => {
   const { profiles } = parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } });
   const allowlist = new CwdAllowlist(["/workspace/agentdeck"]);
-  registry = new Registry(fakeTmux(), profiles, allowlist);
+  registry = new Registry(fakeTmux(), profiles, allowlist, "test-secret-key");
   server = createServer(
     createHandler({
       registry,
@@ -323,6 +323,7 @@ void describe("a hook that authenticates routes its event into the session's sta
       fakeTmux(),
       profiles,
       new CwdAllowlist(["/workspace/agentdeck"]),
+      "test-secret-key",
     );
     await hookRegistry.create("/workspace/agentdeck", "claude");
     stream = new SessionStream({ sessionId: "test" });
@@ -453,7 +454,7 @@ void describe("a hook that does not authenticate moves nothing and tells nobody"
   void test("a wrong secret is 401 and announces no state", async () => {
     const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
     const allowlist = new CwdAllowlist(["/workspace/agentdeck"]);
-    const closedRegistry = new Registry(fakeTmux(), profiles, allowlist);
+    const closedRegistry = new Registry(fakeTmux(), profiles, allowlist, "test-secret-key");
     const { session } = await closedRegistry.create("/workspace/agentdeck", "claude");
     const declared: string[] = [];
     const closedServer = createServer(
@@ -505,7 +506,7 @@ void describe("an unexpected failure says nothing about itself", () => {
     const allowlist = new CwdAllowlist(["/workspace/agentdeck"]);
     const failing = createServer(
       createHandler({
-        registry: new ExplodingRegistry(fakeTmux(), profiles, allowlist),
+        registry: new ExplodingRegistry(fakeTmux(), profiles, allowlist, "test-secret-key"),
         profiles,
         allowlist,
         token: TOKEN,

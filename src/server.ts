@@ -366,37 +366,6 @@ export const main = async (): Promise<void> => {
     }
   }
 
-  const tmux = new Tmux({ socket });
-  // Before anything asks tmux a question. Idempotent, so it costs nothing when a tmux server is
-  // already up, and it is what lets the server start standalone - without it, /api/health reports
-  // 503 at boot on any machine where nothing else started tmux first.
-  await tmux.ensureServer();
-
-  const registry = new Registry(tmux, profiles, allowlist);
-  const hub = new Hub({
-    tmux,
-    registry,
-    socket,
-    // `state` is pushed rather than polled (plan 002), and the two sources of a state change - the
-    // hub's inference and an agent's own hook - both go out through this one funnel. `ws` is
-    // declared below, after the hub it announces for; nothing syncs before it exists.
-    onState: (id, state, exitCode) => {
-      ws.pushState(id, state, exitCode);
-    },
-  });
-
-  // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
-  // finish, or did I lose it", and expiring it after five minutes puts the question back.
-  // A tmux that will not answer at boot is not a reason to refuse to serve: the sync timer
-  // reconciles again in a moment, and /api/health reports the truth in the meantime.
-  try {
-    const reaped = await registry.reap();
-    if (reaped.length > 0)
-      console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
-  } catch (error) {
-    console.error("agentdeck: reap at boot failed, continuing:", error);
-  }
-
   // Asked before `loadToken`, which is the call that creates the file. "First run" is the run that
   // issues the token, and it is the only run where a QR is worth printing: on every later boot the
   // devices already hold it, and reprinting a live credential into a terminal's scrollback on
@@ -423,6 +392,37 @@ export const main = async (): Promise<void> => {
   } catch (error) {
     console.error(`agentdeck: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
+  }
+
+  const tmux = new Tmux({ socket });
+  // Before anything asks tmux a question. Idempotent, so it costs nothing when a tmux server is
+  // already up, and it is what lets the server start standalone - without it, /api/health reports
+  // 503 at boot on any machine where nothing else started tmux first.
+  await tmux.ensureServer();
+
+  const registry = new Registry(tmux, profiles, allowlist, token);
+  const hub = new Hub({
+    tmux,
+    registry,
+    socket,
+    // `state` is pushed rather than polled (plan 002), and the two sources of a state change - the
+    // hub's inference and an agent's own hook - both go out through this one funnel. `ws` is
+    // declared below, after the hub it announces for; nothing syncs before it exists.
+    onState: (id, state, exitCode) => {
+      ws.pushState(id, state, exitCode);
+    },
+  });
+
+  // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
+  // finish, or did I lose it", and expiring it after five minutes puts the question back.
+  // A tmux that will not answer at boot is not a reason to refuse to serve: the sync timer
+  // reconciles again in a moment, and /api/health reports the truth in the meantime.
+  try {
+    const reaped = await registry.reap();
+    if (reaped.length > 0)
+      console.log(`agentdeck: reaped ${String(reaped.length)} dead session(s)`);
+  } catch (error) {
+    console.error("agentdeck: reap at boot failed, continuing:", error);
   }
 
   const server = createServer(

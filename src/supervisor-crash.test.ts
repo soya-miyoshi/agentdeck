@@ -311,13 +311,23 @@ void describe("the node process is killed and nothing brings it back", () => {
     assert.ok(panes().includes(paneLine), "the restart disturbed the session it adopted");
   });
 
-  void test("the adopted session says its waiting detection is dead, rather than going quiet", async () => {
+  void test("the adopted session KEEPS its hook path, because the secret is derived", async () => {
+    // This is the case that used to mute every tab after a restart. The secret is
+    // HMAC(bearer token, session id) rather than `randomBytes`, so the new process recomputes the
+    // value the surviving agent still holds instead of having to be told it.
     const [session] = await listedSessions();
     assert.equal(
       session?.waitingDetectionLost,
-      true,
-      "an adopted session claims a hook path it does not have",
+      undefined,
+      "an adopted session is still reported as having lost its hook path",
     );
+    assert.equal(await hookPost(), 200, "the survivor's own secret no longer authenticates");
+  });
+
+  void test("and a hook with the WRONG secret is still refused", async () => {
+    // The half that must not have loosened. Derivation makes the right secret recomputable; it does
+    // not make a wrong one acceptable.
+    assert.equal(await hookPost("not-the-secret-at-all"), 401);
   });
 
   void test("a session outside the allowlist is NOT adopted, however it is named", async () => {
@@ -424,7 +434,7 @@ void describe("the node process is killed and nothing brings it back", () => {
     );
   });
 
-  void test("recreating reattaches to the same process - and does not restore the hook path", async () => {
+  void test("recreating reattaches to the same process, hook path intact", async () => {
     const body = await createSession("shell");
     assert.equal(body.session.id, id, "the id is not stable across a restart");
     assert.match(body.warning ?? "", /already running/, "this was a new session, not a reattach");
@@ -432,32 +442,46 @@ void describe("the node process is killed and nothing brings it back", () => {
 
     assert.deepEqual(await listedIds(), [id]);
 
-    // The unsolved half, sharper than the TODO text has it. `new-session -A` attaches to the live
-    // session and injects no environment, so the process that survived still holds the OLD secret
-    // while the registry has minted a NEW one it has no way to deliver. Recreating the session
-    // does not bring that tab's `waiting` back; only killing and restarting the agent does.
+    // `new-session -A` attaches to the live session and injects no environment. That used to be
+    // where the secret was lost - the survivor held the old one while the registry had minted a new
+    // one it could not deliver. Derived, the two are the same string and there is nothing to
+    // deliver.
     assert.equal(
       await hookPost(),
-      401,
-      "the surviving process's secret works again after a recreate",
+      200,
+      "the surviving process's secret stopped working after a recreate",
     );
   });
 
-  void test("the rejected hook leaves the session's state alone rather than half-applying it", async () => {
-    // A 401 that still moved the state would be worse than the loss it reports: the tab would
-    // report `waiting` on the word of a caller the server could not authenticate. The adopted
-    // session reports what the stream can see and nothing else.
+  void test("a refused hook moves no state, and marks the tab muted", async () => {
+    // A 401 that still moved the state would be worse than the refusal it reports: the tab would
+    // say `waiting` on the word of a caller the server could not authenticate. And a session whose
+    // hooks are refused must SAY so - an agent started before the secret became derivable holds a
+    // random one and can never match, and a tab that quietly never asks for you is the failure the
+    // flag exists to prevent.
+    // Asserted as "did not CHANGE" rather than "is not waiting": an earlier case in this file posts
+    // a hook that is accepted, so the session legitimately sits at `waiting` by the time this runs.
+    // The property is that a refused hook moves nothing, whatever the state happens to be.
+    const before = (await listedSessions())[0]?.state;
+
+    assert.equal(await hookPost("a-secret-from-the-old-scheme"), 401);
+
     const [session] = await listedSessions();
-    assert.notEqual(session?.state, "waiting", "an unauthenticated hook set the session waiting");
-    assert.equal(session?.waitingDetectionLost, true);
+    assert.equal(session?.state, before, "an unauthenticated hook moved the session's state");
+    assert.equal(
+      session?.waitingDetectionLost,
+      true,
+      "a session whose hooks are refused still claims it can report waiting",
+    );
   });
 
-  void test("restarting the AGENT itself, not the server, is what brings waiting detection back", async () => {
-    // The end of the sentence this item refuses to leave off. The loss is not permanent and it is
-    // not repaired by anything the server can do alone: it ends when the process holding the old
-    // secret is gone and a new one is started with a secret this server minted. Killing the
-    // session and creating it again is exactly that, and it is the instruction the refusal text
-    // and plan 002 give.
+  void test("restarting the AGENT clears a detected loss - and does NOT rotate the secret", async () => {
+    // Two properties in one, and the second is a cost rather than a feature. Killing the session
+    // and starting it again ends a detected loss, because the new process is handed the derived
+    // secret at creation. But that secret is a pure function of (key, session id), so the restart
+    // no longer ROTATES it the way a freshly minted random one did - a leaked session secret now
+    // outlives the agent that leaked it, and only rotating the bearer token changes it. Recorded in
+    // audit.md rather than left for someone to discover from this assertion.
     const stale = secret;
     const deleted = await api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
     assert.equal(deleted.status, 200);
@@ -470,10 +494,10 @@ void describe("the node process is killed and nothing brings it back", () => {
     assert.equal(restarted.session.id, id, "the id is not a function of (cwd, agent) after all");
     assert.equal(restarted.warning, undefined, "this reattached instead of starting a new agent");
 
-    // The new pane writes its own AGENTDECK_SECRET over the old one; wait for a different value,
-    // because an equal read would mean the file still holds the dead agent's.
+    // The new pane writes its own AGENTDECK_SECRET; it is the SAME string, so this waits for the
+    // file to exist rather than for it to change.
     let fresh = "";
-    for (let i = 0; i < 200 && (fresh === "" || fresh === stale); i++) {
+    for (let i = 0; i < 200 && fresh === ""; i++) {
       await new Promise((r) => setTimeout(r, 50));
       try {
         fresh = readFileSync(secretFile, "utf8").trim();
@@ -482,10 +506,9 @@ void describe("the node process is killed and nothing brings it back", () => {
       }
     }
     assert.match(fresh, /^[A-Za-z0-9_-]{20,}$/, "the restarted pane never saw a secret");
-    assert.notEqual(fresh, stale, "the restarted agent was handed the dead session's secret");
+    assert.equal(fresh, stale, "the derived secret changed across an agent restart");
     secret = fresh;
 
-    assert.equal(await hookPost(stale), 401, "the dead agent's secret still authenticates");
     assert.equal(await hookPost(fresh), 200, "restarting the agent did not restore the hook path");
 
     const [session] = await listedSessions();

@@ -334,7 +334,7 @@ before(async () => {
   });
   health = createServer(
     createHandler({
-      registry: new Registry(tmux, profiles, allowlist),
+      registry: new Registry(tmux, profiles, allowlist, "test-secret-key"),
       profiles,
       allowlist,
       token: "unused-by-health",

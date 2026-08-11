@@ -53,7 +53,7 @@ const { profiles } = parseProfiles({
 });
 
 const tmux = new Tmux({ socket });
-const registry = new Registry(tmux, profiles, new CwdAllowlist([work]));
+const registry = new Registry(tmux, profiles, new CwdAllowlist([work]), "test-secret-key");
 const hub = new Hub({ tmux, registry, socket });
 
 /** Wait until the stream has stopped moving, which is the only "the pane has settled" there is. */

@@ -155,11 +155,12 @@ under a matching name **is** listed and typed into. And adding a newly cloned re
 restarting the server. Sessions running at that moment survive it in most of the ways that matter:
 tmux keeps the processes alive, and the restarted server adopts them back — their directory comes
 from tmux and their agent from the session id, so they are listed, attachable and streamed again,
-allowlist-checked on the directory tmux reports exactly as everything else is. One thing does not
-come back: the per-session hook secret lives in memory and in the agent's own environment, and a
-new one cannot be handed to a process that is already running, so an adopted session reports
-working, idle and exited but never `waiting` again. Restarting that agent — not the server —
-restores it.
+allowlist-checked on the directory tmux reports exactly as everything else is. The per-session hook
+secret comes back too: it is **derived**, `HMAC(bearer token, session id)`, so a restarted process
+recomputes the value the running agent already holds instead of having to be told it. That is what
+stops a restart — including the unattended one the watchdog performs — muting every tab. The residual
+is that anything holding the token can now compute every session's secret; nothing an agent holds
+gets it there, and the token already starts and kills sessions anywhere on the allowlist.
 Why git push credentials stay away from the agent is in
 [`plans/005-containment.md`](plans/005-containment.md).
 
@@ -224,8 +225,7 @@ Rather than retyping that line, `make start` reads the environment from `.env` (
 `.env.example`; Node's `--env-file` does no expansion, so every path in it must be absolute) and
 sets `AGENTDECK_ROOTS` to `ghq root --all`. The server walks those roots on every check rather than
 at boot, so a repository cloned while it is running is in the picker at the next tap of `New
-session` — no edit and no restart, which matters because a restart is what costs every running
-agent its hook secret. `make mounts` prints the roots and what is under them, and `make stop` ends the server on
+session` — no edit and no restart. `make mounts` prints the roots and what is under them, and `make stop` ends the server on
 `AGENTDECK_PORT` — but not the work, since tmux keeps the agents and a restart adopts them back. A variable
 set in the shell still wins over the file, so any one entry can be overridden per launch.
 
@@ -234,8 +234,9 @@ followed by `make start` cannot work from there: `start` runs in the foreground,
 server kills the socket carrying the keystrokes before the second command is ever read. `restart`
 stops, waits for the port to actually be released, and relaunches detached with its output appended
 to `~/.agentdeck/server.log` (`AGENTDECK_LOG`). The agents are untouched either way — what a
-restart costs is each running session's hook secret, so `waiting` detection stays dead for those
-sessions until their agents are restarted.
+restart costs nothing a session needs: the hook secret is derived, so `waiting` detection comes back
+with the session. Agents started before that change hold a random one and cannot match — the first
+refused hook marks their tab `muted`, and restarting that agent is what clears it.
 
 `make up` starts the deck **with the watchdog supervising it**, which `start` and `restart` do not.
 `scripts/watchdog.mjs` is one pass and launchd is what repeats it, so this is a loop that runs a

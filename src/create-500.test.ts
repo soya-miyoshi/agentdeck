@@ -196,6 +196,7 @@ void describe("a create that fails for any other reason leaves no orphan", () =>
       tmux,
       parseProfiles(JSON.parse(readFileSync(profiles, "utf8"))).profiles,
       new CwdAllowlist([work]),
+      "test-secret-key",
     );
     await tmux.ensureServer();
 

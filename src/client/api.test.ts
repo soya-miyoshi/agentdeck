@@ -53,6 +53,7 @@ void describe("the server's answer to a mismatched Origin", () => {
           }),
           profiles,
           allowlist,
+          "test-secret-key",
         ),
         profiles,
         allowlist,

@@ -91,13 +91,12 @@ export class CwdAllowlist {
    * The refusal a person meets most often, so it says what would have to change rather than 403.
    *
    * Two ways out, and they do not cost the same. A clone under a root is free and immediate; an
-   * AGENTDECK_MOUNTS entry needs a restart, and the restart's real cost is named rather than
-   * implied. Since m2/session-metadata-survives-restart that cost is smaller and sharper than it
-   * was: tmux keeps the processes and the restarted server adopts them back from tmux, cwd from
-   * `#{session_path}` and agent from the id, so they are listed and streamed again. The
-   * per-session hook secret is not recoverable and cannot be delivered to a process already
-   * running, so those sessions never report `waiting` again until their AGENT is restarted.
-   * Understating that is how someone restarts casually and stops being told they are needed.
+   * AGENTDECK_MOUNTS entry needs a restart. That restart used to cost every running session its
+   * `waiting` alerts - the hook secret was minted at random and could not be handed to a process
+   * already running - and this sentence existed to stop someone paying it casually. The secret is
+   * derived now, so the cost is a reconnect and nothing else. Said plainly rather than left as the
+   * old warning, because a refusal that overstates the price is as misleading as one that
+   * understates it.
    */
   refusal(cwd: string): string {
     const free =
@@ -108,9 +107,8 @@ export class CwdAllowlist {
     return (
       `${resolve(cwd)} is not on the allowlist, so no session can start there. ${free}` +
       `Add it to AGENTDECK_MOUNTS and restart agentdeck - tmux keeps the running agents across ` +
-      `that restart and they are listed and streamed again afterwards, but their per-session hook ` +
-      `secret does not survive it, so waiting detection stays dead for each of them until that ` +
-      `agent itself is restarted. Currently allowed: ` +
+      `that restart, and they are listed, streamed and still able to report waiting afterwards, ` +
+      `because the hook secret is derived rather than minted. Currently allowed: ` +
       `${this.paths.join(", ")}`
     );
   }

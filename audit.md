@@ -2504,3 +2504,64 @@ the toggle's `flex: 1 1 0` collapsing its label, and whether the sheet clears th
 Every session that was live lost its hook secret, so `waiting` detection is dead for those agents
 until each is restarted - the known cost of `make restart`, recorded here because it was paid
 without being asked for.
+
+## The hook secret is derived now, so a restart stops muting every tab
+
+Reported from the phone: after `make restart`, every tab representing a session that was already
+running shows `muted`. That was by design and it was written down in three places - but the design
+became untenable the moment `make up` landed, because the watchdog restarts the server UNATTENDED.
+What used to cost a person's deliberate restart now happens on its own, and every session's `waiting`
+alerts die with it.
+
+*The mechanism, unchanged from what the old comments said.* The per-session secret was
+`randomBytes(24)`, held in the server's memory and in the agent's environment. tmux cannot be asked
+for it: `createOrAttach` unsets it from the SESSION environment immediately after the pane inherits
+it, precisely so a same-uid `show-environment -t` cannot read it (m0/host-boundary). And
+`new-session -A` injects no environment into a live session, so a freshly minted replacement reaches
+nobody. `#adopt` therefore recovered cwd and agent and could not recover the secret.
+
+*The fix, chosen by the operator from three options.* `secret = HMAC-SHA256(bearer token, session
+id)`. A restarted process recomputes the value the running agent already holds. Nothing new is
+written down - the key is the token that already lives 0600 in `~/.agentdeck/`, outside every
+allowlist entry - which is what plan 001's "no database and no sidecar file" forecloses. The
+alternative considered and rejected was `~/.agentdeck/secrets.json`, which is that sidecar exactly.
+
+*Two residuals, both real, neither smoothed over.*
+
+- **One key now derives every session's secret.** Before, a leaked session secret could lie about
+  one session's state. This is not an escalation from an agent's side - a pane gets only its own
+  derived value and cannot invert HMAC - and anything holding the token can already start and kill
+  sessions anywhere on the allowlist, which is strictly more than forging a state frame.
+- **Restarting an agent no longer rotates its secret.** It used to mint a fresh random one per
+  start, so killing and restarting an agent was a rotation. The derived value is a pure function of
+  (key, session id), so a leaked secret outlives the agent that leaked it and only rotating the
+  bearer token changes it. This is a downgrade, it is the price of recomputability, and
+  `supervisor-crash.test.ts` now asserts the non-rotation directly so nobody rediscovers it.
+
+*A silent, destructive bug this would have introduced, caught before it ran.* `reap()` asked
+`secret !== undefined` as its test for "did THIS process start the session", because that used to be
+equivalent. With the secret always present it would have reaped every ADOPTED corpse at boot -
+destroying the pane whose scrollback and `exited N` are the only remaining answer to "did it finish,
+or did I lose it", which is the entire reason reaping runs at start rather than on a timer. Split
+into an explicit `startedHere`, and asserted.
+
+*The one population derivation cannot help.* An agent started BEFORE this change holds a random
+secret and can never match a derived one. Left alone it would be the exact failure `muted` was
+invented to prevent: a tab that looks healthy and quietly never asks for you. So a hook that
+presents a non-matching secret marks that session deaf, and the strip says `muted` - detected rather
+than assumed. Spoofable by anything running as this user, which can mute a tab by posting a wrong
+secret; it is the conservative direction, and the same uid can already read the token and close the
+session outright.
+
+**Migration, and it needs a person:** any session running when this ships must have its AGENT
+restarted once. Until then its tab shows healthy until its first hook is refused, and muted after.
+
+*Six tests across four files asserted the old design and were rewritten rather than deleted*, each
+keeping the property it was really protecting: a wrong secret is still refused, a refused hook still
+moves no state, and the marked-versus-healthy contrast in the strip is still drawn - now between a
+survivor (healthy) and a session whose hook was actually refused (marked), instead of between a
+survivor and a fresh session.
+
+*Verified:* 37/37 in `registry.test.ts`, 15/15 in `supervisor-crash.test.ts`, 13/13 in
+`src/client/end-to-end.test.ts`, and the full suite below. **Not demonstrated:** the phone. The tabs
+were not looked at on the device, and the failure reported here was reported from the device.

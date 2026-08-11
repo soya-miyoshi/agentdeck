@@ -759,12 +759,14 @@ void describe("the reconnection ladder, against the real transport", () => {
 });
 
 void describe("a session whose waiting detection died, for real", () => {
-  void test("is marked in the strip instead of rendering as a healthy tab", async () => {
-    // Not a fixture and not a flag set by hand: the three sessions above outlived the SIGKILL in
-    // the restart test, and the server that came back adopted them from tmux without the hook
-    // secret they were started with. Their hook POSTs are unsigned from here on, so they will
-    // never report `waiting` again until their agent is restarted (plan 002) - and that is
-    // precisely the tab that would otherwise look healthy and quietly never ask for anybody.
+  void test("survives a restart unmarked, and is marked only once its hooks are actually refused", async () => {
+    // Not a fixture and not a flag set by hand. The three sessions above outlived the SIGKILL in
+    // the restart test. They used to come back MUTED - the server had adopted them from tmux with
+    // no way to recover the random secret they were started with - and that is the bug this file
+    // now pins the fix for: the secret is derived, so adoption recomputes it and the tabs come back
+    // whole. What still has to be marked is a session whose hooks are genuinely refused, which is
+    // produced below rather than assumed, because a tab that looks healthy and quietly never asks
+    // for anybody is the failure the mark exists to prevent.
     const base = `http://127.0.0.1:${String(port)}`;
     const headers = { authorization: `Bearer ${token}` };
     // A session of the SAME agent started by the server that is running now, so the comparison is
@@ -790,15 +792,37 @@ void describe("a session whose waiting detection died, for real", () => {
     for (const tab of survivors) {
       assert.equal(
         tab.waitingDetectionLost,
-        true,
-        `${tab.name} survived the restart and its tab still claims a working waiting mechanism`,
+        false,
+        `${tab.name} survived the restart and its tab is still marked as having lost waiting`,
       );
     }
-    // The same agent, started fresh, does NOT carry it. Without this the assertion above would
-    // pass just as well if every tab were marked, which says nothing to a person at all.
     const healthy = tabs.find((tab) => tab.id === fresh.session?.id);
     assert.ok(healthy, "the fresh session is not listed");
     assert.equal(healthy.waitingDetectionLost, false);
+
+    // Now make one genuinely deaf, the way the only population derivation cannot help becomes deaf:
+    // a hook arriving with a secret that does not match. Without this the loop above would pass
+    // just as well if the mark had been deleted from the code entirely.
+    const victim = survivors[0];
+    assert.ok(victim, "no survivor to refuse a hook for");
+    const refused = await fetch(`${base}/api/hooks/${encodeURIComponent(victim.id)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-agentdeck-secret": "not-the-secret" },
+      body: JSON.stringify({ hook_event_name: "Notification" }),
+    });
+    assert.equal(refused.status, 401, "a wrong secret was accepted");
+
+    const after = (await (await fetch(`${base}/api/sessions`, { headers })).json()) as {
+      sessions: Session[];
+    };
+    const marked = toTabs(after.sessions, agents.agents);
+    assert.equal(
+      marked.find((tab) => tab.id === victim.id)?.waitingDetectionLost,
+      true,
+      "a session whose hook was refused still renders as a healthy tab",
+    );
+    // And only that one: the mark is per session, not a mode the strip falls into.
+    assert.equal(marked.find((tab) => tab.id === fresh.session?.id)?.waitingDetectionLost, false);
   });
 });
 

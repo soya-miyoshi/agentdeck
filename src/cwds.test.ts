@@ -40,25 +40,26 @@ void describe("the cwd allowlist", () => {
     assert.match(message, /\/workspace\/agentdeck/, "it should say what IS allowed");
   });
 
-  void test("the refusal does not price the restart at a reconnect", () => {
-    // The restart no longer costs the session: it is adopted back from tmux. What it does cost is
-    // the per-session hook secret, which is unrecoverable and cannot be handed to a process
-    // already running - so that session never says it needs you again until its agent restarts.
-    // A refusal that says the restart costs "a reconnect" makes the losing action sound routine.
+  void test("the refusal prices the restart at what it actually costs now", () => {
+    // This used to demand the opposite wording. The restart cost every running session its
+    // `waiting` alerts, because the hook secret was random and could not be handed to a process
+    // already running, and the refusal had to say so or someone would restart casually and stop
+    // being told they were needed. The secret is derived now and survives, so a refusal still
+    // carrying that warning would OVERSTATE the price - which misleads exactly as much.
     const message = list.refusal("/workspace/newly-cloned");
-    assert.doesNotMatch(message, /costs a reconnect/);
-    assert.match(message, /hook\s+secret does not survive/);
-    assert.match(message, /waiting detection stays dead/);
-    assert.match(message, /until that agent itself is restarted/);
+    assert.doesNotMatch(message, /waiting detection stays dead/);
+    assert.doesNotMatch(message, /secret does not survive/);
+    assert.match(message, /still able to report waiting/);
+    assert.match(message, /derived rather than minted/);
   });
 
-  void test("the README does not price the restart at a reconnect either", async () => {
-    // The README is the document a person reads first, so it is the one that decides whether the
-    // restart sounds routine. Prose is where this regressed once already.
+  void test("the README prices it the same way, since that is what a person reads first", async () => {
+    // Prose is where this regressed once already, in both directions: the README understated the
+    // cost before m2, and would overstate it now if it still carried the old warning.
     const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
-    assert.doesNotMatch(readme, /costs a\s+reconnect/);
-    assert.match(readme, /hook secret lives in memory/);
-    assert.match(readme, /never `waiting` again/);
+    assert.doesNotMatch(readme, /never `waiting` again/);
+    assert.match(readme, /hook\s+secret comes back too/);
+    assert.match(readme, /HMAC\(bearer token, session id\)/);
   });
 });
 
@@ -184,7 +185,9 @@ void describe("a root is read on every check, not captured at boot", () => {
       message.indexOf("Clone it under") < message.indexOf("AGENTDECK_MOUNTS"),
       "the free way out should come first",
     );
-    assert.match(message, /hook\s+secret does not survive/, "the restart still costs what it did");
+    // The clone is still the free way out and still comes first; the restart is no longer the
+    // expensive one it was, so what the message names about it is what it costs NOW.
+    assert.match(message, /derived rather than minted/, "the restart is priced with the old cost");
   });
 });
 

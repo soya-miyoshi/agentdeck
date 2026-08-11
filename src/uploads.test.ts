@@ -116,7 +116,7 @@ void describe("POST /api/sessions/:id/uploads", () => {
     root = await mkdtemp(join(tmpdir(), "agentdeck-uploads-"));
     const { profiles } = parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } });
     const allowlist = new CwdAllowlist([CWD]);
-    const registry = new Registry(fakeTmux(), profiles, allowlist);
+    const registry = new Registry(fakeTmux(), profiles, allowlist, "test-secret-key");
     server = createServer(
       createHandler({
         registry,

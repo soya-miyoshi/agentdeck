@@ -88,7 +88,7 @@ const build = (onRefresh: () => void = () => undefined) => {
   const announced: { id: string; state: string; exitCode?: number }[] = [];
   const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
   const allowlist = new CwdAllowlist(["/workspace/a", "/workspace/b"]);
-  const registry = new Registry(tmux, profiles, allowlist);
+  const registry = new Registry(tmux, profiles, allowlist, "test-secret-key");
   const created: string[] = [];
   const ptys = new Map<string, ReturnType<typeof fakePty>>();
   const hub = new Hub({
@@ -186,7 +186,7 @@ void describe("reconciling against tmux", () => {
     const { tmux } = fakeTmux();
     const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
     const allowlist = new CwdAllowlist(["/workspace/a", "/workspace/b"]);
-    const registry = new Registry(tmux, profiles, allowlist);
+    const registry = new Registry(tmux, profiles, allowlist, "test-secret-key");
     const attached: string[] = [];
     const hub = new Hub({
       tmux,

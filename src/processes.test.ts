@@ -154,7 +154,7 @@ before(async () => {
   server = createServer(
     createHandler({
       // The route never touches the registry; it is here because HttpDeps requires one.
-      registry: new Registry(stubTmux(), new Map(), new CwdAllowlist([])),
+      registry: new Registry(stubTmux(), new Map(), new CwdAllowlist([]), "test-secret-key"),
       profiles: new Map(),
       allowlist: new CwdAllowlist(["/workspace/agentdeck"]),
       token: TOKEN,
@@ -200,7 +200,7 @@ void describe("without a way to ask tmux", () => {
   void test("the route answers an empty list rather than failing", async () => {
     const bare = createServer(
       createHandler({
-        registry: new Registry(stubTmux(), new Map(), new CwdAllowlist([])),
+        registry: new Registry(stubTmux(), new Map(), new CwdAllowlist([]), "test-secret-key"),
         profiles: new Map(),
         allowlist: new CwdAllowlist([]),
         token: TOKEN,

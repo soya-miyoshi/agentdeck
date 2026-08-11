@@ -32,6 +32,7 @@ void describe("the Origin check is documented as present-but-off", () => {
           }),
           profiles,
           allowlist,
+          "test-secret-key",
         ),
         profiles,
         allowlist,

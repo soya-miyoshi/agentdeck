@@ -26,8 +26,7 @@ start:
 	AGENTDECK_ROOTS="$(ROOTS)" node --env-file-if-exists=.env src/server.ts
 
 # Stops the server, not the work: tmux keeps the agents running and a restarted server adopts them
-# back. What does not survive is each session's hook secret, so `waiting` detection stays dead for
-# every agent that was already running until that agent itself is restarted.
+# back, hook secret included - it is derived rather than minted, so `waiting` survives a restart.
 stop:
 	@if [ -f "$(WATCHDOG_PID)" ] && kill -0 "$$(cat $(WATCHDOG_PID))" 2>/dev/null; then \
 	  echo "make: the watchdog is supervising (pid $$(cat $(WATCHDOG_PID))). It will START THE SERVER AGAIN within $(WATCHDOG_EVERY)s. Use \`make down\` to stop both."; \
@@ -48,9 +47,8 @@ stop:
 # one is ever read. This one detaches, so the deck comes back and the phone reconnects to it.
 #
 # The agents are untouched. tmux holds the sessions, this process is only attached to them, and a
-# restarted server adopts them back - measured, not assumed. What does not survive is each
-# session's hook secret, so `waiting` detection stays dead for every agent that was already running
-# until that agent itself is restarted.
+# restarted server adopts them back - measured, not assumed - with their hook secret, which is
+# derived rather than minted and so survives this process going away.
 restart:
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
 	@$(MAKE) --no-print-directory stop

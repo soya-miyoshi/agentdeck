@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { resolve } from "node:path";
 
 import type { AgentProfile } from "./agent-profiles.ts";
@@ -23,12 +23,15 @@ export interface Session {
   startedAt: number;
   exitCode?: number;
   /**
-   * True when this session was ADOPTED from tmux after a restart, so nothing here holds the
-   * secret its agent was started with and its hook POSTs can never be authenticated again.
+   * True when this session's hooks are refused, so `waiting` is the one state it cannot reach.
    *
-   * The session is otherwise whole - listed, attachable, streamable - but `waiting` is the one
-   * state it cannot reach, because the only mechanism that produces it is the hook route. It is on
-   * the wire (plan 002) rather than kept here so the tab strip can say so; a tab that silently
+   * It used to mean "adopted after a restart", and every adopted session had it - which is why a
+   * restart muted every tab. The secret is derived now, so adoption recovers it and a restart costs
+   * nothing. What remains is the case derivation cannot reach: an agent started BEFORE the secret
+   * became derivable holds a random one and can never match. That is detected when its first hook
+   * is refused, not assumed.
+   *
+   * On the wire (plan 002) rather than kept here so the tab strip can say so; a tab that silently
    * never reports `waiting` again is a confidently wrong tab. m3/tab-strip owns showing it.
    */
   waitingDetectionLost?: true;
@@ -42,33 +45,74 @@ export interface CreateResult {
 export class CwdNotAllowedError extends Error {}
 export class UnknownAgentError extends Error {}
 
-/** Per-session secret for the hook route. Never the user's token - see plan 002. */
-const newSecret = (): string => randomBytes(24).toString("base64url");
+/**
+ * A session's hook secret, DERIVED rather than minted.
+ *
+ * It used to be `randomBytes(24)` held only in memory, and that is what made every tab go `muted`
+ * after a restart: the running agent kept the value in its environment, the new process had no way
+ * to learn it, and `new-session -A` cannot inject one into a live session. Deriving it from a key
+ * that outlives the process makes it recomputable, so `waiting` survives a restart - including the
+ * unattended one the watchdog performs.
+ *
+ * The key is the operator's bearer token, which already lives 0600 in `~/.agentdeck/` outside every
+ * allowlist entry. Nothing new is written down, which is what plan 001 forecloses.
+ *
+ * The residual, stated rather than smoothed over: before this, one leaked session secret could lie
+ * about one session's state. Now anything holding the KEY can compute every session's secret. That
+ * is not an escalation from an agent's side - a pane gets only its own derived value and cannot
+ * invert HMAC to reach the key - and anything that already has the token can start and kill sessions
+ * anywhere on the allowlist, which is strictly more than forging a state frame. See audit.md.
+ */
+export const secretFor = (key: string, id: string): string =>
+  createHmac("sha256", key).update(id).digest("base64url");
 
 interface SessionMeta {
   cwd: string;
   agent: string;
-  /** Absent for an adopted session: see `Registry.#adopt`. Nothing else may leave it unset. */
-  secret?: string;
+  secret: string;
+  /**
+   * Whether THIS process created the session, as opposed to adopting one that outlived a restart.
+   *
+   * Its own field because `reap()` used to ask `secret !== undefined` for this, and the secret is
+   * now always present. Left as it was, reaping at start would have destroyed every adopted corpse
+   * - the pane whose scrollback and `exited N` are the only remaining answer to "did it finish, or
+   * did I lose it".
+   */
+  startedHere: boolean;
 }
 
 export class Registry {
   #tmux: Tmux;
   #profiles: ReadonlyMap<string, AgentProfile>;
   #allowlist: CwdAllowlist;
+  #secretKey: string;
 
-  // What the registry keeps in memory. `cwd` and `agent` are recoverable from tmux after a
-  // restart (see `#adopt`); the secret is NOT, and must not be - which is why it is optional here
-  // rather than always present. `secret: undefined` means "this session's hook path is dead", and
-  // it is a state the code carries deliberately instead of papering over with a fresh secret the
-  // running agent could never be told about.
+  // What the registry keeps in memory. All of it is recoverable after a restart now: `cwd` and
+  // `agent` from what tmux reports (see `#adopt`), the secret by derivation.
   #meta = new Map<string, SessionMeta>();
   #states = new Map<string, SessionState>();
+  // Sessions whose agent has presented a secret that does not match the derived one, so its hooks
+  // are 401 and it will never report `waiting`. Bounded by the session set, and cleared when a
+  // session goes.
+  #deaf = new Set<string>();
 
-  constructor(tmux: Tmux, profiles: ReadonlyMap<string, AgentProfile>, allowlist: CwdAllowlist) {
+  constructor(
+    tmux: Tmux,
+    profiles: ReadonlyMap<string, AgentProfile>,
+    allowlist: CwdAllowlist,
+    secretKey: string,
+  ) {
     this.#tmux = tmux;
     this.#profiles = profiles;
     this.#allowlist = allowlist;
+    if (secretKey === "") {
+      // An empty key would derive one predictable secret per session id for every deck on earth,
+      // and the failure is invisible: hooks would keep working. Refused at construction instead.
+      throw new Error(
+        "Registry needs a non-empty secret key; it derives every hook secret from it",
+      );
+    }
+    this.#secretKey = secretKey;
   }
 
   async create(rawCwd: string, agentId: string): Promise<CreateResult> {
@@ -99,8 +143,7 @@ export class Registry {
       this.#states.delete(id);
     }
 
-    const prior = this.#meta.get(id);
-    const minted = prior?.secret ?? newSecret();
+    const secret = secretFor(this.#secretKey, id);
     // tmux reports session_created in whole seconds, so the window opens at the last second
     // boundary before the create rather than at this millisecond - otherwise a session created in
     // the same second reads as older than the call that made it and is never cleaned up.
@@ -110,20 +153,17 @@ export class Registry {
       cwd,
       profile.command,
       profile.args,
-      spawnEnv(profile, { AGENTDECK_SESSION_ID: id, AGENTDECK_SECRET: minted }),
+      spawnEnv(profile, { AGENTDECK_SESSION_ID: id, AGENTDECK_SECRET: secret }),
     );
 
-    // Only a secret the AGENT actually received is recorded. `new-session -A` on an existing
-    // session injects no environment, so on the attach path the running process keeps whatever it
-    // was started with: the one this process minted before (`prior.secret`), or - for a session
-    // adopted after a restart - one nothing here has. Recording the freshly minted secret in that
-    // last case would make `secretMatches` compare against a string no one holds while the session
-    // claimed a working hook path; the hooks are 401 either way, and this way the list says so.
-    const carried = attached ? prior?.secret : minted;
-    this.#meta.set(
-      id,
-      carried === undefined ? { cwd, agent: agentId } : { cwd, agent: agentId, secret: carried },
-    );
+    // The same value either way now. `new-session -A` on an existing session injects no
+    // environment, so on the attach path the running agent keeps what it was started with - and
+    // since that was derived from the same key and the same id, it is this string. That is the
+    // whole point of deriving it: the attach path used to be where the secret was lost.
+    //
+    // `startedHere` is true only when tmux actually created the session. An attach means it was
+    // already there, which for `reap()` is the same as an adopted corpse.
+    this.#meta.set(id, { cwd, agent: agentId, secret, startedHere: !attached });
     if (!attached) this.#states.set(id, "idle");
 
     // Everything after the create either produces the 201 or undoes the create. Before
@@ -194,6 +234,7 @@ export class Registry {
     const ours = await this.#tmux.describe(id);
     this.#meta.delete(id);
     this.#states.delete(id);
+    this.#deaf.delete(id);
     // Cannot confirm, so do not act. An orphan is visible on the socket and adoptable; a killed
     // agent's work is not recoverable, so the two failures are not equally bad.
     if (ours === undefined || ours.path !== cwd || ours.startedAt < startedAfter) return;
@@ -239,7 +280,11 @@ export class Registry {
         state: entry.dead ? "exited" : (this.#states.get(entry.id) ?? "idle"),
         startedAt: entry.startedAt,
       };
-      if (meta.secret === undefined) session.waitingDetectionLost = true;
+      // Adoption no longer sets this: the secret is derived, so a restarted process recomputes it
+      // and the hook path works again. What DOES set it is a hook arriving with a secret that does
+      // not match - which is the one population derivation cannot help, agents started before the
+      // secret became derivable and still holding a random one.
+      if (this.#deaf.has(entry.id)) session.waitingDetectionLost = true;
       if (entry.exitCode !== undefined) session.exitCode = entry.exitCode;
       return [session];
     });
@@ -285,7 +330,15 @@ export class Registry {
     if (path === "" || !this.#allowlist.allows(path)) return undefined;
     for (const agent of this.#profiles.keys()) {
       if (sessionId(path, agent) !== id) continue;
-      const meta: SessionMeta = { cwd: path, agent };
+      // The secret comes back by derivation rather than being absent, which is what stops a
+      // restart muting every tab. `startedHere` is false: this process did not create it, and
+      // `reap()` must keep its hands off the corpse.
+      const meta: SessionMeta = {
+        cwd: path,
+        agent,
+        secret: secretFor(this.#secretKey, id),
+        startedHere: false,
+      };
       this.#meta.set(id, meta);
       // Say so, every time. Adoption is arithmetic on what tmux reports and cannot establish that
       // WE created the session - `sessionId(cwd, agent)` is a pure function of two values any
@@ -318,6 +371,7 @@ export class Registry {
     await this.#tmux.kill(id);
     this.#meta.delete(id);
     this.#states.delete(id);
+    this.#deaf.delete(id);
   }
 
   /**
@@ -332,7 +386,7 @@ export class Registry {
    */
   async reap(): Promise<string[]> {
     const dead = (await this.list()).filter(
-      (s) => s.state === "exited" && this.#meta.get(s.id)?.secret !== undefined,
+      (s) => s.state === "exited" && this.#meta.get(s.id)?.startedHere === true,
     );
     for (const session of dead) await this.close(session.id);
     return dead.map((s) => s.id);
@@ -342,12 +396,27 @@ export class Registry {
     this.#states.set(id, state);
   }
 
-  /** Constant-time-ish check that a hook call belongs to the session it claims. */
+  /**
+   * Constant-time-ish check that a hook call belongs to the session it claims.
+   *
+   * A mismatch against a session we KNOW about marks it deaf, so the strip says `muted` rather than
+   * looking healthy while every hook is refused. That is the shape derivation cannot fix on its own:
+   * an agent started before the secret became derivable holds a random one and can never match.
+   *
+   * Spoofable by anything running as this user, which can mute a tab by posting a wrong secret. It
+   * is the conservative direction - the deck claims LESS than it can do - and the same uid can
+   * already read the bearer token and close the session outright.
+   */
   secretMatches(id: string, presented: string): boolean {
     const secret = this.#meta.get(id)?.secret;
-    if (secret === undefined || secret.length !== presented.length) return false;
+    if (secret === undefined) return false;
+    if (secret.length !== presented.length) {
+      this.#deaf.add(id);
+      return false;
+    }
     let diff = 0;
     for (let i = 0; i < secret.length; i++) diff |= secret.charCodeAt(i) ^ presented.charCodeAt(i);
+    if (diff !== 0) this.#deaf.add(id);
     return diff === 0;
   }
 

@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import { parseProfiles } from "./agent-profiles.ts";
 import { CwdAllowlist } from "./cwds.ts";
-import { CwdNotAllowedError, Registry, UnknownAgentError } from "./registry.ts";
+import { CwdNotAllowedError, Registry, secretFor, UnknownAgentError } from "./registry.ts";
 import { sessionId } from "./session-id.ts";
 import { Tmux } from "./tmux.ts";
 
@@ -107,7 +107,13 @@ const build = (existing?: FakeSessions) => {
     gemini: { command: "/bin/sh", name: "Gemini CLI" },
   });
   const allowlist = new CwdAllowlist(["/workspace/agentdeck", "/workspace/web"]);
-  return { registry: new Registry(tmux, profiles, allowlist), sessions, die, plant, fail };
+  return {
+    registry: new Registry(tmux, profiles, allowlist, "test-secret-key"),
+    sessions,
+    die,
+    plant,
+    fail,
+  };
 };
 
 void describe("adopting a session that outlived the process which created it", () => {
@@ -125,35 +131,57 @@ void describe("adopting a session that outlived the process which created it", (
     assert.equal(adopted?.name, "agentdeck");
   });
 
-  void test("it says its waiting detection is dead, and the hook route agrees", async () => {
-    // The secret was random and lived only in memory and in the agent's environment. Nothing here
-    // can recover it and nothing can deliver a new one to a process already running, so the
-    // session says so rather than reporting working/idle forever as if the hooks still worked.
+  void test("its waiting detection SURVIVES the restart, because the secret is derived", async () => {
+    // This is the case that used to mute every tab. The secret was `randomBytes(24)` held only in
+    // memory and in the agent's environment; a new process could not learn it and cannot inject a
+    // replacement into a live session. Derived from a key that outlives the process, it comes back.
     const { registry, sessions } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
 
     const [adopted] = await restarted.list();
-    assert.equal(adopted?.waitingDetectionLost, true);
+    assert.equal(adopted?.waitingDetectionLost, undefined, "the tab was muted by a restart");
     assert.equal(
-      restarted.secretMatches(session.id, "any-secret-at-all"),
-      false,
-      "a session with no secret authenticated a hook",
+      restarted.secretMatches(session.id, secretFor("test-secret-key", session.id)),
+      true,
+      "the restarted process cannot authenticate the hook its own agent will send",
+    );
+    // Still a check, not a rubber stamp: the wrong secret is refused.
+    assert.equal(restarted.secretMatches(session.id, "any-secret-at-all"), false);
+  });
+
+  void test("an agent holding a secret from before derivation is reported as muted, not as healthy", async () => {
+    // The one population derivation cannot help: started when the secret was random, so it can
+    // never match. It must not look healthy - a tab that quietly never asks for you is the failure
+    // the flag exists to prevent - so the first refused hook marks it.
+    const { registry, sessions } = build();
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
+    const restarted = restart(sessions);
+    assert.equal((await restarted.list())[0]?.waitingDetectionLost, undefined);
+
+    assert.equal(restarted.secretMatches(session.id, "a-secret-from-the-old-scheme"), false);
+    assert.equal(
+      (await restarted.list())[0]?.waitingDetectionLost,
+      true,
+      "a session whose hooks are refused is still reported as able to report waiting",
     );
   });
 
-  void test("recreating it does NOT mint a secret it cannot deliver", async () => {
-    // `new-session -A` attaches to the live session and injects no environment, so a fresh secret
-    // would reach nobody while the session claimed a working hook path. It stays lost, loudly.
+  void test("recreating it reattaches to the same agent and the hook path still works", async () => {
+    // `new-session -A` attaches to the live session and injects no environment. That used to be
+    // where the secret was lost; the derived one is the SAME string the running agent already
+    // holds, so the reattach path needs to deliver nothing.
     const { registry, sessions } = build();
-    await registry.create("/workspace/agentdeck", "claude");
+    const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
 
     const again = await restarted.create("/workspace/agentdeck", "claude");
     assert.match(again.warning ?? "", /already running/, "this was not the reattach path");
-    assert.equal(again.session.waitingDetectionLost, true);
-    const [listed] = await restarted.list();
-    assert.equal(listed?.waitingDetectionLost, true);
+    assert.equal(again.session.waitingDetectionLost, undefined);
+    assert.equal(
+      restarted.secretMatches(session.id, secretFor("test-secret-key", session.id)),
+      true,
+    );
   });
 
   void test("a session outside the allowlist is not adopted, however it is named", async () => {
@@ -192,9 +220,10 @@ void describe("adopting a session that outlived the process which created it", (
     assert.equal(sessions.size, 1, "the server killed a session it refuses to list");
   });
 
-  void test("an adopted session that has exited still says its waiting detection is dead", async () => {
-    // The flag is about the hook path, not about being alive: a corpse that is listed at all is
-    // listed with the same warning, so nothing reading the list has to special-case it.
+  void test("an adopted corpse is listed as exited, and reap at boot leaves it alone", async () => {
+    // `reap()` used to ask "has a secret?" for "did this process start it?", and the secret is now
+    // always present. Left that way, reaping at boot would destroy every adopted corpse - the pane
+    // whose scrollback and exit code are the only answer to "did it finish, or did I lose it".
     const { registry, sessions, die } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
@@ -202,18 +231,20 @@ void describe("adopting a session that outlived the process which created it", (
 
     const [adopted] = await restarted.list();
     assert.equal(adopted?.state, "exited");
-    assert.equal(adopted?.waitingDetectionLost, true);
+    assert.deepEqual(await restarted.reap(), [], "reap killed a corpse this process did not start");
+    assert.equal((await restarted.list()).length, 1, "the adopted corpse was destroyed");
   });
 
-  void test("only restarting the AGENT brings waiting detection back", async () => {
-    // The sentence the item refuses to smooth over, as an assertion. Adoption recovers the tab and
-    // not the hook path; recreating the session reattaches to the same process and so recovers
-    // nothing either (above). What ends the loss is the agent itself going away: a session killed
-    // and started again is a NEW process, started with a secret this registry minted and can
-    // therefore check, and it drops the flag.
+  void test("restarting the AGENT clears a loss that was detected", async () => {
+    // A session marked deaf by a refused hook gets its flag back when the agent goes away and a new
+    // one starts, because the new process is handed the derived secret at creation.
     const { registry, sessions } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
+    // Listed first, because `#meta` is populated by adoption and a hook for a session this process
+    // has never listed is refused without marking anything. The real server lists at boot.
+    await restarted.list();
+    restarted.secretMatches(session.id, "a-secret-from-the-old-scheme");
     assert.equal((await restarted.list())[0]?.waitingDetectionLost, true);
 
     await restarted.close(session.id);
@@ -331,6 +362,7 @@ void describe("creating sessions", () => {
       fakeTmux(sessions).tmux,
       parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } }).profiles,
       new CwdAllowlist(["/workspace/agentdeck"]),
+      "test-secret-key",
     );
     const second = await restarted.create("/workspace/agentdeck", "claude");
 
