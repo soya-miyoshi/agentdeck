@@ -2426,3 +2426,56 @@ backoff. `@playwright/mcp` is stdio. So the hourly pane-children pass does not m
 agent's MCP server, it removes it until a person opens `/mcp` and retries. That was accepted on the
 understanding that it would come back; it does not. Recorded here rather than silently reversed,
 because the decision to over-collect was the operator's to make and so is the decision to keep it.
+
+## MCP servers: spared by the timer, taken by Close
+
+The operator's split, after the finding at the end of the entry above: the timed pass leaves MCP
+servers alone, pressing Close takes them.
+
+*Why the split is the right one.* Claude Code's documentation is explicit that stdio MCP servers are
+not reconnected automatically - only HTTP and SSE servers are, with backoff - and `@playwright/mcp`
+is stdio. So an hourly pass taking one does not interrupt a tool, it removes it until a person opens
+`/mcp` and retries. Closing a session is a person saying they are done with the whole session, and
+carries no such cost.
+
+*How they are recognised, and how weak that is.* `AGENTDECK_REAP_KEEP`, a case-insensitive pattern
+against the command line, defaulting to `mcp|modelcontextprotocol`. A name match: an MCP server
+whose command says neither string is not recognised, and a process that merely has one of them in
+its path is spared for the wrong reason. An unusable pattern falls back to the default rather than
+sparing nothing, because "keep nothing" is the direction that silently widens what gets killed.
+
+*Considered and not taken:* sparing by AGE instead - MCP servers start with the session, so on the
+live deck the pane was `1d 00:33:43` old and its MCP `1d 00:33:42`, one second apart, while a
+leftover from a finished task is much younger. Structurally better than a name. Rejected because a
+tool that kills things should be predictable to the person reading its output, and "it spared that
+because the name says mcp" is explainable in a way "it spared that because it started within N
+seconds of the pane" is not. Recorded so the option is not lost.
+
+*What is spared is printed*, not silently skipped: a pass that says nothing about what it left
+behind cannot be told from one that never looked.
+
+*Measured on the live deck, and it corrected an assumption in the entry above.* The operator closed
+`project-a-claude-7fb1bc8d` while the OLD build was still running - the one with no tree kill. All
+three processes were gone afterwards: the pane, `npm exec @playwright/mcp`, and the
+`playwright-mcp` node under it, with nothing playwright-shaped left anywhere on the machine. **MCP
+servers were never the leftover problem.** They are ordinary children of the agent, connected by
+pipes, so the agent exiting closes their stdin and a stdio server shuts itself down; SIGHUP reaches
+the foreground group as well. What survives a close is what was DETACHED - the `nohup` case the
+reproduction found - which is what the tree kill is for. The previous entry implied the tree kill is
+what saves MCP cleanup on close; it is not, and both are true independently.
+
+*Two defects in the new test, both worth recording because both passed silently in one direction.*
+
+- **The fixture SIGKILLed the whole suite.** `strays.push(keep.plain, keep.mcp)` sat beside its
+  declaration rather than after the fixture ran, so both were still `0`, and `process.kill(0, ...)`
+  signals the caller's entire process group. Every case passed and the run died with no summary and
+  nothing marked failed - the worst shape a test failure can take. `scripts/reap.mjs` guards `pid > 1`
+  for exactly this reason and the test did not.
+- **macOS SIGKILLs a copied system binary.** The first fixture made an "MCP-looking" process by
+  copying `/bin/sleep` to a file named `playwright-mcp`; the copy has no valid signature and the
+  kernel kills it on exec, so the child never existed and the case failed for a reason that had
+  nothing to do with the code. Verified directly: `cp /bin/sleep ./playwright-mcp && ./playwright-mcp 1`
+  exits 137. The marker is now a real argv entry instead.
+
+*Verified:* 13/13 in `reap.test.ts`, with the new case checked by disabling the KEEP filter and
+watching it go red before restoring it.

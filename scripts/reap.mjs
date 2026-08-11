@@ -44,9 +44,36 @@ const SOCKET_PREFIX = process.env["AGENTDECK_REAP_SOCKET_PREFIX"] ?? "agentdeck-
 const SPARE_LISTENERS = process.env["AGENTDECK_REAP_SPARE_LISTENERS"] === "1";
 
 // Whether what an agent started inside a LIVE pane is collected too - the one class here that takes
-// processes nobody abandoned. On by the operator's decision, knowing it takes the running agent's
-// MCP servers with it. Set to 0 to collect only what has actually lost its parent.
+// processes nobody abandoned. On by the operator's decision. What it does NOT take is anything
+// matching KEEP below. Set to 0 to collect only what has actually lost its parent.
 const REAP_PANE_CHILDREN = (process.env["AGENTDECK_REAP_PANE_CHILDREN"] ?? "1") !== "0";
+
+/**
+ * Commands the TIMED pass leaves alone inside a live pane, as a case-insensitive pattern.
+ *
+ * MCP servers by default. Claude Code does not reconnect a stdio MCP server that dies - its
+ * documentation says so, and `@playwright/mcp` is stdio - so collecting one does not interrupt a
+ * running agent's tools, it removes them until a person opens `/mcp` and retries. Closing a session
+ * still takes them: that path is a person saying they are done, and it does not consult this.
+ *
+ * A name match, with the weakness that implies: an MCP server whose command says neither "mcp" nor
+ * "modelcontextprotocol" is not recognised, and a process that merely has one of those strings in
+ * its path is spared for the wrong reason. Set AGENTDECK_REAP_KEEP to another pattern, or to
+ * something that matches nothing, to change it.
+ */
+const keepPattern = process.env["AGENTDECK_REAP_KEEP"] ?? "mcp|modelcontextprotocol";
+const KEEP = (() => {
+  try {
+    return new RegExp(keepPattern, "i");
+  } catch {
+    // An unusable pattern must not mean "keep nothing" - that would silently widen what is killed.
+    console.error(
+      `agentdeck-reap: AGENTDECK_REAP_KEEP is not a valid regular expression ` +
+        `(${JSON.stringify(keepPattern)}); falling back to the default rather than sparing nothing.`,
+    );
+    return /mcp|modelcontextprotocol/i;
+  }
+})();
 
 const log = (message) => {
   if (!JSON_OUT) console.log(message);
@@ -332,10 +359,12 @@ const livePanePids = async () => {
  * What the agents have started and not cleaned up, inside sessions that are still running.
  *
  * The pane process itself is never included - on this deck that IS the agent, and killing it ends
- * the session. Everything below it is, by the operator's decision and with its consequence named:
- * an agent's MCP servers live here, so a pass takes those too and the running agent loses whatever
- * they provided until it restarts them. This is the one class where a process with a living parent,
- * doing work nobody has abandoned, is collected on purpose.
+ * the session. Nor is anything matching KEEP, which is MCP servers by default: an agent cannot
+ * restart a stdio one, so taking it does not interrupt a tool, it removes it. Everything else below
+ * the pane is collected, which makes this the one class that takes processes with a living parent.
+ *
+ * Closing a session is a different path (`Tmux.kill`) and does not consult KEEP: a person pressing
+ * Close has said they are done with the session, MCP servers included.
  */
 const paneChildren = async (rows, spared) => {
   if (!REAP_PANE_CHILDREN) return [];
@@ -345,18 +374,24 @@ const paneChildren = async (rows, spared) => {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const found = [];
   for (const pane of panes) {
-    const tree = [...descendants(children, pane)].filter(
-      (pid) =>
-        pid !== pane &&
-        pid !== process.pid &&
-        !spared.has(pid) &&
-        (byPid.get(pid)?.ageMs ?? 0) >= MIN_AGE_MS,
-    );
-    if (tree.length === 0) continue;
+    const kept = [];
+    const tree = [...descendants(children, pane)].filter((pid) => {
+      if (pid === pane || pid === process.pid || spared.has(pid)) return false;
+      const row = byPid.get(pid);
+      if ((row?.ageMs ?? 0) < MIN_AGE_MS) return false;
+      if (KEEP.test(row?.command ?? "")) {
+        kept.push(pid);
+        return false;
+      }
+      return true;
+    });
+    if (tree.length === 0 && kept.length === 0) continue;
     found.push({
       pane,
       paneCommand: byPid.get(pane)?.command ?? "",
       tree,
+      kept,
+      keptRows: kept.map((pid) => byPid.get(pid)).filter((row) => row !== undefined),
       treeKb: tree.reduce((sum, pid) => sum + (byPid.get(pid)?.rssKb ?? 0), 0),
       rows: tree.map((pid) => byPid.get(pid)).filter((row) => row !== undefined),
     });
@@ -506,7 +541,7 @@ for (const row of orphaned) {
 }
 
 log(
-  `\nstarted inside live ${liveSocket} panes: ${REAP_PANE_CHILDREN ? `${String(panes.length)} pane(s) with something under them` : "NOT CHECKED (AGENTDECK_REAP_PANE_CHILDREN=0)"}`,
+  `\nstarted inside live ${liveSocket} panes: ${REAP_PANE_CHILDREN ? `${String(panes.length)} pane(s) with something under them (keeping /${KEEP.source}/i)` : "NOT CHECKED (AGENTDECK_REAP_PANE_CHILDREN=0)"}`,
 );
 for (const entry of panes) {
   reclaimedKb += entry.treeKb;
@@ -519,7 +554,12 @@ for (const entry of panes) {
       `    pid ${String(row.pid)}  ${minutes(row.ageMs)}  ${String(row.rssKb)}KB  ${short(row.command)}`,
     );
   }
-  if (KILL) {
+  // What is SPARED is printed too. A pass that silently skipped an agent's MCP server would be
+  // indistinguishable from one that never saw it, and that difference is the whole point of KEEP.
+  for (const row of entry.keptRows) {
+    log(`    kept  ${String(row.pid)}  ${minutes(row.ageMs)}  ${short(row.command)}`);
+  }
+  if (KILL && entry.tree.length > 0) {
     const survivors = [];
     for (const pid of [...entry.tree].reverse()) if (!(await stop(pid))) survivors.push(pid);
     log(
@@ -573,12 +613,13 @@ if (JSON_OUT) {
           command,
         })),
         paneChildrenChecked: REAP_PANE_CHILDREN,
-        paneChildren: panes.map(({ pane, paneCommand, treeKb, tree, rows: kids }) => ({
+        paneChildren: panes.map(({ pane, paneCommand, treeKb, tree, rows: kids, keptRows }) => ({
           pane,
           paneCommand,
           treeKb,
           treeSize: tree.length,
           commands: kids.map((row) => row.command),
+          keptCommands: keptRows.map((row) => row.command),
         })),
         emptyServers: empty.map(({ pid, ageMs, rssKb, socket }) => ({ pid, ageMs, rssKb, socket })),
         staleSockets: sockets.dead.length,

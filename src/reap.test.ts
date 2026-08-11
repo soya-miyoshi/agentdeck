@@ -178,9 +178,61 @@ const socketNames = {
   busy: `${base}busy-sock`,
   live: `${base}live-sock`,
   pane: `${base}pane-sock`,
+  keep: `${base}keep-sock`,
 };
 // The pane process and the one thing it started, on a socket this file treats as the live deck's.
 const pane = { pid: 0, child: 0 };
+// A second pane holding one ordinary leftover and one that LOOKS like an MCP server, so the timed
+// pass can be shown to take the first and leave the second.
+const keep = { pid: 0, plain: 0, mcp: 0 };
+
+/**
+ * A pane holding one ordinary leftover and one whose command line says "mcp".
+ *
+ * The marker is a real argv entry, because what the reaper matches on is the command line `ps`
+ * prints - a fixture that only pretended to be an MCP server in a comment would prove nothing about
+ * the pattern that does the sparing. NOT a copy of `/bin/sleep` renamed: macOS SIGKILLs a copied
+ * system binary for its now-invalid signature, which cost a run to work out (exit 137, no child).
+ */
+const keepSession = (socket: string): void => {
+  sockets.push(socket);
+  const idle = `${process.execPath} -e "setInterval(()=>{},1e9)"`;
+  execFileSync(
+    "tmux",
+    [
+      "-L",
+      socket,
+      "new-session",
+      "-d",
+      "-s",
+      "work",
+      "/bin/sh",
+      "-c",
+      `/bin/sleep 100000 & ${idle} playwright-mcp & exec /bin/sleep 200000`,
+    ],
+    { stdio: "ignore" },
+  );
+  keep.pid = Number(
+    execFileSync("tmux", ["-L", socket, "list-panes", "-a", "-F", "#{pane_pid}"], {
+      encoding: "utf8",
+    }).trim(),
+  );
+  for (let i = 0; i < 100 && (keep.plain === 0 || keep.mcp === 0); i += 1) {
+    const kids = spawnSync("/usr/bin/pgrep", ["-P", String(keep.pid)], { encoding: "utf8" })
+      .stdout.trim()
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => pid > 1);
+    for (const pid of kids) {
+      const cmd = spawnSync("/bin/ps", ["-o", "command=", "-p", String(pid)], {
+        encoding: "utf8",
+      }).stdout;
+      if (cmd.includes("playwright-mcp")) keep.mcp = pid;
+      else keep.plain = pid;
+    }
+    if (keep.plain === 0 || keep.mcp === 0) spawnSync("/bin/sleep", ["0.05"]);
+  }
+};
 
 /** A session whose pane process has a child, which is the shape an agent with an MCP server has. */
 const paneSession = (socket: string): void => {
@@ -241,6 +293,11 @@ before(() => {
   tmuxServer(socketNames.busy, true);
   tmuxServer(socketNames.live, false);
   paneSession(socketNames.pane);
+  keepSession(socketNames.keep);
+  // AFTER the fixture runs, not beside its declaration: pushed early these are still 0, and
+  // `process.kill(0, ...)` signals this runner's whole process group. That SIGKILLed the suite
+  // after every case had passed, so the run died with no summary and nothing marked failed.
+  strays.push(keep.pid, keep.plain, keep.mcp);
 
   // The listeners have to exist before any pass, or neither listener case proves anything.
   for (let i = 0; i < 100 && !listens(pids.listening); i += 1) spawnSync("/bin/sleep", ["0.05"]);
@@ -251,6 +308,9 @@ before(() => {
 
 after(() => {
   for (const pid of strays) {
+    // `pid > 1` for the same reason scripts/reap.mjs checks it: 0 signals this process group and
+    // -1 every process this user owns.
+    if (!Number.isInteger(pid) || pid <= 1) continue;
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -308,6 +368,25 @@ void describe("what --kill reaps", () => {
 
   // The class that takes processes nobody abandoned: what an agent started inside a session that is
   // still running. The pane process is the agent itself and has to come through it alive.
+  // The operator's split: the TIMED pass leaves MCP servers alone, because Claude Code does not
+  // reconnect a stdio one and taking it removes a tool rather than interrupting it. Closing a
+  // session is the other path and takes them - that is asserted in tmux.test.ts, not here.
+  void test("an ordinary leftover in a live pane, but NOT the one that looks like an MCP server", async () => {
+    assert.ok(keep.plain > 1 && keep.mcp > 1, "the keep fixture did not produce both children");
+    const pass = reap({
+      kill: true,
+      roots: roots.kill,
+      liveSocket: socketNames.keep,
+      paneChildren: true,
+    });
+    await settle();
+    assert.ok(!alive(keep.plain), `the ordinary leftover survived\n${pass.output}`);
+    assert.ok(alive(keep.mcp), `the MCP server was reaped by the timed pass\n${pass.output}`);
+    // Reported rather than silently skipped: a pass that says nothing about what it spared cannot
+    // be told from one that never looked.
+    assert.match(pass.output, /kept\s+\d+/, pass.output);
+  });
+
   void test("what a live pane started, while leaving the pane itself alone", async () => {
     assert.ok(pane.pid > 1 && pane.child > 1, "the pane fixture did not start");
     const pass = reap({

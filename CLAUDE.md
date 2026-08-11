@@ -58,17 +58,19 @@ Three things about the defaults, all of them the operator's decision and all of 
 - **A running dev server is collected.** The exemption that spared a tree holding a listening socket
   is off (`AGENTDECK_REAP_SPARE_LISTENERS=1` restores it). A `pnpm dev` whose terminal has closed is
   garbage here, and it goes with its whole tree - turbo, vite, wrangler, esbuild.
-- **What a LIVE agent started is collected**, which includes its MCP servers. The pane process
-  itself - the agent - is never touched, but a session loses whatever those servers provided until
-  it restarts them. `AGENTDECK_REAP_PANE_CHILDREN=0` limits collection to what has actually lost
-  its parent.
+- **What a LIVE agent started is collected** - except MCP servers, which the timed pass leaves
+  alone. Claude Code does not reconnect a stdio MCP server that dies, so taking one removes a tool
+  rather than interrupting it. The pane process itself - the agent - is never touched either.
+  `AGENTDECK_REAP_KEEP` is the pattern that spares them; `AGENTDECK_REAP_PANE_CHILDREN=0` limits
+  collection to what has actually lost its parent.
 - **Only agentdeck's own tmux socket is in scope.** The operator's personal tmux runs on the default
   socket and had five sessions of their own shells on it when this was written. Nothing here may
   reach that, and "everything attached to tmux" would have swept all of it.
 
-**Closing a session on the phone ends its whole tree**, not just the pane. That is a separate path
-from the reaper (`Tmux.kill`), it is unambiguous - a person pressed Close - and it is where the
-leftover `python` case is actually solved.
+**Closing a session on the phone ends its whole tree**, not just the pane, and unlike the timed pass
+it does NOT spare MCP servers - a person pressing Close has said they are done with the session. It
+is a separate path from the reaper (`Tmux.kill`) and it is where the leftover `python` case is
+actually solved.
 
 `make up` runs the deck with the watchdog supervising; `make down` stops the loop and then the
 server. Neither survives a reboot: the LaunchDaemon is still Soya's to install.
