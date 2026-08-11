@@ -18,6 +18,7 @@ import { CwdAllowlist } from "./cwds.ts";
 import { createHandler } from "./http.ts";
 import { Hub } from "./hub.ts";
 import { clientUrl, firstRunLines } from "./qr.ts";
+import { runReaper, startReaping } from "./reap-schedule.ts";
 import { Registry } from "./registry.ts";
 import { withClient } from "./static.ts";
 import { Tmux } from "./tmux.ts";
@@ -439,6 +440,7 @@ export const main = async (): Promise<void> => {
         version: VERSION,
         origin: process.env["AGENTDECK_ORIGIN"],
         probe: async () => await probeTmux(socket),
+        panePids: async () => await tmux.panePids(),
         streamFor: (id) => hub.streamFor(id),
         uploads,
         onStateDeclared: (id, state) => {
@@ -529,8 +531,36 @@ export const main = async (): Promise<void> => {
       console.log(line);
   }
 
+  // Collecting what sessions leave behind, for as long as this process is up. The deck is the gate
+  // the operator asked for - no launchd job, and nothing reaping on a Mac where agentdeck is not
+  // running. Announced rather than silent: it kills processes, so a person reading the boot output
+  // has to be able to see that it is on and how to turn it off.
+  const reapEveryMs = Number(env("AGENTDECK_REAP_INTERVAL_MS", String(60 * 60 * 1000)));
+  let stopReaping = (): void => {};
+  if (
+    Number.isFinite(reapEveryMs) &&
+    reapEveryMs > 0 &&
+    allowlist.roots.length + mounts.length > 0
+  ) {
+    stopReaping = startReaping(reapEveryMs, runReaper(process.env), (line) => {
+      console.log(line);
+    });
+    // Seconds below a minute: a 700ms interval reported as "every 0 minute(s)" is a sentence that
+    // makes the operator doubt the number they set.
+    const every =
+      reapEveryMs < 60_000
+        ? `${String(Math.round(reapEveryMs / 1000))} second(s)`
+        : `${String(Math.round(reapEveryMs / 60000))} minute(s)`;
+    console.log(
+      `agentdeck: collecting abandoned processes under the roots every ${every}. ` +
+        `AGENTDECK_REAP_INTERVAL_MS=0 turns it off; \`make reap\` shows what it would take ` +
+        `without taking it.`,
+    );
+  }
+
   const shutdown = (): void => {
     clearInterval(syncTimer);
+    stopReaping();
     ws.close();
     // Detach from every session without killing anything. The agents keep running; this process
     // going away must not be the thing that ends someone's work.

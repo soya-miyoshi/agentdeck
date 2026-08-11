@@ -37,6 +37,17 @@ const liveSocket = process.env["TMUX_SOCKET"] ?? "agentdeck";
 // namespace of their own rather than reaping the machine's real sockets as a side effect.
 const SOCKET_PREFIX = process.env["AGENTDECK_REAP_SOCKET_PREFIX"] ?? "agentdeck-";
 
+// Whether a process whose subtree holds a listening socket is spared. OFF by the operator's
+// decision: a dev server left running is exactly what they want collected, and the exemption was
+// keeping the largest thing on the list alive. Set to 1 to put it back. The deck's own listener is
+// spared separately and unconditionally, so this never reaches it.
+const SPARE_LISTENERS = process.env["AGENTDECK_REAP_SPARE_LISTENERS"] === "1";
+
+// Whether what an agent started inside a LIVE pane is collected too - the one class here that takes
+// processes nobody abandoned. On by the operator's decision, knowing it takes the running agent's
+// MCP servers with it. Set to 0 to collect only what has actually lost its parent.
+const REAP_PANE_CHILDREN = (process.env["AGENTDECK_REAP_PANE_CHILDREN"] ?? "1") !== "0";
+
 const log = (message) => {
   if (!JSON_OUT) console.log(message);
 };
@@ -145,8 +156,10 @@ const pidsListening = async (args) => {
 const listeningPids = async () =>
   (await pidsListening(["-ti", `tcp:${port}`, "-sTCP:LISTEN"])) ?? [];
 
-/** Everything holding a listening TCP socket, or `null` when that could not be established. */
+/** Everything holding a listening TCP socket, or `null` when that could not be established. An
+ *  empty set when the exemption is off, which is also the query not being run at all. */
 const serverPids = async () => {
+  if (!SPARE_LISTENERS) return new Set();
   const pids = await pidsListening(["-ti", "-sTCP:LISTEN"]);
   return pids === null ? null : new Set(pids);
 };
@@ -192,6 +205,21 @@ const alive = (pid) => {
   }
 };
 
+/**
+ * Whether a pid is done, counting a zombie as done.
+ *
+ * A killed child whose parent never calls `wait` stays in the table as a zombie, and `kill(pid, 0)`
+ * succeeds against one - so the plain check called it a survivor. That is exactly the shape this
+ * tool creates: the pane children it collects are killed under a parent it deliberately leaves
+ * running. A zombie holds no memory and runs nothing; reporting it as SURVIVED is a false alarm
+ * about the one thing an operator is watching this output for.
+ */
+const gone = async (pid) => {
+  if (!alive(pid)) return true;
+  const { failed, stdout } = await sh(PS, ["-o", "state=", "-p", String(pid)]);
+  return !failed && stdout.trim().startsWith("Z");
+};
+
 /** SIGTERM, wait, SIGKILL. `pid > 1` is checked by `alive`: 0 and -1 signal whole groups. */
 const stop = async (pid) => {
   if (!alive(pid)) return true;
@@ -202,7 +230,7 @@ const stop = async (pid) => {
   }
   const deadline = Date.now() + STOP_GRACE_MS;
   while (Date.now() < deadline) {
-    if (!alive(pid)) return true;
+    if (await gone(pid)) return true;
     await new Promise((r) => setTimeout(r, 100));
   }
   try {
@@ -210,7 +238,7 @@ const stop = async (pid) => {
   } catch {
     // Gone between the check and the signal is the outcome wanted.
   }
-  return !alive(pid);
+  return await gone(pid);
 };
 
 // -----------------------------------------------------------------------------------------
@@ -245,20 +273,95 @@ const orphans = async (rows, roots, spared, serving) => {
       // so every cheap test above says "orphan" about the one process that must survive this.
       !row.command.includes(join("src", "server.ts")),
   );
-  // A tree with a listening socket in it is serving something, whatever its parent looks like.
-  // Measured against a real machine: `pnpm dev`, 17 hours old, ppid 1 because the terminal that
-  // started it had closed, with vite and wrangler listening two levels below - every other test
-  // here called it garbage. It is the false positive this whole class is prone to.
+  // With the listener exemption on, a tree holding a listening socket is serving something whatever
+  // its parent looks like, and is spared. Off, `serving` is empty and this filter passes everything.
   const children = childMap(rows);
   const idle = cheap.filter(
     (row) => ![...descendants(children, row.pid)].some((pid) => serving.has(pid)),
   );
   const cwds = await cwdsOf(idle.map((row) => row.pid));
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
   // A cwd that could not be read is not under a root, so it is left alone: the unreadable case and
   // the outside-every-root case must reach the same answer.
   return idle
     .map((row) => ({ ...row, cwd: cwds.get(row.pid) ?? "" }))
-    .filter((row) => under(roots, row.cwd));
+    .filter((row) => under(roots, row.cwd))
+    .map((row) => {
+      // The WHOLE tree, not the root of it. `pnpm dev` is four processes deep - turbo, then vite and
+      // wrangler, then an esbuild service - and signalling only the top reparents the rest to launchd,
+      // where they look like fresh orphans and survive until some later pass happens to catch them.
+      // The descendants are what the operator actually asked to be rid of.
+      const tree = [...descendants(children, row.pid)].filter((pid) => !spared.has(pid));
+      return {
+        ...row,
+        tree,
+        treeKb: tree.reduce((sum, pid) => sum + (byPid.get(pid)?.rssKb ?? 0), 0),
+      };
+    });
+};
+
+// -----------------------------------------------------------------------------------------
+// Class 1b: what the agents started inside LIVE panes
+// -----------------------------------------------------------------------------------------
+
+/**
+ * Every pane on the DECK'S OWN socket, by pid.
+ *
+ * `-L ${liveSocket}` and nothing else, which is the whole safety boundary of this class. The
+ * operator's own tmux runs on the default socket and had five sessions of their own shells on it
+ * when this was written; "everything attached to tmux" would have swept all of them.
+ */
+const livePanePids = async () => {
+  const { failed, stdout } = await sh("tmux", [
+    "-L",
+    liveSocket,
+    "list-panes",
+    "-a",
+    "-F",
+    "#{pane_pid}",
+  ]);
+  if (failed) return [];
+  return stdout
+    .trim()
+    .split("\n")
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isInteger(pid) && pid > 1);
+};
+
+/**
+ * What the agents have started and not cleaned up, inside sessions that are still running.
+ *
+ * The pane process itself is never included - on this deck that IS the agent, and killing it ends
+ * the session. Everything below it is, by the operator's decision and with its consequence named:
+ * an agent's MCP servers live here, so a pass takes those too and the running agent loses whatever
+ * they provided until it restarts them. This is the one class where a process with a living parent,
+ * doing work nobody has abandoned, is collected on purpose.
+ */
+const paneChildren = async (rows, spared) => {
+  if (!REAP_PANE_CHILDREN) return [];
+  const panes = await livePanePids();
+  if (panes.length === 0) return [];
+  const children = childMap(rows);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const found = [];
+  for (const pane of panes) {
+    const tree = [...descendants(children, pane)].filter(
+      (pid) =>
+        pid !== pane &&
+        pid !== process.pid &&
+        !spared.has(pid) &&
+        (byPid.get(pid)?.ageMs ?? 0) >= MIN_AGE_MS,
+    );
+    if (tree.length === 0) continue;
+    found.push({
+      pane,
+      paneCommand: byPid.get(pane)?.command ?? "",
+      tree,
+      treeKb: tree.reduce((sum, pid) => sum + (byPid.get(pid)?.rssKb ?? 0), 0),
+      rows: tree.map((pid) => byPid.get(pid)).filter((row) => row !== undefined),
+    });
+  }
+  return found;
 };
 
 // -----------------------------------------------------------------------------------------
@@ -361,8 +464,9 @@ if (roots.length === 0) {
 const rows = await processTable();
 const spared = new Set(await listeningPids());
 const serving = await serverPids();
-const [dead, empty, sockets] = [
+const [dead, panes, empty, sockets] = [
   await orphans(rows, roots, spared, serving),
+  await paneChildren(rows, spared),
   await abandonedServers(rows),
   await staleSockets(),
 ];
@@ -384,10 +488,44 @@ if (dead === null) {
   );
 } else log(`\norphaned processes under a root: ${String(orphaned.length)}`);
 for (const row of orphaned) {
-  reclaimedKb += row.rssKb;
-  log(`  pid ${String(row.pid)}  ${minutes(row.ageMs)}  ${String(row.rssKb)}KB  ${row.cwd}`);
+  reclaimedKb += row.treeKb;
+  const extra = row.tree.length - 1;
+  log(
+    `  pid ${String(row.pid)}  ${minutes(row.ageMs)}  ${String(row.treeKb)}KB  ${row.cwd}` +
+      (extra > 0 ? `  (+${String(extra)} in its tree)` : ""),
+  );
   log(`    ${short(row.command)}`);
-  if (KILL) log(`    -> ${(await stop(row.pid)) ? "reaped" : "SURVIVED the kill"}`);
+  if (KILL) {
+    // Deepest first, so a supervisor cannot notice a child dying and restart it before its own turn.
+    const survivors = [];
+    for (const pid of [...row.tree].reverse()) if (!(await stop(pid))) survivors.push(pid);
+    log(
+      `    -> ${survivors.length === 0 ? `reaped ${String(row.tree.length)} process(es)` : `SURVIVED the kill: ${survivors.join(", ")}`}`,
+    );
+  }
+}
+
+log(
+  `\nstarted inside live ${liveSocket} panes: ${REAP_PANE_CHILDREN ? `${String(panes.length)} pane(s) with something under them` : "NOT CHECKED (AGENTDECK_REAP_PANE_CHILDREN=0)"}`,
+);
+for (const entry of panes) {
+  reclaimedKb += entry.treeKb;
+  log(
+    `  pane ${String(entry.pane)}  ${String(entry.tree.length)} process(es)  ` +
+      `${String(entry.treeKb)}KB  under: ${short(entry.paneCommand)}`,
+  );
+  for (const row of entry.rows) {
+    log(
+      `    pid ${String(row.pid)}  ${minutes(row.ageMs)}  ${String(row.rssKb)}KB  ${short(row.command)}`,
+    );
+  }
+  if (KILL) {
+    const survivors = [];
+    for (const pid of [...entry.tree].reverse()) if (!(await stop(pid))) survivors.push(pid);
+    log(
+      `    -> ${survivors.length === 0 ? `reaped ${String(entry.tree.length)} process(es)` : `SURVIVED the kill: ${survivors.join(", ")}`}`,
+    );
+  }
 }
 
 log(`\ntmux servers in ${SOCKET_PREFIX}* holding no sessions: ${String(empty.length)}`);
@@ -411,9 +549,11 @@ if (KILL) {
   log(`  removed ${String(removed)}`);
 }
 
+const paneProcesses = panes.reduce((sum, entry) => sum + entry.tree.length, 0);
+const orphanProcesses = orphaned.reduce((sum, row) => sum + row.tree.length, 0);
 log(
   `\n${KILL ? "reclaimed" : "would reclaim"} about ${String(Math.round(reclaimedKb / 1024))}MB ` +
-    `across ${String(orphaned.length + empty.length)} processes`,
+    `across ${String(orphanProcesses + paneProcesses + empty.length)} processes`,
 );
 
 if (JSON_OUT) {
@@ -424,12 +564,21 @@ if (JSON_OUT) {
         // null rather than [] when the class was abandoned: a consumer must not read "could not
         // check" as "nothing to collect".
         orphansChecked: dead !== null,
-        orphans: orphaned.map(({ pid, ageMs, rssKb, cwd, command }) => ({
+        orphans: orphaned.map(({ pid, ageMs, treeKb, cwd, command, tree }) => ({
           pid,
           ageMs,
-          rssKb,
+          treeKb,
+          treeSize: tree.length,
           cwd,
           command,
+        })),
+        paneChildrenChecked: REAP_PANE_CHILDREN,
+        paneChildren: panes.map(({ pane, paneCommand, treeKb, tree, rows: kids }) => ({
+          pane,
+          paneCommand,
+          treeKb,
+          treeSize: tree.length,
+          commands: kids.map((row) => row.command),
         })),
         emptyServers: empty.map(({ pid, ageMs, rssKb, socket }) => ({ pid, ageMs, rssKb, socket })),
         staleSockets: sockets.dead.length,

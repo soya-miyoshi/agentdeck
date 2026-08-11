@@ -38,13 +38,21 @@ const temp = (name: string): string => {
   return dir;
 };
 
+/**
+ * Whether a pid is still running, counting a zombie as not.
+ *
+ * `kill(pid, 0)` succeeds against a zombie, and the pane cases create them on purpose: the child is
+ * killed under a parent left deliberately alive, and a `/bin/sleep` parent never calls `wait`. A
+ * plain signal test therefore reported a reaped process as a survivor and failed a passing case.
+ */
 const alive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  const state = spawnSync("/bin/ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf8" });
+  return !state.stdout.trim().startsWith("Z");
 };
 
 const isOrphan = (pid: number): boolean => {
@@ -123,6 +131,8 @@ interface Options {
   minAgeMs?: string;
   prefix?: string;
   liveSocket?: string;
+  spareListeners?: boolean;
+  paneChildren?: boolean;
 }
 
 /** One pass of the reaper, scoped to the caller's own root and socket namespace. */
@@ -141,6 +151,10 @@ const reap = (options: Options = {}): Pass => {
         AGENTDECK_REAP_MIN_AGE_MS: options.minAgeMs ?? "1",
         AGENTDECK_REAP_STOP_GRACE_MS: "1000",
         TMUX_SOCKET: options.liveSocket ?? `${base}unused`,
+        AGENTDECK_REAP_SPARE_LISTENERS: options.spareListeners === true ? "1" : "0",
+        // Off unless a case asks for it: most cases have no live socket to look at, and leaving it
+        // on would make each of them shell out to tmux for nothing.
+        AGENTDECK_REAP_PANE_CHILDREN: options.paneChildren === true ? "1" : "0",
         TMUX_TMPDIR: process.env["TMUX_TMPDIR"] ?? "/private/tmp",
       },
     },
@@ -154,14 +168,51 @@ const roots = {
   kill: "",
   outside: "",
   listening: "",
+  listenReaped: "",
   young: "",
   parented: "",
 };
-const pids = { report: 0, kill: 0, outside: 0, listening: 0, parented: 0 };
+const pids = { report: 0, kill: 0, outside: 0, listening: 0, listenReaped: 0, parented: 0 };
 const socketNames = {
   empty: `${base}empty-sock`,
   busy: `${base}busy-sock`,
   live: `${base}live-sock`,
+  pane: `${base}pane-sock`,
+};
+// The pane process and the one thing it started, on a socket this file treats as the live deck's.
+const pane = { pid: 0, child: 0 };
+
+/** A session whose pane process has a child, which is the shape an agent with an MCP server has. */
+const paneSession = (socket: string): void => {
+  sockets.push(socket);
+  execFileSync(
+    "tmux",
+    // `exec` after backgrounding, not `wait`: with `wait` the shell returns as soon as its child is
+    // killed and the pane exits on its own, so the case failed claiming the reaper had killed the
+    // pane when the report right above it showed it had not. A real agent outlives its MCP server.
+    [
+      "-L",
+      socket,
+      "new-session",
+      "-d",
+      "-s",
+      "work",
+      "/bin/sh",
+      "-c",
+      "/bin/sleep 100000 & exec /bin/sleep 200000",
+    ],
+    { stdio: "ignore" },
+  );
+  pane.pid = Number(
+    execFileSync("tmux", ["-L", socket, "list-panes", "-a", "-F", "#{pane_pid}"], {
+      encoding: "utf8",
+    }).trim(),
+  );
+  for (let i = 0; i < 100 && pane.child === 0; i += 1) {
+    const kid = spawnSync("/usr/bin/pgrep", ["-P", String(pane.pid)], { encoding: "utf8" });
+    pane.child = Number(kid.stdout.trim().split("\n")[0] ?? 0);
+    if (pane.child === 0) spawnSync("/bin/sleep", ["0.05"]);
+  }
 };
 
 before(() => {
@@ -181,12 +232,19 @@ before(() => {
   pids.parented = child.pid ?? 0;
   strays.push(pids.parented);
 
+  pids.listenReaped = orphan(
+    roots.listenReaped,
+    `exec ${process.execPath} -e "require('node:net').createServer().listen(0,'127.0.0.1');setInterval(()=>{},1e9)"`,
+  );
+
   tmuxServer(socketNames.empty, false);
   tmuxServer(socketNames.busy, true);
   tmuxServer(socketNames.live, false);
+  paneSession(socketNames.pane);
 
-  // The listener has to exist before any pass, or the exemption case proves nothing.
+  // The listeners have to exist before any pass, or neither listener case proves anything.
   for (let i = 0; i < 100 && !listens(pids.listening); i += 1) spawnSync("/bin/sleep", ["0.05"]);
+  for (let i = 0; i < 100 && !listens(pids.listenReaped); i += 1) spawnSync("/bin/sleep", ["0.05"]);
   // The one age wait for the whole file. See the header.
   spawnSync("/bin/sleep", ["1.2"]);
 });
@@ -238,6 +296,30 @@ void describe("what --kill reaps", () => {
     await settle();
     assert.ok(!socketAnswers(socketNames.empty), `it survived --kill\n${pass.output}`);
   });
+
+  // The default the operator chose, and the reverse of the case below it. A dev server left running
+  // is not something they want kept alive, so a listening tree is ordinary garbage now.
+  void test("a listening tree, because sparing them is no longer the default", async () => {
+    assert.ok(listens(pids.listenReaped), "the fixture never listened, so this proves nothing");
+    const pass = reap({ kill: true, roots: roots.listenReaped });
+    await settle();
+    assert.ok(!alive(pids.listenReaped), `a listening tree was spared by default\n${pass.output}`);
+  });
+
+  // The class that takes processes nobody abandoned: what an agent started inside a session that is
+  // still running. The pane process is the agent itself and has to come through it alive.
+  void test("what a live pane started, while leaving the pane itself alone", async () => {
+    assert.ok(pane.pid > 1 && pane.child > 1, "the pane fixture did not start");
+    const pass = reap({
+      kill: true,
+      roots: roots.kill,
+      liveSocket: socketNames.pane,
+      paneChildren: true,
+    });
+    await settle();
+    assert.ok(!alive(pane.child), `the pane's child survived\n${pass.output}`);
+    assert.ok(alive(pane.pid), `the PANE was reaped, which ends the session\n${pass.output}`);
+  });
 });
 
 void describe("what --kill must never touch", () => {
@@ -253,10 +335,12 @@ void describe("what --kill must never touch", () => {
   });
 
   // Measured on a real machine: `pnpm dev`, 17 hours old, ppid 1 because its terminal had closed,
-  // with the listeners two levels below it. Every other condition called it garbage.
-  void test("an orphan whose tree holds a listening socket", async () => {
+  // with the listeners two levels below it. Every other condition called it garbage. The exemption
+  // that spares it is OFF by default now - the operator decided a dev server left running is
+  // exactly what they want collected - so this asks for it explicitly.
+  void test("an orphan whose tree holds a listening socket, when asked to spare them", async () => {
     assert.ok(listens(pids.listening), "the fixture never listened, so this case proves nothing");
-    const pass = reap({ kill: true, roots: roots.listening });
+    const pass = reap({ kill: true, roots: roots.listening, spareListeners: true });
     await settle();
     assert.ok(alive(pids.listening), `a listening tree was reaped\n${pass.output}`);
   });
