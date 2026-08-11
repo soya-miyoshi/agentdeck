@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { endTree, readProcessTable, treeOf } from "./processes.ts";
+
 const run = promisify(execFile);
 
 // The tmux side of the session registry.
@@ -614,13 +616,56 @@ export class Tmux {
     }
   }
 
+  /**
+   * End the session AND everything it was running.
+   *
+   * `kill-session` alone kills the pane process and SIGHUPs its foreground group; anything an agent
+   * had detached - a `nohup`ed build, a dev server, an MCP server - is reparented to launchd and
+   * runs forever. Measured: of three pythons started in a pane, the two plain background ones died
+   * with it and the `nohup` one was still there days later. Closing a session on the phone is an
+   * unambiguous "I am done with this", so the tree goes with it.
+   *
+   * The tree is read BEFORE the session is killed, because afterwards the pane is gone and nothing
+   * connects those processes to this session any more.
+   */
   async kill(id: string): Promise<void> {
+    const doomed = await this.#treeOfSession(id);
     try {
       await this.#tmux(["kill-session", "-t", exactTarget(id)]);
     } catch (error) {
       // Killing a session that is already gone is the desired end state, not a failure.
       if (!isMissingSession(error) && !isEmptyTmux(error)) throw error;
     }
+    if (doomed.length === 0) return;
+    const survivors = await endTree(doomed);
+    if (survivors.length > 0) {
+      console.error(
+        `agentdeck: closing ${id} left ${String(survivors.length)} process(es) that refused to ` +
+          `die: ${survivors.join(", ")}`,
+      );
+    }
+  }
+
+  /**
+   * Every pid in this session's pane trees, pane first. Empty when the session is already gone.
+   *
+   * Every pane on the socket, filtered by an EXACT string match on the session name, rather than
+   * `list-panes -t =<id>`. `=` does not buy an exact match here the way it does for `kill-session`:
+   * measured on tmux 3.7b with sessions `alpha` and `other` on one socket, `kill-session -t =alp`
+   * fails but `list-panes -s -t =alp` returns alpha's pane. Since what this list feeds is a kill,
+   * a target that resolves by prefix would end another agent's processes.
+   */
+  async #treeOfSession(id: string): Promise<number[]> {
+    const panes = (await this.panePids())
+      .filter((entry) => entry.sessionId === id)
+      .map((entry) => entry.panePid);
+    if (panes.length === 0) return [];
+    const rows = await readProcessTable();
+    const found: number[] = [];
+    for (const pane of panes) {
+      for (const row of treeOf(rows, pane)) if (!found.includes(row.pid)) found.push(row.pid);
+    }
+    return found;
   }
 
   /**

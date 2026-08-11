@@ -66,6 +66,13 @@ Three things about the defaults, all of them the operator's decision and all of 
   socket and had five sessions of their own shells on it when this was written. Nothing here may
   reach that, and "everything attached to tmux" would have swept all of it.
 
+**Closing a session on the phone ends its whole tree**, not just the pane. That is a separate path
+from the reaper (`Tmux.kill`), it is unambiguous - a person pressed Close - and it is where the
+leftover `python` case is actually solved.
+
+`make up` runs the deck with the watchdog supervising; `make down` stops the loop and then the
+server. Neither survives a reboot: the LaunchDaemon is still Soya's to install.
+
 What it still will not collect: anything whose working directory is outside the roots. `ppid 1` with
 no controlling terminal describes every launchd daemon on this Mac, and the roots are the only thing
 separating them - so an orphan that changed directory elsewhere is missed on purpose.

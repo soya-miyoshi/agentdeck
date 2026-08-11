@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -886,5 +886,96 @@ void describe("captured scrollback is turned into bytes a terminal can be writte
 
   void test("a blank line stays a blank line rather than becoming nothing to join", () => {
     assert.equal(forTerminal("one\n    \ntwo"), "one\r\n\r\ntwo");
+  });
+});
+
+// Closing a session ends what it was RUNNING, not just the pane. The reproduction this exists for:
+// three pythons started in a pane, the pane killed - the two plain background ones died with it and
+// the `nohup` one was still running days later. That is the leftover an operator sees as "python is
+// still eating CPU after the task finished", and pressing Close on the phone has to end it.
+void describe("closing a session takes its processes with it", () => {
+  const socket = `agentdeck-close-${String(process.pid)}`;
+  const tmux = new Tmux({ socket });
+  const strays: number[] = [];
+
+  const running = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+    const state = spawnSync("/bin/ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf8" });
+    return !(state.stdout || "").trim().startsWith("Z");
+  };
+
+  after(() => {
+    for (const pid of strays) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already reaped, which is what this suite is about.
+      }
+    }
+    try {
+      execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+    } catch {
+      // Already gone: the desired end state.
+    }
+  });
+
+  void test("a detached grandchild is killed, where kill-session alone left it running", async () => {
+    await tmux.ensureServer();
+    // `nohup` and a redirect: the shape that SURVIVES kill-session. Without them the process dies
+    // of the SIGHUP anyway and the case would pass against code that does nothing.
+    await tmux.createOrAttach(
+      "leftover",
+      tmpdir(),
+      "/bin/sh",
+      ["-c", "nohup /bin/sleep 100000 >/dev/null 2>&1 & exec /bin/sleep 200000"],
+      { AGENTDECK_SESSION_ID: "leftover" },
+    );
+    let pane = 0;
+    let child = 0;
+    for (let i = 0; i < 100 && child === 0; i += 1) {
+      const found = (await tmux.panePids()).find((entry) => entry.sessionId === "leftover");
+      pane = found?.panePid ?? 0;
+      if (pane > 0) {
+        const kid = spawnSync("/usr/bin/pgrep", ["-P", String(pane)], { encoding: "utf8" });
+        child = Number(kid.stdout.trim().split("\n")[0] ?? 0);
+      }
+      if (child === 0) spawnSync("/bin/sleep", ["0.05"]);
+    }
+    assert.ok(pane > 1 && child > 1, "the fixture never produced a pane with a child");
+    strays.push(pane, child);
+
+    await tmux.kill("leftover");
+
+    for (let i = 0; i < 100 && (running(pane) || running(child)); i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(!running(pane), `the pane process ${String(pane)} survived the close`);
+    assert.ok(!running(child), `the detached child ${String(child)} survived the close`);
+  });
+
+  void test("a session whose name is a PREFIX of another is not touched", async () => {
+    // `=` is an exact target for kill-session but NOT for list-panes - measured on tmux 3.7b,
+    // `list-panes -s -t =alp` returns alpha's pane. Since that list feeds a kill, resolving by
+    // prefix would end a different agent's processes.
+    await tmux.ensureServer();
+    await tmux.createOrAttach("alpha", tmpdir(), "/bin/sleep", ["100000"], {
+      AGENTDECK_SESSION_ID: "alpha",
+    });
+    await tmux.createOrAttach("alphabet", tmpdir(), "/bin/sleep", ["100000"], {
+      AGENTDECK_SESSION_ID: "alphabet",
+    });
+    const paneOf = async (id: string): Promise<number> =>
+      (await tmux.panePids()).find((entry) => entry.sessionId === id)?.panePid ?? 0;
+    const survivor = await paneOf("alphabet");
+    assert.ok(survivor > 1, "the session that must survive never started");
+    strays.push(survivor);
+
+    await tmux.kill("alpha");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(running(survivor), `closing "alpha" killed "alphabet"'s pane ${String(survivor)}`);
   });
 });

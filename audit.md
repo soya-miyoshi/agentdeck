@@ -2374,3 +2374,55 @@ this repository's own history says that is where the defects are - the dead key 
 session picker. The hourly pass has not been observed on the live deck either: the running server is
 still the old build, deliberately not restarted, so nothing here has yet killed an MCP server in
 anger. Both need a person.
+
+## `make up`, and closing a session ending what it was running
+
+*`make up` / `make down`.* The watchdog is one pass and launchd is what repeats it, but nothing in
+this repository may run `launchctl` - that is plan 006's decision and `watchdog.test.ts` asserts it
+against `package.json`, `mise.toml` and every file in `scripts/`. So `up` is a loop: a pass every
+`AGENTDECK_WATCHDOG_EVERY` seconds for as long as it lives, pid in `~/.agentdeck/watchdog-loop.pid`,
+output appended to `~/Library/Logs/agentdeck-watchdog.log`. It does NOT survive a reboot or a
+logout. That is the whole difference between this and the LaunchDaemon, and it is said out loud
+rather than left to be discovered.
+
+No separate server start: a pass against a port with nothing on it starts one, so bringing up the
+supervisor brings up the deck through the same path that will recover it later. `.env` is sourced
+into the LOOP rather than only into a server, because `startServer` spawns `src/server.ts` with no
+`--env-file` - a server the watchdog recovers inherits the loop's environment, and without this it
+would come back with no `AGENTDECK_PROFILES` and no `AGENTDECK_ORIGIN`.
+
+`down` stops the loop first and the server second. The other order is the watchdog dutifully
+restarting what was just stopped, sixty seconds later, which presents as `make stop` being broken -
+so `stop` now prints a loud line when the loop is running.
+
+*Verified on the live machine, without disturbing it.* `make up` adopted the running server:
+`node process 22488 holds it` / `/api/health answered 200 in 15ms`, no restart. The `stop` warning
+and `down` were exercised with `PORT=59999` so the real server was never a target; the loop stopped,
+the pidfile was removed, and 22488 was still answering afterwards.
+
+*Closing a session now ends its process tree.* `kill-session` kills the pane process and SIGHUPs its
+foreground group; anything detached is reparented to launchd and runs forever. That is the
+reproduction from the entry above - of three pythons started in a pane, the two plain background
+ones died with it and the `nohup` one was still there days later - and it is the operator's original
+complaint. Pressing Close on the phone is an unambiguous "I am done with this", so `Tmux.kill` reads
+the pane trees BEFORE killing the session (afterwards nothing connects those pids to it) and ends
+them deepest-first. This is the path where that case is actually solved; the hourly reaper is not.
+
+*A prefix-matching hazard, found by testing the target rather than trusting it.* The first version
+asked `list-panes -t =<id>`. `=` is an exact target for `kill-session` - the codebase measured that
+and `exactTarget` exists for it - but **not** for `list-panes`: on tmux 3.7b with `alpha` and
+`alphabet` on one socket, `list-panes -s -t =alp` returns alpha's pane. Since that list feeds a
+kill, a target resolving by prefix would end a different agent's processes. It now enumerates every
+pane on the socket and filters by an exact string match on `#{session_name}`, which is immune to
+tmux's target resolution entirely. Both halves are asserted, the second with two sessions whose
+names are a prefix pair.
+
+*Verified:* 52/52 in `tmux.test.ts`, and the new case checked by neutering the tree kill and
+watching `a detached grandchild is killed` go red before restoring it.
+
+*Open, and it changes a decision already taken.* Claude Code's documentation is explicit that
+**stdio MCP servers are not reconnected automatically** - only HTTP and SSE servers are, with
+backoff. `@playwright/mcp` is stdio. So the hourly pane-children pass does not merely interrupt an
+agent's MCP server, it removes it until a person opens `/mcp` and retries. That was accepted on the
+understanding that it would come back; it does not. Recorded here rather than silently reversed,
+because the decision to over-collect was the operator's to make and so is the decision to keep it.

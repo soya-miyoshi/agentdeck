@@ -5,7 +5,7 @@
 // list where a pane's tree looks like every other process, and the question being answered is
 // "what has THIS agent left running".
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -106,6 +106,75 @@ export const treeOf = (rows: readonly RawRow[], panePid: number): ProcessRow[] =
     }
   }
   return out;
+};
+
+/** A pid's process state as `ps` reports it, or "" when it cannot be read. `Z` is a zombie. */
+const psState = (pid: number): string => {
+  const probe = spawnSync(PS, ["-o", "state=", "-p", String(pid)], { encoding: "utf8" });
+  return (probe.stdout || "").trim();
+};
+
+/** Whether a pid is finished, counting a zombie as finished: `kill(pid, 0)` succeeds against one. */
+const finished = (pid: number, state: (pid: number) => string): boolean => {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true;
+  }
+  return state(pid).startsWith("Z");
+};
+
+export interface EndTreeOptions {
+  /** How long SIGTERM is given before SIGKILL. */
+  graceMs?: number;
+  /** Swapped in tests; the real one asks `ps`. */
+  state?: (pid: number) => string;
+  signal?: (pid: number, sig: NodeJS.Signals) => void;
+  wait?: (ms: number) => Promise<void>;
+}
+
+/**
+ * SIGTERM then SIGKILL every pid given, deepest first.
+ *
+ * Deepest first so a supervisor cannot see a child die and restart it before its own turn comes.
+ * The caller collects the pids BEFORE whatever ends the session, because once the pane process is
+ * gone its children are reparented to launchd and the tree that named them no longer exists.
+ */
+export const endTree = async (
+  pids: readonly number[],
+  options: EndTreeOptions = {},
+): Promise<number[]> => {
+  const graceMs = options.graceMs ?? 3000;
+  const state = options.state ?? psState;
+  const signal = options.signal ?? ((pid, sig) => process.kill(pid, sig));
+  const wait = options.wait ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
+  const targets = [...pids].reverse().filter((pid) => Number.isInteger(pid) && pid > 1);
+  const pending: number[] = [];
+  for (const pid of targets) {
+    if (finished(pid, state)) continue;
+    try {
+      signal(pid, "SIGTERM");
+      pending.push(pid);
+    } catch {
+      // Gone between the check and the signal is the outcome wanted.
+    }
+  }
+  if (pending.length === 0) return [];
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && pending.some((pid) => !finished(pid, state))) {
+    await wait(100);
+  }
+  const survivors: number[] = [];
+  for (const pid of pending) {
+    if (finished(pid, state)) continue;
+    try {
+      signal(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    if (!finished(pid, state)) survivors.push(pid);
+  }
+  return survivors;
 };
 
 export interface PaneRef {
