@@ -58,6 +58,27 @@ let cellPerFontPx: number | undefined;
 let touchY: number | undefined;
 let carry = 0;
 
+/**
+ * The text a copy takes: the selection if there is one, the visible screen otherwise.
+ *
+ * A phone has no selection to offer. The pane claims every touch gesture so that dragging scrolls
+ * the terminal rather than rubber-banding the page, and that is the same gesture iOS would have
+ * used to select - so on the device this deck is for, "copy" can only mean the screen. The
+ * selection branch is for a desktop browser, which has a mouse and does select.
+ */
+const copyableText = (term: Terminal): string => {
+  const selected = term.getSelection();
+  if (selected !== "") return selected;
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < term.rows; row += 1) {
+    lines.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+  }
+  // Trailing blanks are the unused part of the screen, not content someone wanted copied.
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
+};
+
 const rowHeight = (): number => {
   const term = terminal;
   if (term === undefined || host.value === undefined || term.rows === 0) return 0;
@@ -150,8 +171,22 @@ onMounted(() => {
   const addon = new FitAddon();
   term.loadAddon(addon);
   if (host.value !== undefined) term.open(host.value);
+  // The pane is a VIEW. Everything a person types arrives from the composer instead, because a
+  // keystroke typed here paints nothing until the pty echoes it back - a round trip per character -
+  // and an IME's half-composed text reaches the agent as it is being composed.
+  //
+  // Not xterm's `disableStdin`, which gates `triggerDataEvent` and would swallow the terminal's OWN
+  // replies with it: a TUI that asks where the cursor is (DSR) would wait forever for an answer.
+  // The helper textarea is made read-only instead - which is also what keeps iOS from opening the
+  // soft keyboard over the pane - and the key handler refuses keystrokes from a hardware keyboard.
+  if (term.textarea !== undefined) {
+    term.textarea.readOnly = true;
+    term.textarea.inputMode = "none";
+  }
+  term.attachCustomKeyEventHandler(() => false);
   // Never rendered locally. Input comes back as ordinary output because that is what a PTY does,
-  // and the agent may be in a mode that transforms or refuses it.
+  // and the agent may be in a mode that transforms or refuses it. What still reaches this after the
+  // read-only textarea is the terminal's answers to the agent's own escape sequences.
   term.onData((data) => {
     emit("input", props.sessionId, data);
   });
@@ -180,9 +215,7 @@ onMounted(() => {
       term.reset();
     },
     size: () => ({ cols: term.cols, rows: term.rows }),
-    focus: () => {
-      term.focus();
-    },
+    copyText: () => copyableText(term),
     // xterm tracks DECCKM as the application sets and clears it, so the key row's arrows take
     // their form from the terminal rather than from a guess about what is running.
     applicationCursorKeys: () => term.modes.applicationCursorKeysMode,

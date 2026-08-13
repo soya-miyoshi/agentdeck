@@ -9,7 +9,13 @@ export interface TerminalHandle {
   /** Full reset, for a snapshot: it supersedes everything before it, modes included. */
   clear: () => void;
   size: () => { cols: number; rows: number };
-  focus: () => void;
+  /**
+   * What a Copy should put on the clipboard: the selection, or the visible screen if there is none.
+   *
+   * The clipboard write itself is the caller's, because it needs a user gesture and a message when
+   * the browser refuses one - neither of which belongs inside the component that owns the terminal.
+   */
+  copyText: () => string;
   /**
    * Whether the application has set DECCKM, which decides the form of an arrow key's bytes.
    *

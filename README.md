@@ -262,12 +262,13 @@ origin: the proxy leaves the browser's `Origin` header alone, so a server config
 cannot tell that from a network failure, so it reconnects forever instead of saying so. And the
 token you paste is stored in `localStorage`, which is keyed by origin, so the dev server is pinned
 to port 7778 rather than Vite's shared default — on 5173 every other Vite project on the machine
-would share an origin with the credential that starts sessions in every allowed repository. Type in it: the keystrokes go out as `input` frames, and what paints back is
-the agent's own output arriving as `chunk`s — nothing is echoed locally, because the agent may be
+would share an origin with the credential that starts sessions in every allowed repository. Type in
+the box above the key row and press Send: the text goes out as `input` frames, and what paints back
+is the agent's own output arriving as `chunk`s — nothing is echoed locally, because the agent may be
 in a mode that transforms or refuses what you typed.
 
 Two things worth doing by hand, because they are what the design is for. Paste a few hundred
-kilobytes of log into the pane — it arrives whole and the socket stays up, the client having cut it
+kilobytes of log into the box — it arrives whole and the socket stays up, the client having cut it
 into frames under the receiver's limit. And lock the phone, or pull the network for a while, then
 come back: the tab repaints rather than showing a hole.
 
@@ -278,6 +279,29 @@ no profiles there is no agent to start. See the Environment table above.
 Automated, the same path is `src/client/end-to-end.test.ts`: the real client modules against a real
 server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
 the two pieces that need a DOM.
+
+## Typing: the box, not the terminal
+
+**The pane takes no keystrokes.** Everything you type goes into the box above the key row and
+reaches the pty on one submit. Typing straight into xterm cost a network round trip per character
+before anything appeared — the pty's echo is the only thing that paints — there was nothing to
+long-press for the OS's paste menu, and a Japanese IME's half-composed text went to the agent as it
+was being composed. A textarea has all three for free.
+
+- **Send** appends CR, which is what submits a line at a pty or a prompt in an agent's TUI.
+- **Insert** sends the text and nothing else, for a path or a fragment you want to add to.
+- Newlines inside the box stay LF, so a pasted five-line question is one turn and not five.
+- **Copy**, in the New session bar, puts the pane's text on the clipboard — the selection if there
+  is one, the visible screen if not. The pane claims every touch gesture so that dragging scrolls
+  it, which is the same gesture iOS would have used to select, so on a phone this is the only way
+  anything on that screen leaves it.
+- An uploaded image's path lands in the box rather than on the wire, so the question can be written
+  beside it before anything is sent.
+
+The terminal is made read-only at its helper textarea rather than with xterm's `disableStdin`,
+which gates xterm's whole data event: the terminal's own replies to the agent's escape sequences —
+DSR, DA — would stop reaching the pty with it, and a TUI that asks where the cursor is would wait
+forever for an answer nobody sent.
 
 ## Answering a prompt from the phone
 
@@ -290,9 +314,12 @@ which `src/client/key-row.ts` reads off xterm rather than guessing — and they 
 same paced `Connection.input` every other keystroke uses.
 
 **Ctrl latches rather than being held.** There is one thumb, so the second press is a separate
-event: tap Ctrl, and the next thing sent from that tab — a cap on the row, or a character typed on
-the soft keyboard — is sent as its control code and the latch is spent. Ctrl then `c` is `0x03`.
-The cap is highlighted while the latch is armed, and tapping it again disarms it.
+event: tap Ctrl, and the next thing sent from that tab is sent as its control code and the latch is
+spent. From the row that is the next cap; from the box it is the first character of the submit, with
+no CR behind it — Ctrl is a modifier on a key, not on a line. **Ctrl then `c` then Send is `0x03`**,
+and it is the only route to an interrupt now that nothing sends characters as they are typed. The
+cap is highlighted while the latch is armed, the Send button reads `Ctrl+`, and tapping Ctrl again
+disarms it.
 
 Automated, against real things: `src/client/end-to-end.test.ts` answers a shell `read` that is
 BLOCKED — the answer is typed, nothing happens, Enter is what commits it — interrupts a `sleep 300`
@@ -309,10 +336,13 @@ debugging an arrow: tmux parses its client's input as keys and re-encodes them f
    file — and give it a task that needs permission.
 3. When the prompt appears, answer it with the row rather than the keyboard: the arrows to move
    between the choices, Enter to take one, Esc to back out.
-4. Interrupt something with Ctrl then `c` and check the agent stops rather than the character `c`
-   appearing in the prompt.
+4. Interrupt something with Ctrl, `c` and Send, and check the agent stops rather than the character
+   `c` appearing in the prompt.
 5. Check the row itself in standalone mode, where the insets are non-zero: the caps must sit above
    the home indicator, and the row's background must run under it.
+6. The box, which has never been held: tapping it must not zoom the page, the app must not jump when
+   the keyboard opens, a long-press must offer Paste, and dictation must reach it. Copy something out
+   with the Copy button and paste it somewhere else on the phone.
 
 ## Installing to the home screen
 

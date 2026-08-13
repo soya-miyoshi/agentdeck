@@ -160,7 +160,7 @@ const paintedTerminal = (): TerminalHandle & { text: () => string } => {
     write: (data) => (painted += data),
     clear: () => (painted = ""),
     size: () => ({ cols: 80, rows: 24 }),
-    focus: () => undefined,
+    copyText: () => painted,
     applicationCursorKeys: () => false,
     text: () => painted,
   };

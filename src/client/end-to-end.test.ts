@@ -40,6 +40,7 @@ import { PANE_COLS } from "../protocol.ts";
 import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
+import { submitBytes } from "./composer.ts";
 import { Connection, type SocketLike } from "./connection.ts";
 import { type KeyName, keyBytes, withCtrl } from "./key-row.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -67,6 +68,9 @@ const keyWork = temp("agentdeck-e2e-keys-");
 const ctrlWork = temp("agentdeck-e2e-ctrl-");
 const tabWork = temp("agentdeck-e2e-tab-");
 const arrowWork = temp("agentdeck-e2e-arrow-");
+// The input box's own trees. Same rule: one per test, or the second inherits the first's pane.
+const composerWork = temp("agentdeck-e2e-composer-");
+const composerCtrlWork = temp("agentdeck-e2e-composer-ctrl-");
 // Three, because the done-when for the strip is three sessions running at once: a status that is
 // right for one tab and wrong for the other two is the failure it is written against.
 const stripWork = [
@@ -134,6 +138,8 @@ const startServer = async (): Promise<ChildProcess> => {
         ctrlWork,
         tabWork,
         arrowWork,
+        composerWork,
+        composerCtrlWork,
         ...stripWork,
       ].join(":"),
       AGENTDECK_PROFILES: profiles,
@@ -196,6 +202,8 @@ after(async () => {
     ctrlWork,
     tabWork,
     arrowWork,
+    composerWork,
+    composerCtrlWork,
     ...stripWork,
     conf,
   ]) {
@@ -215,7 +223,7 @@ const paintedTerminal = (): TerminalHandle & { text: () => string; clears: () =>
     },
     clears: () => clears,
     size: () => ({ cols: 80, rows: 24 }),
-    focus: () => undefined,
+    copyText: () => painted,
     // The real one reads xterm's DECCKM. Nothing here paints, so it is stated: the key row's
     // arrows are tested against both answers below rather than against whichever one is baked in.
     applicationCursorKeys: () => false,
@@ -1034,6 +1042,67 @@ void describe("the key row, against a real shell that is blocked on a keypress",
         "the shell to come back after Ctrl-D",
         () => (driven.screen().match(/cat-is-done/g) ?? []).length >= 2,
       );
+      assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+});
+
+// ------------------------------------------------------------------------------------------
+// The input box: what a submit actually does to a shell.
+//
+// The bytes come from src/client/composer.ts - the module the box calls - and go out through the
+// same `Connection.input` everything else uses. What App.vue adds is the latch, restated here the
+// way `keyboard` restates it above.
+//
+// NOT DEMONSTRATED HERE, and not claimed: a thumb on a phone, an iOS paste into the box, or a
+// Japanese IME composing in it. Those are exactly the three reasons the box exists and none of them
+// has a headless equivalent - what is proven below is only that the bytes a submit produces do to a
+// real pty what the box promises.
+
+void describe("the input box, against a real shell", () => {
+  void test("Send runs the line; Insert leaves it for the person to commit", async () => {
+    const driven = await drive(composerWork);
+    const keys = keyboard(driven);
+    try {
+      const sent = join(composerWork, "sent.txt");
+      driven.connection.input(driven.session.id, submitBytes(`touch ${sent}`, "send", false));
+      await waitFor("the sent line to run", () => existsSync(sent));
+
+      // Insert is the other half of the promise: the text arrives, and NOTHING runs until Enter.
+      const inserted = join(composerWork, "inserted.txt");
+      driven.connection.input(driven.session.id, submitBytes(`touch ${inserted}`, "insert", false));
+      await waitFor("the inserted line to echo", () => driven.screen().includes("inserted.txt"));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(existsSync(inserted), false, "Insert committed the line by itself");
+
+      // The key row's Enter is what commits it, which is the shape the image path relies on too.
+      keys.press("enter");
+      await waitFor("the inserted line to run once committed", () => existsSync(inserted));
+      assert.deepEqual(driven.errors, []);
+    } finally {
+      driven.connection.stop();
+    }
+  });
+
+  void test("Ctrl then c in the box interrupts, and sends no newline behind it", async () => {
+    const driven = await drive(composerCtrlWork);
+    try {
+      // The phone's ONLY route to an interrupt now: nothing sends single characters as they are
+      // typed any more, so Ctrl+C is the latch plus a one-character submit.
+      const finished = join(composerCtrlWork, "the-sleep-finished");
+      driven.connection.input(driven.session.id, `sleep 300 && touch ${finished}\r`);
+      await new Promise((resolve) => setTimeout(resolve, 750));
+
+      driven.connection.input(driven.session.id, submitBytes("c", "send", true));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      driven.connection.input(driven.session.id, "echo interrupted-from-the-box\r");
+      await waitFor(
+        "the interrupted shell to answer again",
+        () => (driven.screen().match(/interrupted-from-the-box/g) ?? []).length >= 2,
+      );
+      assert.equal(existsSync(finished), false, "the sleep ran to completion instead of dying");
       assert.deepEqual(driven.errors, []);
     } finally {
       driven.connection.stop();

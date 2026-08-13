@@ -16,6 +16,8 @@ import {
   verifyToken,
 } from "./api.ts";
 import { browserSocket } from "./browser-socket.ts";
+import Composer from "./Composer.vue";
+import { spendsCtrl, submitBytes, type SubmitMode } from "./composer.ts";
 import { Connection, type ConnectionStatus } from "./connection.ts";
 import { downscale } from "./image.ts";
 import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
@@ -224,13 +226,12 @@ const accept = (pasted: string): void => {
 const select = (id: string): void => {
   active.value = id;
   opened.value = new Set([...opened.value, id]);
-  handles.get(id)?.focus();
 };
 
 // Ctrl latches rather than being held: there is one thumb, and the second press is a separate
-// event. The latch is spent by the next single character sent from this tab, whether that comes
-// from a cap on the row or from a character typed on the soft keyboard - which is what makes
-// Ctrl+C reachable by pressing Ctrl and then `c`.
+// event. The latch is spent by the next single character from a cap on the row, or by a submit
+// from the composer, which applies it to the first character in the box - which is what makes
+// Ctrl+C reachable by pressing Ctrl, typing `c` and pressing Send.
 const ctrlLatched = ref(false);
 
 // The latch belongs to the tab it was armed on. It is one app-wide ref while `send` reads
@@ -263,12 +264,62 @@ const pressKey = (key: KeyName): void => {
   send(keyBytes(key, handles.get(id)?.applicationCursorKeys() ?? false));
 };
 
+// What still reaches this is the terminal's own answers to escape sequences the AGENT wrote, not
+// keystrokes: the pane's textarea is read-only. `spendable` is what keeps those replies from
+// spending a Ctrl latch, and it is the reason this does not go straight to `connection.input`.
 const typed = (sessionId: string, data: string): void => {
   if (sessionId !== active.value) {
     connection.value?.input(sessionId, data);
     return;
   }
   send(data);
+};
+
+const composer = ref<InstanceType<typeof Composer>>();
+
+/**
+ * What the composer submitted, as bytes, with any armed Ctrl applied to the first character.
+ *
+ * Not through `send`: that spends the latch on a SINGLE character, which is the rule guarding
+ * against the terminal's replies eating it, and a submit is a whole line.
+ */
+const submitted = (text: string, mode: SubmitMode): void => {
+  const id = active.value;
+  if (id === undefined) return;
+  const bytes = submitBytes(text, mode, ctrlLatched.value);
+  if (spendsCtrl(text)) ctrlLatched.value = false;
+  connection.value?.input(id, bytes);
+};
+
+// "Copied", briefly, on the button itself. An error banner for a success is the wrong surface, and
+// a clipboard write that silently did nothing is indistinguishable from one that worked.
+const copyLabel = ref("Copy");
+let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Put the pane's text on the clipboard - the selection if there is one, the visible screen if not.
+ *
+ * The phone cannot select inside the terminal at all: the pane claims every touch gesture so that
+ * dragging scrolls it, and that is the gesture iOS would have used to select. So this button is
+ * the only way anything on that screen leaves the phone.
+ */
+const copyScreen = async (): Promise<void> => {
+  const id = active.value;
+  const text = id === undefined ? undefined : handles.get(id)?.copyText();
+  if (text === undefined || text === "") return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Refused rather than failed: a browser only allows this from a user gesture and a secure
+    // origin, and saying "copied" when it did not is the confidently-wrong result this app refuses.
+    note("the browser refused the clipboard - copy needs an https address, which the tailnet gives");
+    return;
+  }
+  copyLabel.value = "Copied";
+  clearTimeout(copyTimer);
+  copyTimer = setTimeout(() => {
+    copyLabel.value = "Copy";
+  }, 1500);
 };
 
 // Open state lives here rather than in ProcessList, because the control that opens it sits in the
@@ -279,10 +330,10 @@ const processesOpen = ref(false);
 const uploading = ref(false);
 
 /**
- * Put an image where the agent can read it, then type its path at the prompt.
+ * Put an image where the agent can read it, then put its path in the composer.
  *
- * The path is typed and NOT submitted, deliberately: an image with no question attached is a turn
- * spent on "what am I looking at". The person adds the sentence and presses Enter.
+ * In the box and NOT on the wire, deliberately: an image with no question attached is a turn spent
+ * on "what am I looking at". The person writes the sentence beside the path and presses Send.
  */
 const sendImage = async (file: File): Promise<void> => {
   const id = active.value;
@@ -291,8 +342,7 @@ const sendImage = async (file: File): Promise<void> => {
   uploading.value = true;
   try {
     const path = await uploadImage(current, id, await downscale(file));
-    send(`${path} `);
-    handles.get(id)?.focus();
+    composer.value?.insert(`${path} `);
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       signOut("That token was rejected. Paste the current one.");
@@ -330,6 +380,7 @@ const wake = (): void => {
 document.addEventListener("visibilitychange", wake);
 window.addEventListener("online", wake);
 onBeforeUnmount(() => {
+  clearTimeout(copyTimer);
   document.removeEventListener("visibilitychange", wake);
   window.removeEventListener("online", wake);
   unfollow?.();
@@ -363,6 +414,16 @@ if (token.value !== undefined) start(token.value);
         >
           Processes
         </button>
+        <!-- The only way text on that screen leaves the phone: the pane owns every touch gesture,
+             so there is nothing to long-press and select. -->
+        <button
+          v-if="active !== undefined"
+          class="beside"
+          type="button"
+          @click="() => void copyScreen()"
+        >
+          {{ copyLabel }}
+        </button>
         <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
         <UploadImage
           v-if="active !== undefined"
@@ -388,6 +449,15 @@ if (token.value !== undefined) start(token.value);
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
       />
     </main>
+    <!-- The input path. The pane above takes no keystrokes: a character typed into it costs a
+         round trip before it appears, and an IME's half-composed text goes to the agent as it is
+         being composed. Here it is edited locally, pasted with the OS's own paste, and sent once. -->
+    <Composer
+      ref="composer"
+      :ctrl-latched="ctrlLatched"
+      :disabled="active === undefined"
+      @submit="submitted"
+    />
     <!-- The keys a soft keyboard does not have, which are exactly the ones a permission prompt
          needs. Without it the deck is a window onto a process waiting for an answer. -->
     <KeyRow :ctrl-latched="ctrlLatched" @key="pressKey" />

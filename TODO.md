@@ -555,6 +555,21 @@ not support getting TLS certs`. Both switches are at
       normalisation and whether the typed path survives Claude's own input handling are all
       unverified on a device.
 
+- [x] **`m4/input-box`** — input goes through a text box above the key row, not into xterm.
+      Reported from the phone: typing was slow, paste did not work, copy did not work. One cause —
+      every character cost a round trip because nothing is echoed locally, the pane claims every
+      touch gesture so there is nothing to long-press, and an IME had no composition surface. The
+      pane is read-only at its helper textarea rather than by `disableStdin`, which would have
+      swallowed the terminal's own DSR/DA replies with the keystrokes. Send appends CR, Insert does
+      not, embedded newlines stay LF so a pasted question is one turn; a latched Ctrl applies to the
+      first character of a submit and appends no CR, which is the only route to Ctrl+C now. Copy, in
+      the New session bar, takes the selection or the visible screen. An uploaded image's path lands
+      in the box instead of at the prompt. **Done when:** a phone types, pastes and copies.
+      *Not demonstrated: the phone, which is the whole point.* The latency, an iOS paste and a
+      Japanese IME have no headless equivalent and none was retested on a device; nor was the
+      no-zoom-on-tap guard, nor that the pane has stopped opening the keyboard. What IS proven is
+      what the bytes do: two end-to-end cases against a real server, tmux, pty and shell.
+
 ---
 
 ## M5 — Push (optional)

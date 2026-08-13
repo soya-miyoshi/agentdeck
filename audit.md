@@ -2565,3 +2565,58 @@ survivor and a fresh session.
 *Verified:* 37/37 in `registry.test.ts`, 15/15 in `supervisor-crash.test.ts`, 13/13 in
 `src/client/end-to-end.test.ts`, and the full suite below. **Not demonstrated:** the phone. The tabs
 were not looked at on the device, and the failure reported here was reported from the device.
+
+## Input moved off the terminal and into a box
+
+*Reported from the phone, three symptoms and one cause.* Typing was slow, paste did not work, and
+copy did not work. All three are what "xterm is the keyboard" costs on a touch device. Nothing is
+echoed locally by design - plan 001, and it is right, because the agent may be in a mode that
+transforms or refuses what you typed - so every character cost a WebSocket round trip through tmux
+and a pty before it appeared. There was nothing to long-press for iOS's Paste menu, because the
+pane sets `touch-action: none` and claims every gesture so a drag scrolls the terminal rather than
+rubber-banding the page - and that is the same gesture iOS would have used to select. And a
+Japanese IME had no composition surface: what reached the agent was the text being composed, as it
+was composed.
+
+*The fix.* A `<textarea>` above the key row. It is edited locally at the phone's own speed, it gets
+the OS's paste and dictation for nothing, and it hands the finished text to the same paced
+`Connection.input` every other byte goes through - the chunking under the receiver's frame cap and
+the input window are unchanged, so the large-paste work still covers this path.
+
+*The one thing that had to be got right rather than guessed.* Making the pane read-only the obvious
+way - xterm's `disableStdin` - is wrong. It gates `triggerDataEvent`, which is also how the
+TERMINAL's own replies leave: DSR, DA, DECRQM, the answers a full-screen TUI asks for and blocks on.
+An agent's prompt would have waited forever for a cursor-position report nobody sent. Verified in
+xterm's own bundle before choosing: `textarea.readOnly = this.optionsService.rawOptions.disableStdin`
+is set once at `open()` and never re-applied, so setting `readOnly` directly is stable, keeps
+`onData` alive for the replies, and is also what stops iOS opening the soft keyboard over the pane.
+A hardware keyboard is refused separately with `attachCustomKeyEventHandler(() => false)`.
+
+*Ctrl had to be rebuilt, because the path it depended on is gone.* The latch was spent by "the next
+single character sent from this tab", and the soft keyboard was where that character came from. With
+no per-character path there is no bare `c` to press, so a submit now applies the latch to its first
+character and appends NO CR - Ctrl is a modifier on a key, not on a line, and a newline behind
+`0x03` is a blank answer at whatever prompt the interrupt uncovers. `spendable` stays exactly as it
+was on the xterm path, where its job is still to stop the agent's own `ESC[6n` replies from eating a
+latch.
+
+*Accepted, with reasons.*
+
+- **Copy is a button and not a selection.** Fine-grained selection inside the pane is still
+  impossible on a phone, and restoring it means giving the drag gesture back to the OS - which is
+  the scroll that was fixed by taking it. The button copies the selection if there is one and the
+  visible screen if not. Copying part of a line, or scrollback that is off screen, is not solved.
+- **A clipboard refusal is said, not swallowed.** `navigator.clipboard` needs a secure origin, which
+  the tailnet gives and `http://127.0.0.1` also counts as; anything else gets a banner rather than a
+  button that says "Copied" and did nothing.
+- **The desktop lost direct typing too.** One input path rather than two, deliberately: a pane you
+  can sometimes type into is a pane whose behaviour depends on where the focus went.
+
+*Verified:* 972/972, including two new end-to-end cases against a real server, a real tmux, a real
+pty and a real `/bin/sh` - Send runs a line, Insert leaves it uncommitted until the row's Enter, and
+Ctrl+`c` from the box interrupts a `sleep 300`. **Not demonstrated: the phone, which is the whole
+point of this item.** The three symptoms it was written for - the round-trip latency, an iOS paste,
+and an IME composing in the box - have no headless equivalent, and none of them was reproduced or
+re-tested on a device. Also unproven on hardware: that tapping the box does not zoom the page (the
+16px font size is the guard), that the app does not jump when the keyboard opens over it, and that
+the pane no longer opens the keyboard when tapped.
