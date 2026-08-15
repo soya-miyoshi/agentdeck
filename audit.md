@@ -1525,7 +1525,9 @@ product defect; both are timing assumptions that hold on an idle machine. Worth 
 ## m4/tailscale-serve - demonstrated - 2026-08-09
 
 The operator enabled both tailnet switches, so the half that could not be shown now can be. Verified
-from this Mac over the tailnet:
+from this Mac over the tailnet. `example-host.tailXXXXXX.ts.net` below stands for this machine's
+real MagicDNS name, redacted here and everywhere else in the repository before it went public - the
+live value lives in `.env`, which is not committed:
 
 - `https://example-host.tailXXXXXX.ts.net/` serves the client, HTTP 200, with a verified
   certificate (`ssl_verify_result=0`).

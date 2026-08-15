@@ -36,10 +36,7 @@ const certsOn = {
 
 void describe("tailnet status", () => {
   void test("the origin drops DNSName's trailing dot", () => {
-    assert.equal(
-      parseTailnetStatus(certsOff).origin,
-      "https://example-host.tailXXXXXX.ts.net",
-    );
+    assert.equal(parseTailnetStatus(certsOff).origin, "https://example-host.tailXXXXXX.ts.net");
   });
 
   void test("a null CertDomains is HTTPS certificates being off", () => {
