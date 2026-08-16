@@ -2,18 +2,12 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// Images the phone sends into a session, written to disk so the agent can be told a path.
-//
-// The agent reads the file itself; nothing here goes near the terminal stream. That is the whole
-// reason this is a file on disk rather than a wire format: a screenshot pasted into a pty is
-// megabytes of base64 typed at an agent's prompt, and the pane is `PANE_COLS` wide.
+// Images the phone sends into a session, written to disk so the agent is told a path. A file rather
+// than a wire format because a screenshot pasted into a pty is megabytes of base64 at a prompt.
 
 /**
- * What may be written, and as what extension.
- *
- * A safelist rather than a sanitiser: the extension is chosen HERE from the declared type, so the
- * client never names the file at all and there is no traversal, no `..`, no second dot, and no
- * `.command` written into a directory the operator may later open in Finder.
+ * What may be written, and as what extension. A safelist rather than a sanitiser: the extension is
+ * chosen HERE from the declared type, so the client never names the file at all.
  */
 const EXTENSIONS = new Map([
   ["image/png", "png"],
@@ -40,10 +34,8 @@ export class UploadStore {
   }
 
   /**
-   * Write one image and return its absolute path, then drop all but the newest `keep`.
-   *
-   * The name is entirely ours - a random stem and a safelisted extension - so nothing the client
-   * sends is ever part of a path.
+   * Write one image and return its absolute path, then drop all but the newest `keep`. The name is
+   * entirely ours - a random stem and a safelisted extension - so no client input reaches a path.
    */
   async save(sessionId: string, contentType: string | undefined, bytes: Buffer): Promise<string> {
     const extension = extensionFor(contentType);

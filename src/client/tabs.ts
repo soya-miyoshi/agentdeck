@@ -2,12 +2,8 @@ import type { AgentSummary } from "../agent-profiles.ts";
 import type { Session } from "../registry.ts";
 import type { SessionState } from "../tmux.ts";
 
-// The tab strip, as data. One tab per session, status per tab, and nothing the server did not
-// say.
-//
-// The server's types are imported rather than restated. They are erased at build time, so this
-// costs the bundle nothing, and the alternative - a second copy of the wire shapes maintained by
-// hand - turns a protocol change into a silent disagreement instead of a typecheck error.
+// The tab strip as data: one tab per session, and nothing the server did not say. The server's
+// types are imported rather than restated - they erase at build time, and a copy would drift.
 
 export interface Tab {
   id: string;
@@ -20,24 +16,16 @@ export interface Tab {
   /** Whether to draw the needs-you indicator. Never true for an agent that cannot detect it. */
   needsYou: boolean;
   /**
-   * This session outlived the server process and its hook secret died with it, so it will never
-   * report `waiting` again until its agent is restarted (plan 002).
-   *
-   * The tab says so rather than looking like a healthy one. A tab that quietly stops reporting
-   * waiting is the confidently wrong tab this design refuses: it is indistinguishable from an
-   * agent that is simply still working, so the one thing the strip exists to tell a person - which
-   * session needs them - is answered "none of them" forever, and nothing on screen says why.
+   * This session's hooks are refused, so it can never report `waiting` (plan 002). The tab says so:
+   * one that quietly stops is indistinguishable from an agent that is simply still working.
    */
   waitingDetectionLost: boolean;
   exitCode?: number;
 }
 
 /**
- * Whether this session's agent has a working waiting mechanism.
- *
- * An agent the server has no summary for is treated as not detecting - a session can outlive the
- * profile that started it (the profiles file is editable and the server rereads it at start), and
- * the failure this direction is a missing indicator rather than a wrong one.
+ * Whether this session's agent has a working waiting mechanism. An unknown agent counts as not
+ * detecting: a session can outlive its profile, and a missing indicator beats a wrong one.
  */
 const detectsWaiting = (agents: ReadonlyMap<string, AgentSummary>, agentId: string): boolean =>
   agents.get(agentId)?.detectsWaiting ?? false;
@@ -50,12 +38,8 @@ const statusOf = (state: SessionState, exitCode: number | undefined): string => 
 };
 
 /**
- * Build the strip.
- *
- * `detectsWaiting: false` is a supported configuration, not a defect. Such an agent reports only
- * working/idle/exited, so a `waiting` on one of its sessions is a claim nothing on the server is
- * in a position to make - it is displayed as `working`, which is what the process is in fact
- * doing, and never as a needs-you. Fewer states, never a wrong one.
+ * Build the strip. `detectsWaiting: false` is supported rather than a defect: a `waiting` from such
+ * an agent is a claim nobody can make, so it shows as `working`. Fewer states, never a wrong one.
  */
 export const toTabs = (sessions: readonly Session[], agents: readonly AgentSummary[]): Tab[] => {
   const byId = new Map(agents.map((agent) => [agent.id, agent]));
@@ -69,10 +53,8 @@ export const toTabs = (sessions: readonly Session[], agents: readonly AgentSumma
       state,
       status: statusOf(state, session.exitCode),
       needsYou: state === "waiting",
-      // Only for an agent that would otherwise have detected waiting, and only while the session
-      // is still running. Saying "no waiting alerts" about an agent that never had them is noise
-      // on every shell tab, and saying it about an exited session answers a question nobody is
-      // asking about a process that has finished.
+      // Only for an agent that would otherwise detect waiting, and only while it runs: otherwise
+      // it is noise on every shell tab, or an answer about a process that has finished.
       waitingDetectionLost: session.waitingDetectionLost === true && detects && state !== "exited",
     };
     if (session.exitCode !== undefined) tab.exitCode = session.exitCode;
@@ -81,10 +63,8 @@ export const toTabs = (sessions: readonly Session[], agents: readonly AgentSumma
 };
 
 /**
- * Which tab to show after the list changed.
- *
- * Keeps the current one whenever it still exists, because the list is pushed and a session
- * appearing or exiting elsewhere must not move the pane the user is reading.
+ * Which tab to show after the list changed: the current one whenever it still exists, because the
+ * list is pushed and a session appearing elsewhere must not move the pane being read.
  */
 export const selectTab = (
   tabs: readonly Tab[],

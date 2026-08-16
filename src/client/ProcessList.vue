@@ -1,7 +1,6 @@
 <script setup lang="ts">
-// What each session is running, on a phone. The caller mounts this only while the panel is open,
-// and it reads once on mount: the route costs a `ps` of the whole machine, so polling it would be a
-// background cost for a view nobody is looking at most of the time.
+// What each session is running. Mounted only while the panel is open and read once: the route costs
+// a `ps` of the whole machine, so polling would charge that for a view nobody is looking at.
 
 import { onMounted, ref } from "vue";
 

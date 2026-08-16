@@ -44,14 +44,12 @@ const status = ref<ConnectionStatus>("closed");
 const errors = ref<string[]>([]);
 const connection = shallowRef<Connection>();
 
-// The width every pane renders at. This bundle's own constant only until a socket says otherwise:
-// the pane is wrapped by the server's PTY, and the two halves are built and restarted separately,
-// so the compiled number is a guess that goes stale between `pnpm build` and `make restart`.
+// The width every pane renders at: this bundle's constant only until a socket says otherwise. The
+// two halves are built and restarted separately, so the compiled number goes stale.
 const paneCols = ref(PANE_COLS);
 
-// Terminals are created for a tab the first time it is looked at, and kept afterwards. Eagerly
-// attaching every session would make an unlooked-at tab's default 80x24 the minimum the server
-// applies to every attached client's pane.
+// Terminals are created the first time a tab is looked at, and kept. Attaching eagerly would make an
+// unlooked-at tab's default 80x24 the minimum applied to every pane.
 const opened = ref(new Set<string>());
 const handles = new Map<string, TerminalHandle>();
 
@@ -76,10 +74,8 @@ const signOut = (message: string): void => {
 };
 
 /**
- * Reconcile the selection and the mounted terminals with the list the server just sent.
- *
- * A session that has gone takes its terminal with it, because a pane attached to nothing renders
- * a screen that will never change again while looking exactly like one that might.
+ * Reconcile the selection and the mounted terminals with the list the server just sent. A gone
+ * session takes its terminal: a pane attached to nothing looks exactly like one that might change.
  */
 const settle = (): void => {
   active.value = selectTab(tabs.value, active.value);
@@ -119,7 +115,7 @@ const loadCwds = async (): Promise<void> => {
 
 /**
  * Create the session the picker chose. The 201's `warning` and a refusal are both shown in the
- * server's own words; swallowing either is what makes a second agent in one tree invisible.
+ * server's own words - swallowing either makes a second agent in one tree invisible.
  */
 const startSession = async (cwd: string, agent: string): Promise<void> => {
   const current = token.value;
@@ -228,18 +224,12 @@ const select = (id: string): void => {
   opened.value = new Set([...opened.value, id]);
 };
 
-// Ctrl latches rather than being held: there is one thumb, and the second press is a separate
-// event. The latch is spent by the next single character from a cap on the row, or by a submit
-// from the composer, which applies it to the first character in the box - which is what makes
-// Ctrl+C reachable by pressing Ctrl, typing `c` and pressing Send.
+// Ctrl latches rather than being held: one thumb, so the second press is a separate event. Spent by
+// the next single character, or by a submit - which is what makes Ctrl, `c`, Send an interrupt.
 const ctrlLatched = ref(false);
 
-// The latch belongs to the tab it was armed on. It is one app-wide ref while `send` reads
-// `active.value` at SPEND time, and the active tab can move on its own - the session list settling
-// after a sync, or a tab exiting - so an armed Ctrl could be spent on a session the user was not
-// looking at when they armed it. Ctrl+C to the wrong agent is the confidently-wrong output this
-// design refuses, and the person would have no way to know it happened. Disarming on any change of
-// tab costs one extra tap in the case where they meant it.
+// The latch belongs to the tab it was armed on: the active tab can move on its own, and Ctrl+C to
+// the wrong agent is unnoticeable. Disarming on any tab change costs one tap when it was meant.
 watch(active, () => {
   ctrlLatched.value = false;
 });
@@ -264,9 +254,8 @@ const pressKey = (key: KeyName): void => {
   send(keyBytes(key, handles.get(id)?.applicationCursorKeys() ?? false));
 };
 
-// What still reaches this is the terminal's own answers to escape sequences the AGENT wrote, not
-// keystrokes: the pane's textarea is read-only. `spendable` is what keeps those replies from
-// spending a Ctrl latch, and it is the reason this does not go straight to `connection.input`.
+// What reaches this is the terminal's own replies rather than keystrokes - the textarea is
+// read-only - and `spendable` is what stops those replies spending a Ctrl latch.
 const typed = (sessionId: string, data: string): void => {
   if (sessionId !== active.value) {
     connection.value?.input(sessionId, data);
@@ -278,10 +267,8 @@ const typed = (sessionId: string, data: string): void => {
 const composer = ref<InstanceType<typeof Composer>>();
 
 /**
- * What the composer submitted, as bytes, with any armed Ctrl applied to the first character.
- *
- * Not through `send`: that spends the latch on a SINGLE character, which is the rule guarding
- * against the terminal's replies eating it, and a submit is a whole line.
+ * What the composer submitted, as bytes, with any armed Ctrl applied to the first character. Not
+ * through `send`, which spends a latch only on a single character - a submit is a whole line.
  */
 const submitted = (text: string, mode: SubmitMode): void => {
   const id = active.value;
@@ -297,11 +284,8 @@ const copyLabel = ref("Copy");
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
- * Put the pane's text on the clipboard - the selection if there is one, the visible screen if not.
- *
- * The phone cannot select inside the terminal at all: the pane claims every touch gesture so that
- * dragging scrolls it, and that is the gesture iOS would have used to select. So this button is
- * the only way anything on that screen leaves the phone.
+ * Put the pane's text on the clipboard - the selection, or the visible screen. A phone cannot select
+ * inside the terminal at all, so this button is the only way that screen leaves it.
  */
 const copyScreen = async (): Promise<void> => {
   const id = active.value;
@@ -322,18 +306,15 @@ const copyScreen = async (): Promise<void> => {
   }, 1500);
 };
 
-// Open state lives here rather than in ProcessList, because the control that opens it sits in the
-// New session bar and the list it opens hangs below that bar. Unmounted while closed, which is what
-// keeps the `ps` of the whole machine to the moments someone is asking for it.
+// Open state lives here because the control is in the New session bar and the list hangs below it.
+// Unmounted while closed, so the `ps` of the whole machine runs only when someone asks.
 const processesOpen = ref(false);
 
 const uploading = ref(false);
 
 /**
- * Put an image where the agent can read it, then put its path in the composer.
- *
- * In the box and NOT on the wire, deliberately: an image with no question attached is a turn spent
- * on "what am I looking at". The person writes the sentence beside the path and presses Send.
+ * Put an image where the agent can read it, then put its path in the composer - in the box and NOT
+ * on the wire, because an image with no question is a turn spent on "what am I looking at".
  */
 const sendImage = async (file: File): Promise<void> => {
   const id = active.value;

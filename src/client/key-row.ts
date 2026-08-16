@@ -1,35 +1,19 @@
-// The keys a phone's soft keyboard does not have, as the bytes a pty expects.
-//
-// This is a byte problem, not a DOM key-event problem. Nothing here dispatches a KeyboardEvent at
-// xterm: what travels is exactly what a hardware terminal would put on the wire, and it goes
-// through `Connection.input` like every other keystroke.
-//
-// Why the row exists at all: an agent's permission prompt is answered with Esc, Tab, the arrows,
-// Enter or Ctrl+C, and an iOS soft keyboard offers none of them. Without this row the deck is a
-// read-only window onto a process that is waiting for an answer.
+// The keys a soft keyboard does not have, as the bytes a pty expects - a byte problem rather than a
+// DOM one. An agent's permission prompt is answered with exactly the keys iOS does not offer.
 
 /** A key cap on the row. Text labels, never a glyph a font may not have. */
 export type KeyName = "esc" | "tab" | "up" | "down" | "left" | "right" | "enter" | "ctrl";
 
 /**
- * The arrow keys are the only ones whose bytes depend on the terminal's state.
- *
- * DECCKM - application cursor keys, `ESC [ ? 1 h` - swaps the CSI introducer for SS3, so an arrow
- * is `ESC [ A` normally and `ESC O A` once an application has set it. Full-screen TUIs, which is
- * what an agent's prompt is drawn by, set it routinely. Hardcoding either form sends the other
- * application a sequence it will render as text or ignore.
- *
- * xterm.js exposes the mode it is currently in as `Terminal.modes.applicationCursorKeysMode`, so
- * the form is read off the terminal that is painting the pane rather than guessed at.
+ * The arrows are the only keys whose bytes depend on terminal state: DECCKM swaps CSI for SS3, and
+ * a TUI sets it routinely. Read off xterm's own mode rather than guessed at.
  */
 const arrow = (final: string, applicationCursorKeys: boolean): string =>
   `\u001b${applicationCursorKeys ? "O" : "["}${final}`;
 
 /**
- * The bytes a key sends.
- *
- * Enter is CR (0x0d), not LF: a pty in canonical mode is what turns CR into the line the process
- * reads, and sending LF gets a blank line at a prompt that is waiting for a keypress.
+ * The bytes a key sends. Enter is CR (0x0d) and not LF: the pty's line discipline is what turns CR
+ * into a line, and LF gets a blank line at a prompt waiting for a keypress.
  */
 export const keyBytes = (key: KeyName, applicationCursorKeys: boolean): string => {
   switch (key) {
@@ -54,19 +38,8 @@ export const keyBytes = (key: KeyName, applicationCursorKeys: boolean): string =
 };
 
 /**
- * Ctrl applied to what was typed next.
- *
- * Ctrl is a MODIFIER, and a touch screen has no way to hold one down while pressing another cap -
- * there is one thumb and the second press is a separate event. So the cap LATCHES: press Ctrl,
- * press the next thing, and the latch is spent. That is the same bargain a phone's own Shift key
- * makes, so it needs no explaining to the person holding it, and it is the only shape that makes
- * Ctrl+C - the one a person needs most, and 0x03 - reachable at all.
- *
- * The control code is the ASCII rule rather than a table: bytes 0x40-0x5f with bit 6 cleared, which
- * is what a real keyboard's controller does, plus the two a keyboard also sends and the rule does
- * not reach: Ctrl+Space is NUL and Ctrl+? is DEL. Anything else is passed through unchanged - a
- * latch spent on a key that has no control form sends the key, which is a visible result rather
- * than a swallowed keystroke.
+ * Ctrl applied to what was typed next. One thumb cannot hold a modifier, so the cap LATCHES, the
+ * same bargain Shift makes. The code is the ASCII rule, plus the two a keyboard sends that it misses.
  */
 export const withCtrl = (data: string): string => {
   if (data.length !== 1) return data;
@@ -79,17 +52,7 @@ export const withCtrl = (data: string): string => {
 };
 
 /**
- * Whether what is being sent may spend an armed Ctrl latch.
- *
- * xterm raises `onData` for the terminal's own replies as well as for keystrokes - the DSR/DA/
- * DECRQM answers a TUI in the pane asks for - and those are always multi-byte CSI or SS3
- * sequences. A latch spent on one of them un-highlights the Ctrl cap and delivers the operator's
- * following `c` as the letter, so the interrupt is silently lost; an agent emitting `ESC[6n` in a
- * loop would eat every latch armed from the phone. Only a lone character may spend a latch, and
- * Esc - the one single-character sequence a cap sends - is excluded.
- *
- * It lives here beside `withCtrl` because it is the same byte-level rule, and because the
- * alternative - a test that reads this expression out of a component's source text and runs it -
- * makes a browser-only component host-executed at every `pnpm test`.
+ * Whether what is being sent may spend an armed Ctrl latch. xterm raises `onData` for the
+ * terminal's own multi-byte replies too, and a latch spent on one loses the interrupt silently.
  */
 export const spendable = (data: string): boolean => [...data].length === 1 && data !== "\u001b";

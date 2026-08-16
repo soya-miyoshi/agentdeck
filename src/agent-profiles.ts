@@ -1,18 +1,8 @@
 import { accessSync, constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
-// Any agent CLI can be a session, and none is privileged (plan 004). A profile is declarative so
-// adding a CLI is config rather than a code change.
-//
-// The two rules that shape this file:
-//
-//   `env` lists variable NAMES, never values. The server passes them through from its own
-//   environment, so no API key is ever written into the profile file and an example of it is
-//   safe to commit.
-//
-//   A broken `waiting` mechanism disables the MECHANISM, not the profile. One bad edit must not
-//   take down the server for every agent, and it must not take away sessions to fix a status
-//   field. That agent drops to working/idle/exited and stays startable.
+// Any agent CLI can be a session and none is privileged (plan 004). `env` lists variable NAMES and
+// never values; a broken `waiting` disables the MECHANISM, not the profile.
 
 export type WaitingVia = "hook" | "log" | "screen";
 
@@ -75,10 +65,8 @@ const parseWaiting = (
     if (typeof settings !== "string") {
       return { waiting: undefined, reason: "waiting.via=hook needs a settings path" };
     }
-    // Relative to the agent-state directory, always. The server writes this file at every boot,
-    // so an absolute path - or a `../` out of the directory - is an arbitrary-JSON-write primitive
-    // that a profiles file could point at the operator's real ~/.claude/settings.json. The
-    // mechanism is disabled rather than the profile, so the agent stays startable.
+    // Relative to the agent-state directory, always: the server writes this file at every boot, so
+    // an absolute or climbing path is an arbitrary-JSON-write primitive a profiles file could aim.
     if (isAbsolute(settings) || settings.split("/").includes("..")) {
       return {
         waiting: undefined,
@@ -161,10 +149,8 @@ export const parseProfiles = (raw: unknown): ParsedProfiles => {
 };
 
 /**
- * Whether `command` resolves right now.
- *
- * Checked when the list is served rather than only at spawn, so the picker can grey an agent out
- * instead of offering a session that dies a second after opening.
+ * Whether `command` resolves right now, checked when the list is served rather than only at spawn -
+ * so the picker greys an agent out instead of offering a session that dies a second later.
  */
 export const resolvesOnPath = (command: string, env: NodeJS.ProcessEnv = process.env): boolean => {
   const isExecutable = (candidate: string): boolean => {
@@ -189,9 +175,8 @@ export const summarise = (
   id: profile.id,
   name: profile.name,
   available: resolvesOnPath(profile.command, env),
-  // Absent `waiting` is a supported configuration, not a half-finished one: that agent reports
-  // working/idle/exited and never claims `waiting`. The client shows its tab without a needs-you
-  // indicator rather than inventing one. Fewer states, never a wrong one.
+  // Absent `waiting` is supported rather than half-finished: that agent reports working/idle/exited
+  // and its tab carries no needs-you indicator. Fewer states, never a wrong one.
   detectsWaiting: profile.waiting !== undefined,
 });
 

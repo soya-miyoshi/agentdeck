@@ -1,8 +1,5 @@
-// Downscaling before upload, on the phone.
-//
-// Not a bandwidth optimisation. A photo library image is 4000px wide and the model resizes it down
-// anyway, so sending the original spends the phone's uplink on pixels nothing will ever read - and
-// a screenshot of the deck is legible at this size, which is the whole reason the button exists.
+// Downscaling before upload, on the phone. Not bandwidth: the model resizes a 4000px photo anyway,
+// so the original spends the uplink on pixels nothing will read.
 
 /** The longest edge any model here reads more detail from. Above it, pixels are discarded twice. */
 export const MAX_EDGE = 1568;
@@ -24,12 +21,8 @@ export const scaleTo = (
 };
 
 /**
- * A picked file as a PNG no larger than `MAX_EDGE` on its longest edge.
- *
- * PNG rather than JPEG because the expected subject is a screenshot of a terminal: JPEG rings
- * around small text, and unreadable text in the image is the one failure this feature cannot
- * survive. It also normalises HEIC, which is what an iPhone hands over from the photo library and
- * which nothing downstream reads.
+ * A picked file as a PNG no larger than `MAX_EDGE` on its longest edge. PNG because the subject is
+ * a terminal screenshot and JPEG rings around small text; it also normalises HEIC.
  */
 export const downscale = async (file: Blob): Promise<Blob> => {
   const bitmap = await createImageBitmap(file);

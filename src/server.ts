@@ -37,65 +37,33 @@ const HEALTH_TIMEOUT_MS = 3000;
 const HISTORY_LINES = 2000;
 
 // The built client, served unauthenticated on every path no API or socket route owns (plan 001).
-// Relative to this file rather than the working directory, so `pnpm start` from anywhere finds
-// the same build, and fixed rather than configurable: one process serves one build.
+// Relative to this file rather than the working directory: one process serves one build.
 const CLIENT_DIR = resolve(import.meta.dirname, "..", "dist", "client");
 
-// How often the hub reconciles against tmux. This is what makes a session someone started by
-// hand in a terminal appear in the strip, and what notices an agent that exited while nobody was
-// looking. Cheap - one `list-sessions` - so it can afford to be frequent.
+// How often the hub reconciles against tmux - what makes a hand-started session appear and notices
+// an agent that exited unwatched. One `list-sessions`, so it can afford to be frequent.
 const SYNC_INTERVAL_MS = 2000;
 
 /**
- * Where the bearer token lives unless `AGENTDECK_TOKEN_FILE` says otherwise.
- *
- * `~/.agentdeck/token`, decided 2026-08-07 and recorded in plan 005's superseded header. The old
- * `/var/lib/agentdeck/token` was reasoned from a boundary that no longer exists, and on a Mac no
- * ordinary user can create it - a plain `pnpm start` failed on the token before it ever reached
- * the port. This is a directory the user owns, that no session is pointed at, and
- * that exists on a clean host without a single environment variable being set.
+ * Where the bearer token lives unless `AGENTDECK_TOKEN_FILE` says otherwise: a directory the user
+ * owns, that no session is pointed at, and that exists with no environment variable set.
  */
 export const defaultTokenFile = (): string => join(homedir(), ".agentdeck", "token");
 
 /**
- * Whether `tokenPath` sits inside a tree a session can be started in.
- *
- * Used for two files now: the bearer token, and the agent profiles file, which is the more direct
- * surface of the two - it decides the command every session runs, as the human.
- *
- * Plan 005 states this rule in prose in three places and until now nothing checked it. Same uid
- * means the 0600 mode buys nothing between the server and its agents, so placement is the whole
- * control: at or under the root of an allowlisted working tree, an agent's ordinary `ls -la` or
- * `grep -rn token .` ends with the token in a transcript on its way to a model API - and that
- * token starts sessions in every allowed repo, kills live ones, and attaches to every other
- * agent's terminal. A prefix test is right here even though `CwdAllowlist.allows` refuses one:
- * membership is the question there, containment is the question here.
- */
-/**
- * The path a write to `p` would actually land on, symlinks followed.
- *
- * `resolve` normalises `.` and `..` and stops there, so a lexical comparison is blind to a symlink
- * - and `writeFileSync` is not: it follows. Measured before this was here: a symlink at
- * `~/.agentdeck/token` pointing into `dist/client` passed both refusals below, because its lexical
- * path is nowhere near either, and the first boot then created a real 0600 file inside the
- * publish root, served at a URL equal to its filename to anything on the tailnet with no token at
- * all. `src/static.ts` uses `realpath` for exactly this reason; these checks did not.
- *
- * The file itself usually does not exist yet - it is created on first run - so the DIRECTORY is
- * what gets resolved and the basename is rejoined. A missing directory resolves as far as it can.
+ * The path a write to `p` would actually land on, symlinks followed. A lexical `resolve` is blind
+ * to a symlink and `writeFileSync` is not, so a link is how the refusals below were bypassed.
  */
 const wouldLandOn = (p: string, hops = 0): string => {
   const full = resolve(p);
-  // The whole path, when everything on it exists. This is the case a planted symlink whose target
-  // already exists takes.
+  // The whole path, when everything on it exists - the case a link to an existing target takes.
   try {
     return realpathSync(full);
   } catch {
     // Falls through: something on the path does not exist yet, which is the ordinary first run.
   }
-  // The LEAF may still be a symlink even when its target does not exist - which is exactly how the
-  // bypass was planted, since the file the link points at is the one the first boot is about to
-  // create. `realpath` of the directory cannot see that: the link is not in the directory's path.
+  // The LEAF may be a symlink whose target does not exist yet, which is how the bypass was planted:
+  // `realpath` of the directory cannot see it, because the link is not in the directory's path.
   try {
     if (lstatSync(full).isSymbolicLink() && hops < 32) {
       return wouldLandOn(resolve(dirname(full), readlinkSync(full)), hops + 1);
@@ -145,8 +113,7 @@ export const loadToken = (path: string): string => {
     writeFileSync(path, `${token}\n`, { mode: 0o600 });
   } catch (error) {
     // An unhandled EACCES names no variable and offers no next step, which is how a token ends up
-    // wherever happened to be writable - including the one place it must not be. A sentence, like
-    // EADDRINUSE below it.
+    // wherever happened to be writable.
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
       `could not write the bearer token to ${path}: ${reason}. Set AGENTDECK_TOKEN_FILE to a ` +
@@ -158,13 +125,8 @@ export const loadToken = (path: string): string => {
 };
 
 /**
- * Liveness, not correctness (plan 006).
- *
- * Answers from the same event loop that serves the app - a separate thread would report health
- * the app does not have. Includes a hard-timed tmux round trip, because a server that cannot
- * reach tmux cannot do its job even though it looks fine. Touches no agent, no mount and no
- * network: a check that depends on a coding agent behaving produces false positives, and a false
- * positive here costs sessions.
+ * Liveness, not correctness (plan 006): a hard-timed tmux round trip from the same event loop that
+ * serves the app. It touches no agent - a check that depends on one behaving costs sessions.
  */
 const probeTmux = async (socket: string): Promise<boolean> => {
   try {
@@ -185,24 +147,15 @@ export const main = async (): Promise<void> => {
   const port = Number(env("AGENTDECK_PORT", "7777"));
   const tokenFile = env("AGENTDECK_TOKEN_FILE", defaultTokenFile());
 
-  // Where a profile's relative `waiting.settings` lands: agentdeck's own agent-state directory,
-  // named by AGENTDECK_AGENT_STATE_DIR rather than blindly the user's ~/.claude (plan 004).
-  //
-  // The fallback used to be CLAUDE_CONFIG_DIR, which is the operator's live Claude config. That
-  // made an unset variable mean "rewrite, on every boot, the settings file every Claude Code
-  // session on this machine reads, including the ones agentdeck has nothing to do with". A
-  // directory of agentdeck's own is the only fallback that is agentdeck's to write.
+  // Where a profile's relative `waiting.settings` lands (plan 004). A directory of agentdeck's own
+  // is the only fallback it may write: the alternative rewrites the operator's live Claude config.
   const agentStateDir = env(
     "AGENTDECK_AGENT_STATE_DIR",
     join(homedir(), ".agentdeck", "agent-state"),
   );
 
-  // Landing on the fallback silently is the thing to avoid. A profile that declares a hook
-  // mechanism reports `detectsWaiting: true` on the session list, so the strip promises to tell
-  // you when that agent needs you - while the fragment sits in a directory the agent was never
-  // pointed at and the promise is never kept. A tab that is confidently wrong is the one output
-  // this design refuses, so say so at boot rather than letting it be discovered by waiting for a
-  // prompt that never lights up.
+  // Landing on the fallback silently is what to avoid: the strip promises `detectsWaiting` while
+  // the fragment sits in a directory the agent was never pointed at, and never keeps it.
   if (process.env["AGENTDECK_AGENT_STATE_DIR"] === undefined) {
     console.error(
       `agentdeck: AGENTDECK_AGENT_STATE_DIR is not set, so hook settings go to ${agentStateDir}. ` +
@@ -212,15 +165,8 @@ export const main = async (): Promise<void> => {
     );
   }
 
-  // Plan 001 states the Origin check as a property of the server, but the implementation is
-  // present-but-off: src/http.ts and src/ws.ts both short-circuit when no expected origin is
-  // configured. It is named in the README's Environment section now rather than only here, so
-  // that a person can find it before meeting this line. Unset, every /api request and
-  // every /ws upgrade is accepted from any Origin, so a page the phone visits can drive the
-  // socket with a token it has. Say so at boot, the way the agent-state directory does, rather
-  // than leaving a stated protection whose enable switch is invisible.
-  // The tailnet is read here too (plan 006), so the value that variable should have is the real
-  // ts.net origin rather than a placeholder.
+  // The Origin check is present-but-off with no expected origin, so say so at boot. The tailnet is
+  // read here (plan 006) so the advice names the real ts.net origin rather than a placeholder.
   const tailnet = await readTailnet();
   if (process.env["AGENTDECK_ORIGIN"] === undefined) {
     console.error(
@@ -232,12 +178,8 @@ export const main = async (): Promise<void> => {
   for (const line of tailnetAdvice(tailnet, port, process.env["AGENTDECK_ORIGIN"]))
     console.error(line);
 
-  // The cwd allowlist, which is also what the picker is served. One list with two jobs, so it has
-  // exactly one source. AGENTDECK_MOUNTS is the name it was given when the list was also a set of
-  // bind mounts; the list outlived the mounts.
-  // Images the phone sends into a session. Beside the token and the agent state rather than inside
-  // any repository: a screenshot is not the work, and a session's tree is what a git remote
-  // protects.
+  // Images the phone sends into a session, beside the token rather than inside any repository:
+  // a screenshot is not the work, and a session's tree is what a git remote protects.
   const uploads = new UploadStore(
     env("AGENTDECK_UPLOAD_DIR", join(homedir(), ".agentdeck", "uploads")),
   );
@@ -247,9 +189,8 @@ export const main = async (): Promise<void> => {
       .split(":")
       .filter((entry) => entry !== "");
 
-  // AGENTDECK_ROOTS is read on every request rather than captured here, so a repository cloned
-  // while the server runs is startable without the restart that costs every running agent its
-  // hook secret. AGENTDECK_MOUNTS stays for the directories that live outside any root.
+  // AGENTDECK_ROOTS is read on every request rather than captured here, so a clone made while the
+  // server runs is startable with no restart. MOUNTS stays for directories outside any root.
   const mounts = paths("AGENTDECK_MOUNTS");
   const roots = paths("AGENTDECK_ROOTS");
   const allowlist = new CwdAllowlist(mounts, roots);
@@ -262,17 +203,8 @@ export const main = async (): Promise<void> => {
     );
   }
 
-  // Refuse to start rather than write the token somewhere an agent meets it. This is plan 005's
-  // one surviving rule made executable: the token is never inside a tree a session is pointed at.
-  // A refusal is the right shape because there is no degraded mode - starting anyway would serve
-  // exactly the situation the rule exists to prevent, and would do it silently.
-  // `dist/client` is the second dangerous location, and it is dangerous in a way the allowlist
-  // does not describe: everything under it is served to anyone who can reach the port, with NO
-  // bearer token, because the page has to load before a token exists. A token file placed there
-  // is not merely readable by an agent - it is downloadable by any tailnet device with HTTP reach
-  // and no shell at all, at a URL equal to its filename. And the allowlist check cannot catch it:
-  // if this repo is not itself on AGENTDECK_MOUNTS, `tokenInsideAllowlist` says nothing and the
-  // boot check passes.
+  // `dist/client` is published with NO bearer token - the page must load before a token exists -
+  // so a file there is downloadable at a URL equal to its filename. Refused, with no degraded mode.
   const published = [tokenFile, process.env["AGENTDECK_PROFILES"]]
     .filter((path): path is string => path !== undefined)
     .find((path) => tokenInsideAllowlist(path, [CLIENT_DIR]) !== undefined);
@@ -287,9 +219,8 @@ export const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  // A root counts as well as an allowlisted repository, and it has to: a root holds directories
-  // that are not repositories yet, and a clone made tomorrow would swallow a file sitting there
-  // with no boot left to notice it.
+  // A root counts as well as an allowlisted repository: a clone made tomorrow would swallow a file
+  // sitting there, with no boot left to notice it.
   const trees = [...allowlist.paths, ...allowlist.roots];
   const source = (tree: string): string =>
     allowlist.roots.includes(tree) ? "AGENTDECK_ROOTS" : "AGENTDECK_MOUNTS";
@@ -309,11 +240,8 @@ export const main = async (): Promise<void> => {
 
   let profilesRaw: unknown = {};
   const profilesPath = process.env["AGENTDECK_PROFILES"];
-  // The same rule as the token file, for the file that is a more direct host-execution surface
-  // than the token is: `command` and `args` go unmodified into `tmux new-session -- command args`
-  // and run as the human. Inside a tree an agent is started in, an agent rewrites one profile to
-  // `/bin/sh -c 'curl ...|sh'` and the next tap of that agent in the picker runs it - and no
-  // prescribed review command looks at the file. A refusal, because there is no degraded mode.
+  // The same rule as the token file, for a more direct host-execution surface: `command` and `args`
+  // go unmodified into `tmux new-session --` and run as the human, and no review command reads it.
   if (profilesPath !== undefined) {
     const profilesClash = tokenInsideAllowlist(profilesPath, trees);
     if (profilesClash !== undefined) {
@@ -344,14 +272,12 @@ export const main = async (): Promise<void> => {
     }
   }
 
-  // Once, here, and not once per session: one agent-state directory means one settings file,
-  // shared by every session of that agent. What genuinely varies per session is the id and the
-  // secret, and those go through the environment at spawn (plan 004).
+  // Once, not per session: one agent-state directory is one settings file shared by every session
+  // of that agent. What varies per session is the id and the secret, which go via the environment.
   for (const profile of profiles.values()) {
     if (profile.waiting?.via !== "hook") continue;
-    // Always under the agent-state directory: `parseWaiting` refuses an absolute path or one that
-    // climbs out, because this file is written at every boot and would otherwise be an arbitrary
-    // JSON write aimed wherever a profiles file said.
+    // Always under the agent-state directory: written at every boot, so an absolute or climbing
+    // path would be an arbitrary JSON write aimed wherever a profiles file said.
     const settingsPath = join(agentStateDir, profile.waiting.settings);
     try {
       const { changed } = installHookSettings(settingsPath, port);
@@ -359,25 +285,14 @@ export const main = async (): Promise<void> => {
         `agentdeck: ${profile.id} hooks ${changed ? "merged into" : "already present in"} ${settingsPath}`,
       );
     } catch (error) {
-      // A fragment that will not merge disables the MECHANISM, not the profile. That agent drops
-      // to working/idle/exited and stays startable - and the human's own edit stays as they left
-      // it rather than being overwritten with ours.
+      // A fragment that will not merge disables the MECHANISM, not the profile: that agent drops to
+      // working/idle/exited and stays startable, and the human's own edit is left alone.
       console.error(`agentdeck: ${profile.id} hook install failed for ${settingsPath}:`, error);
     }
   }
 
-  // Asked before `loadToken`, which is the call that creates the file. "First run" is the run that
-  // issues the token, and it is the only run where a QR is worth printing: on every later boot the
-  // devices already hold it, and reprinting a live credential into a terminal's scrollback on
-  // every restart is how it ends up in a screen recording. Rotating is deleting the file, which
-  // makes the next boot a first run again.
-  // Asked the way `loadToken` asks it, not with `existsSync`. The two disagreed on one input and
-  // it is the dangerous one: a file that exists but is empty - a truncated write, an interrupted
-  // first boot, a `> ~/.agentdeck/token`, an editor that saved nothing, a restore that produced a
-  // stub. `loadToken` treats that as a first run and mints a NEW token, silently signing out every
-  // device holding the old one, while `existsSync` said "not a first run" so nothing was printed:
-  // no QR, and not even the line naming the file. A rotation nobody asked for and nobody was told
-  // about. One question, one answer.
+  // Asked before `loadToken` creates the file, and asked the way `loadToken` asks it rather than
+  // with `existsSync`: the two disagree on an empty file, which mints a new token silently.
   const firstRun = ((): boolean => {
     try {
       return readFileSync(tokenFile, "utf8").trim() === "";
@@ -395,9 +310,8 @@ export const main = async (): Promise<void> => {
   }
 
   const tmux = new Tmux({ socket });
-  // Before anything asks tmux a question. Idempotent, so it costs nothing when a tmux server is
-  // already up, and it is what lets the server start standalone - without it, /api/health reports
-  // 503 at boot on any machine where nothing else started tmux first.
+  // Before anything asks tmux a question, and idempotent. Without it /api/health reports 503 at
+  // boot on any machine where nothing else started tmux first.
   await tmux.ensureServer();
 
   const registry = new Registry(tmux, profiles, allowlist, token);
@@ -405,18 +319,15 @@ export const main = async (): Promise<void> => {
     tmux,
     registry,
     socket,
-    // `state` is pushed rather than polled (plan 002), and the two sources of a state change - the
-    // hub's inference and an agent's own hook - both go out through this one funnel. `ws` is
-    // declared below, after the hub it announces for; nothing syncs before it exists.
+    // `state` is pushed rather than polled (plan 002), and both sources - the hub's inference and
+    // an agent's hook - go out through this one funnel. `ws` is declared below; nothing syncs first.
     onState: (id, state, exitCode) => {
       ws.pushState(id, state, exitCode);
     },
   });
 
-  // Reaping at start rather than on a timer: "exited 1" in the strip is the answer to "did it
-  // finish, or did I lose it", and expiring it after five minutes puts the question back.
-  // A tmux that will not answer at boot is not a reason to refuse to serve: the sync timer
-  // reconciles again in a moment, and /api/health reports the truth in the meantime.
+  // Reaping at start rather than on a timer: "exited 1" is the answer to "did it finish, or did I
+  // lose it". A tmux that will not answer at boot is no reason to refuse to serve.
   try {
     const reaped = await registry.reap();
     if (reaped.length > 0)
@@ -444,17 +355,8 @@ export const main = async (): Promise<void> => {
         streamFor: (id) => hub.streamFor(id),
         uploads,
         onStateDeclared: (id, state) => {
-          // `POST /api/hooks/:id` is the one route not behind the user's token - it is
-          // authenticated by the per-session secret, which `Registry.secretMatches` checks against
-          // `#meta` alone. A `#meta` entry outlives the session's membership of `Registry.list()`:
-          // a session recreated by hand at a path off the allowlist is dropped by `list()` on every
-          // call, so neither `close()` nor `reap()` ever removes its metadata and its secret keeps
-          // authenticating forever. Without this check that id could put a state frame for an
-          // off-allowlist session onto every socket, which makes this a second place the cwd
-          // boundary is decided - the thing `Registry.list` is documented as being the only one of.
-          //
-          // The hub holds a stream only for what `sync()` adopted through that filtered list, and a
-          // hook POST comes from a running agent, so "attached" is exactly the right set.
+          // A `#meta` entry outlives the session's membership of `list()`, so without this an
+          // off-allowlist session's state reaches every socket. `sync()` adopted set is the right one.
           if (!hub.attached(id)) return;
           hub.announce(id, state);
         },
@@ -475,11 +377,8 @@ export const main = async (): Promise<void> => {
     applyPaneRows: (id, rows) => hub.applyPaneRows(id, rows),
   });
 
-  // Attach to whatever tmux already has before serving, so the first request sees real state
-  // rather than an empty list that fills in a moment later.
-  // A failed poll is a stale session list for one tick. It must never be an exited process:
-  // nothing supervises this one (m0/supervisor-crash-test), so a crash costs every attached
-  // phone its socket until a human with shell access restarts it by hand.
+  // Attach to what tmux already has before serving, so the first request sees real state. A failed
+  // poll is one stale tick, never an exited process: nothing supervises this one.
   try {
     await hub.sync();
   } catch (error) {
@@ -492,9 +391,8 @@ export const main = async (): Promise<void> => {
   }, SYNC_INTERVAL_MS);
   syncTimer.unref();
 
-  // A port already in use is the most ordinary startup failure there is, and Node's default for
-  // it is an unhandled 'error' event: a stack trace, a crash, and no sentence saying which port
-  // or what to do. Errors are sentences here for the same reason they are on the wire.
+  // A port already in use is the most ordinary startup failure there is, and Node's default is an
+  // unhandled 'error' event with no sentence saying which port or what to do.
   server.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE") {
       console.error(
@@ -531,10 +429,8 @@ export const main = async (): Promise<void> => {
       console.log(line);
   }
 
-  // Collecting what sessions leave behind, for as long as this process is up. The deck is the gate
-  // the operator asked for - no launchd job, and nothing reaping on a Mac where agentdeck is not
-  // running. Announced rather than silent: it kills processes, so a person reading the boot output
-  // has to be able to see that it is on and how to turn it off.
+  // Collecting what sessions leave behind, for as long as this process is up - the deck is the gate
+  // rather than a launchd job. Announced rather than silent, because it kills processes.
   const reapEveryMs = Number(env("AGENTDECK_REAP_INTERVAL_MS", String(60 * 60 * 1000)));
   let stopReaping = (): void => {};
   if (

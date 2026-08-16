@@ -10,13 +10,8 @@ import {
   type RenderAction,
 } from "./stream-position.ts";
 
-// ONE socket, multiplexed over every attached session. Not one per tab: phones background
-// aggressively, and re-establishing N sockets on wake is N chances to fail.
-//
-// The browser's WebSocket is behind a factory so this whole file can be tested under node:test
-// without a browser. That is not a testing convenience bolted on afterwards - the reconnection
-// ladder is the part of the client most likely to be wrong and least likely to be noticed, and it
-// is unreachable from a rendering test.
+// ONE socket multiplexed over every attached session: phones background aggressively, and N sockets
+// is N chances to fail on wake. The WebSocket is behind a factory so this file runs under node:test.
 
 export interface SocketHandlers {
   opened: () => void;
@@ -36,130 +31,49 @@ export type SocketFactory = (token: string, handlers: SocketHandlers) => SocketL
 export type Cancel = () => void;
 
 /**
- * The largest `input` frame this client will put on the wire, in bytes of serialised JSON.
- *
- * The server's receiver caps a frame at 64 KiB (`MAX_FRAME_BYTES` in src/ws.ts) and `ws` enforces
- * that BEFORE the `message` event, so an over-size frame cannot be answered with an `error` frame -
- * the socket is closed with 1009 instead. From here that close is indistinguishable from a phone
- * in a lift: the ladder runs, every tab re-attaches, each re-attach a cold snapshot with a real
- * capture-pane, and the paste is gone with no explanation. xterm delivers a paste as ONE onData
- * event, and 15-30 KB of log or diff is enough once JSON escaping inflates it, so this is an
- * ordinary paste rather than an abuse.
- *
- * So the chunking is here, on the sending side, where the size is known before the frame exists.
- * The number is below the server's cap rather than equal to it because the value that matters is
- * the frame the server measures, and leaving the last kilobyte unclaimed costs nothing.
- * src/client/connection.test.ts asserts the two agree.
+ * The largest `input` frame this client will send. `ws` enforces the server's 64 KiB cap BEFORE the
+ * message event, so an over-size frame closes the socket rather than earning an `error` frame.
  */
 export const MAX_INPUT_FRAME_BYTES = 60 * 1024;
 
 /**
- * How long an input window lasts here, and how many `input` frames may be released in one.
- *
- * The server drops the rest of a window once a socket goes past MAX_FRAMES_PER_WINDOW (100) in
- * RATE_WINDOW_MS (1 s) - it does not close the socket and it does not refuse the message, so an
- * unpaced multi-megabyte paste is applied to the pty with a hole in the middle of it. A hole is
- * worse than a refusal: the shell then runs the concatenation of two fragments nobody typed, and
- * a bracketed paste can lose its closing ESC[201~ and leave the receiving application in paste
- * mode. So the pieces are queued here and released a window at a time, in order.
- *
- * The number is well under the server's because our window and the server's start at different
- * moments: a burst that straddles the boundary spends its budget against two of our windows but
- * one of theirs. Half the server's budget is the value that cannot straddle into a drop.
- * src/client/connection.test.ts asserts the two agree.
+ * How long an input window lasts here, and how many `input` frames it may release in one. The
+ * server silently drops the rest of ITS window, and ours straddle theirs - hence half its budget.
  */
 export const INPUT_WINDOW_MS = 1000;
 export const MAX_INPUT_FRAMES_PER_WINDOW = 40;
 
 /**
- * The most input bytes that may sit in the queue waiting for room in a window.
- *
- * `input()` is not only the keyboard. TerminalPane wires xterm's `onData` straight in, and xterm
- * fires `onData` for the replies the terminal owes to escape sequences the AGENT wrote - DSR, DA1,
- * DA2, DECRQM, the window-op reports. An agent that writes `\e[6n` in a loop is a producer nothing
- * rate-limits, and the drain here is fixed, so without a bound the queue grows until the tab dies.
- * Past the bound the loss is stated rather than silent, because input that is dropped without a
- * word is indistinguishable from input the pty ignored.
+ * The most input bytes that may wait for room in a window. `input()` is not only the keyboard:
+ * xterm answers the AGENT's escape sequences through it, and nothing rate-limits that producer.
  */
 export const MAX_PENDING_INPUT_BYTES = 8 * 1024 * 1024;
 
 /**
- * The heartbeat interval assumed until the server has stated its own, and how many of them of
- * complete silence mean the socket is gone.
- *
- * The silence bound CANNOT be "no traffic for 30 seconds": an idle agent legitimately produces
- * nothing for minutes, so a blind timer reconnects every idle tab in a loop. What is being timed
- * is the server's `{ t: "ping" }`, which arrives on a timer whether or not the agent said anything
- * - so silence past two of them means nothing is arriving, not that the agent is quiet.
- *
- * The interval is the server's, taken from the frame itself, because a constant duplicated here
- * would be a second number free to drift out of step with `PING_INTERVAL_MS`. This default only
- * covers the window before the first heartbeat lands; src/client/connection.test.ts asserts it
- * agrees with the server's.
+ * The heartbeat interval assumed until the server states its own, and how many of them of silence
+ * mean the socket is gone. Timed against the server's ping: an idle agent says nothing for minutes.
  */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 export const HEARTBEAT_GRACE_INTERVALS = 2;
 
 /**
- * The range a stated interval has to fall in to be believed.
- *
- * `intervalMs` is the one wire value this client uses as a control parameter rather than as data
- * handed to the terminal, and #receive does not run the frame through a parser - so an absent,
- * zero, negative, NaN or absurd field would arm a bound that expires on the next tick. Because
- * the interval is Connection state rather than socket state, that bound would then be re-armed on
- * every replacement socket: open, drop, back off, open, forever, against a server that is
- * answering correctly. Anything outside the range falls back to the compiled-in default, which is
- * the same value the pre-first-frame window is timed against.
- *
- * The floor is well below any interval a real deployment would choose, because its job is only to
- * exclude values no clock can honour - src/half-open.test.ts drives a real server at 300 ms to
- * make its bounds observable in a test's lifetime, and that has to keep working.
+ * The range a stated interval must fall in to be believed: `intervalMs` is the one wire value used
+ * as a control parameter, and an absurd one arms a bound every replacement socket then re-arms.
  */
 export const MIN_HEARTBEAT_INTERVAL_MS = 100;
-// A small multiple of the default, not a generous ceiling. The stated interval sets the silence
-// bound, so a large in-range value pushes the moment the client notices a dead socket out with it -
-// at five minutes, the grace multiplier put that at ten, including for the stuck-CONNECTING window
-// this watchdog exists for. Ten minutes of a tab reporting a state nobody is updating is the
-// confidently-wrong tab plan 002 refuses; sixty seconds covers any deployment that would choose
-// one.
+// A small multiple of the default rather than a generous ceiling: the stated interval sets the
+// silence bound, so a large in-range value delays noticing a dead socket by the grace multiplier too.
 export const MAX_HEARTBEAT_INTERVAL_MS = 60_000;
 
 /**
- * How many sockets in a row may carry nothing at all before the client says why, once.
- *
- * The ladder is right to run forever for a phone that is out of range - that is the case plan 002
- * calls the normal one. What it must not do is run forever in the case that is NOT the network:
- * the token probe answers `ok`, so the server is reachable and accepting this token over HTTP,
- * while every socket either never reaches the 101 or reaches it and forwards nothing. That is the
- * stuck-CONNECTING loop the watchdog was written for, and until now its only visible effect was a
- * reconnecting banner and one bearer token re-presented to whatever was answering, once a cycle,
- * forever, with no diagnosis. The difference is diagnosable from here and from nowhere else, so it
- * is said.
- *
- * The ladder is NOT stopped by it. Unlike a 401 or a 403 this is not a verdict from the server -
- * it is an inference from two things agreeing - and a proxy that starts passing upgrades, or a
- * server that finishes starting up, would make it wrong. Said once per run of silence, because the
- * loop it describes hits this line every few seconds.
+ * How many sockets in a row may carry nothing before the client says why, once. It does NOT stop
+ * the ladder: this is an inference from two things agreeing, not a verdict from the server.
  */
 export const SILENT_ATTEMPTS_BEFORE_DIAGNOSIS = 3;
 
 /**
- * How long the token probe may take before the ladder stops waiting for it.
- *
- * The probe is the one point in the ladder where there is no socket, no scheduled retry, and no
- * timer of its own - `#onClosed` has cleared the socket and is awaiting an answer before it decides
- * anything. `fetch` has no timeout, and the case this probe exists for is exactly the one where the
- * network is gone, so the request can stay pending for as long as the browser feels like: on iOS a
- * request issued as the tab is backgrounded routinely never settles at all. `poke()` cannot rescue
- * it either, because `#probing` is what tells a wake not to open a second socket beside a ladder
- * that is still deciding - so unlocking the phone, the moment this whole item exists to make work,
- * hits a guard rather than a reconnect. The result is a tab with no connection, nothing scheduled,
- * and a banner the user cannot act on, for as long as the tab stays open.
- *
- * Expiry is `unreachable` and not `ok`: nothing answered, so nothing has been learned, and the
- * ladder carries on retrying with the token kept. The value is generous next to the ladder's
- * four-second cap, because a slow answer is still an answer and pre-empting one would throw away
- * the only thing that can tell a rejected token from a lost network.
+ * How long the token probe may take before the ladder stops waiting. `fetch` has no timeout and an
+ * iOS request issued as the tab backgrounds may never settle, which strands the whole ladder.
  */
 export const TOKEN_PROBE_TIMEOUT_MS = 10_000;
 
@@ -174,10 +88,7 @@ const usableHeartbeatInterval = (stated: unknown): number =>
 
 const encoder = new TextEncoder();
 
-/**
- * One queued piece of input, with the serialised size it will cost, and the `input()` call it came
- * from so a discarded tail can be told apart from a discarded whole.
- */
+/** One queued piece of input, with the serialised size it will cost. */
 interface PendingInput {
   sessionId: string;
   data: string;
@@ -189,20 +100,13 @@ export interface ConnectionDeps {
   token: string;
   connect: SocketFactory;
   /**
-   * Why this client cannot get in, as one cheap authenticated request.
-   *
-   * A browser never sees the status of a rejected WebSocket upgrade - it reports the same "closed
-   * before open" it reports for a phone in a lift - so the cases are told apart by asking over
-   * HTTP, where the status code survives. Getting this wrong in the safe-looking direction means
-   * backing off forever against a server that is answering correctly, which looks exactly like
-   * being out of range. That is why a 403 is a verdict of its own and not "not a 401, so fine".
+   * Why this client cannot get in, as one cheap authenticated request. A browser never sees the
+   * status of a rejected upgrade, so 401 and 403 are told apart over HTTP where the code survives.
    */
   verifyToken: () => Promise<TokenVerdict>;
   schedule?: (run: () => void, delayMs: number) => Cancel;
   /**
-   * The source of the reconnect ladder's jitter.
-   *
-   * Injected only so a test can pin it; production passes nothing. The jitter is what keeps N
+   * The reconnect ladder's jitter source, injected only so a test can pin it. The jitter keeps N
    * clients woken by one stalled server from walking the ladder in lockstep - see backoff.ts.
    */
   random?: () => number;
@@ -214,12 +118,8 @@ export interface ConnectionEvents {
   state: (sessionId: string, state: SessionState, exitCode: number | undefined) => void;
   sessions: (sessions: Session[]) => void;
   /**
-   * The width the panes are actually wrapped to, as the server states it on connect.
-   *
-   * Taken from the wire rather than from this bundle's own `PANE_COLS`, because the client and the
-   * server are built and restarted separately and the pane's width is the server's fact. Re-stated
-   * by every socket, so a reconnect to a restarted server corrects a client that was rendering at
-   * the old width.
+   * The width the panes are actually wrapped to, as the server states it on connect. From the wire
+   * rather than this bundle's `PANE_COLS`: the two are built and restarted separately.
    */
   paneCols: (cols: number) => void;
   /** A sentence written by the server, rendered verbatim - rewording it loses its advice. */
@@ -259,12 +159,8 @@ export class Connection {
   #socket: SocketLike | undefined;
   #opened = false;
   /**
-   * Whether the CURRENT socket has delivered a frame.
-   *
-   * The boundary the ladder already uses - see `#policy.opened()` - lifted to a field because
-   * `#onClosed` needs it too. A socket that completed the handshake and then said nothing has
-   * proved nothing about the token: the 101 is answered by whatever is in front of the server as
-   * readily as by the server.
+   * Whether the CURRENT socket has delivered a frame. One that completed the handshake and said
+   * nothing proves nothing: the 101 is answered by whatever sits in front of the server.
    */
   #carried = false;
   /** Whether the silent-socket diagnosis has already been said for this run of silence. */
@@ -277,21 +173,15 @@ export class Connection {
   #pendingInput: PendingInput[] = [];
   #pendingBytes = 0;
   /**
-   * Which SESSIONS have had part of their queued input released while more is still queued.
-   *
-   * Per session, not per `input()` call. A Set of per-call group ids only emptied when the queue
-   * fully drained, so a producer that keeps the queue backed up - xterm answering an agent's
-   * `\e[6n` loop, which is the case the byte bound exists for - added ~300k ids a second that were
-   * never removed. The byte bound held while the Set ate the tab, which is the outcome it was
-   * added to prevent.
+   * Which SESSIONS have had part of their queued input released while more is queued. Per session:
+   * a Set of per-call ids grew by ~300k a second under the `\e[6n` loop the byte bound exists for.
    */
   #partiallyReleased = new Set<string>();
   #overflowed = false;
   #framesThisWindow = 0;
   #cancelWindow: Cancel | undefined;
-  // Reset per socket, not carried. A value stated by one socket describing one server's timer says
-  // nothing about the next socket, and it governs the window BEFORE that socket's first frame - so
-  // carrying it meant one frame could stretch every later socket's blind window too.
+  // Reset per socket: a value one socket stated about one server's timer says nothing about the
+  // next, and it governs the window BEFORE that socket's first frame.
   #heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
   /** True while `#onClosed` is waiting on the token probe, when there is no socket but a ladder. */
   #probing = false;
@@ -326,9 +216,8 @@ export class Connection {
     this.#stopped = true;
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
-    // A probe may be out; nothing will act on its answer now, and its bound must not outlive the
-    // connection either. The request itself cannot be recalled, which is why `#onClosed` re-checks
-    // `#stopped` after it rather than trusting that it stopped.
+    // A probe may be out; nothing will act on its answer, and its bound must not outlive this.
+    // The request cannot be recalled, which is why `#onClosed` re-checks `#stopped` after it.
     this.#cancelProbe?.();
     this.#cancelProbe = undefined;
     this.#stopWatchingSilence();
@@ -340,10 +229,8 @@ export class Connection {
   }
 
   /**
-   * Attach, or re-declare an existing attachment's size.
-   *
-   * The attachment set is kept across reconnects on purpose: it is exactly the list of tabs to
-   * re-attach on the next open, each with the epoch and seq it got to.
+   * Attach, or re-declare an existing attachment's size. The set is kept across reconnects: it is
+   * exactly the list of tabs to re-attach on the next open, each with the epoch and seq it got to.
    */
   attach(sessionId: string, cols: number, rows: number): void {
     const existing = this.#attachments.get(sessionId);
@@ -362,24 +249,8 @@ export class Connection {
   }
 
   /**
-   * Raw bytes the user typed, as one `input` frame or as many as it takes to stay under the
-   * receiver's cap.
-   *
-   * Nothing is rendered here. Input comes back as ordinary output because that is what a PTY
-   * does, and the agent may be in a mode that transforms or refuses it - so optimistically
-   * painting the character would be the client asserting something only the agent knows.
-   *
-   * Each cut is as late as the cap allows, found by measuring the frame that will actually be
-   * sent rather than by assuming the worst escaping every character could have (six bytes, for a
-   * control character), which would cut an ordinary ASCII paste into six times as many frames as
-   * it needs. Halving instead of cutting greedily was the other way to be wrong: it rounds up to
-   * the next power of two, so the pieces average half the cap and the paste costs twice the
-   * frames. The cut steps back off a lone high surrogate, because half a code point is not the
-   * same bytes at the other end.
-   *
-   * The pieces stay in order and are released against a frame budget - see INPUT_WINDOW_MS. A PTY
-   * has no notion of message boundaries, so N frames written back to back are the same byte stream
-   * as one; what it does not survive is a frame going missing from the middle.
+   * Raw bytes the user typed, cut into as many `input` frames as the receiver's cap needs and
+   * released in order. Nothing is rendered: the pty echoes, and the agent may transform or refuse it.
    */
   input(sessionId: string, data: string): void {
     let rest = data;
@@ -418,15 +289,8 @@ export class Connection {
   }
 
   #queueInput(sessionId: string, data: string): void {
-    // The original rule, restored: input typed while there is no socket at all is DROPPED, not
-    // held. `#canSend` exists for the CONNECTING window - `#socket` is assigned before the socket
-    // opens - and holding across that is deliberate. Holding across a RECONNECT is not: the queue
-    // survives from the close until the next open, which is a token check with no timeout plus a
-    // backoff delay, and is unbounded on a backgrounded tab where timers are throttled. Everything
-    // typed at a frozen pane then lands at once in whatever the agent is showing by the time the
-    // network returns - a "y" answering a question that is no longer on screen, or two fragments
-    // of a command line concatenated into one nobody typed. README.md tells the user to exercise
-    // exactly this path.
+    // Input typed with no socket at all is DROPPED rather than held: a reconnect is an untimed token
+    // probe plus a backoff, so what was typed at a frozen pane would land in a different screen.
     if (this.#socket === undefined) {
       if (!this.#overflowed) {
         this.#overflowed = true;
@@ -458,9 +322,8 @@ export class Connection {
 
   /** Whether a frame handed to the socket now would actually reach the server. */
   #canSend(): boolean {
-    // `#socket` is assigned synchronously by `#open`, before the socket is OPEN, and
-    // `browserSocket.send` silently discards anything written while it is still CONNECTING. Draining
-    // into that window destroys the head of a paste and delivers the tail.
+    // `#socket` is assigned before the socket is OPEN, and `browserSocket.send` silently discards
+    // anything written while CONNECTING - draining into that window destroys the head of a paste.
     return this.#socket !== undefined && this.#opened;
   }
 
@@ -487,22 +350,15 @@ export class Connection {
     }
     if (this.#pendingInput.length === 0) {
       this.#partiallyReleased.clear();
-      // Once per overflow, which is what the message says - not once per socket. A queue that
-      // drained and then overflows again an hour later drops input silently otherwise, and what
-      // is dropped is the tail of what is in flight while everything queued after it still goes,
-      // so the pty gets a hole and then resumes: the shell runs the concatenation of two fragments
-      // nobody typed.
+      // Once per overflow rather than once per socket: a queue that drains and overflows again an
+      // hour later would otherwise drop input silently, leaving the pty a hole that then resumes.
       this.#overflowed = false;
     }
   }
 
   /**
-   * The next frame to send: as many consecutive pieces for the same session as fit in one.
-   *
-   * The budget above is one frame per slot regardless of how few bytes it carries, and xterm turns
-   * one `\e[6n` the agent wrote into one eight-byte `onData` event. Without coalescing, 200,000 of
-   * those hold the queue for eighty minutes and the user's Ctrl-C waits behind every one of them.
-   * A PTY has no notion of message boundaries, so joining them is the same byte stream.
+   * The next frame: as many consecutive pieces for one session as fit. The budget is one frame per
+   * slot however few bytes it carries, and 200k eight-byte replies would hold the queue for hours.
    */
   #takeFrame(): PendingInput {
     const head = this.#pendingInput.shift() as PendingInput;
@@ -531,24 +387,12 @@ export class Connection {
   }
 
   /**
-   * Try again now, without waiting out the backoff.
-   *
-   * For the moments the browser tells us something changed - the tab came back to the foreground,
-   * the network came back. Waiting out a delay that was scheduled while the phone was in a pocket
-   * is latency for no information.
+   * Try again now, without waiting out the backoff - for a tab coming to the foreground or a
+   * network returning. A delay scheduled while the phone was in a pocket is latency for nothing.
    */
   poke(): void {
-    // `#probing` and not just `#socket`: `#onClosed` clears the socket BEFORE awaiting the token
-    // probe, so between those two points the guard was open and a wake opened a second socket
-    // beside a ladder that was still deciding what to do. `online` fires at exactly the moment a
-    // probe started on a dead network is waiting for, so this was the common case rather than a
-    // race worth shrugging at.
-    // `forbidden` is terminal for the LADDER - retrying an origin refusal cannot help - but it
-    // must not be terminal for the tab. The operator fixes AGENTDECK_ORIGIN and restarts, and
-    // nothing in the app could restart a stopped Connection: the user had to know to reload the
-    // page. A deliberate wake is exactly the signal to try again, so it clears that one stop.
-    // `rejected` is different and stays stopped: the token is wrong, and the answer is the paste
-    // field rather than another attempt with the same credential.
+    // `#probing`, not just `#socket`: `#onClosed` clears the socket before awaiting the probe, and a
+    // wake in that window opened a second socket. `forbidden` stops the ladder but not the tab.
     if (this.#stopped && this.#status === "forbidden") this.#stopped = false;
     if (this.#stopped || this.#socket !== undefined || this.#probing) return;
     this.#cancelRetry?.();
@@ -557,10 +401,8 @@ export class Connection {
   }
 
   /**
-   * The status a re-open should show: whatever the ladder is already showing, or `connecting`.
-   *
-   * Once the reconnecting banner is up, an attempt that has not failed yet must not take it down
-   * and put it back - the flicker says something changed when nothing has.
+   * The status a re-open shows: whatever the ladder already shows, or `connecting`. Taking the
+   * reconnecting banner down and putting it back says something changed when nothing has.
    */
   #resumeStatus(): ConnectionStatus {
     return this.#status === "reconnecting" ? "reconnecting" : "connecting";
@@ -573,11 +415,8 @@ export class Connection {
   }
 
   /**
-   * Restart the silence bound. Called for every frame that arrives, of any type.
-   *
-   * A half-open socket is silent and closed at neither end, so nothing here will ever be told it
-   * went away - this timer is the only thing that can notice, and it is the client's half of the
-   * mechanism the server's ping is the other half of.
+   * Restart the silence bound, for every frame of any type. A half-open socket is closed at neither
+   * end, so this timer is the only thing that can notice it went away.
    */
   #noteTraffic(): void {
     this.#cancelSilence?.();
@@ -598,26 +437,18 @@ export class Connection {
   }
 
   #open(status: ConnectionStatus): void {
-    // Never leave a live socket behind. Assigning over `#socket` used to orphan whatever was there:
-    // still connected, still delivering frames, still holding a `closed` handler that would run the
-    // whole ladder a second time. One drop plus one wake produced three sockets and two ladders,
-    // each re-attaching every tab with its own cold snapshot - against the server that was already
-    // the reason for the reconnect.
+    // Never leave a live socket behind: assigning over `#socket` orphaned one that was still
+    // delivering frames and still holding a `closed` handler that would run the ladder again.
     this.#dropSocket?.();
-    // AFTER the drop, because dropping a socket that had carried frames runs the whole ladder
-    // synchronously - no probe is needed for a socket the server was talking to seconds ago - and
-    // it ends by scheduling a retry. That retry would then fire beside the socket opened below and
-    // drop it, and every tab would re-attach again for nothing: on this client a re-attach is a
-    // cold snapshot per session at the server that was already the reason for reconnecting. This
-    // open supersedes any retry, whether it was already outstanding or was just made.
+    // AFTER the drop: dropping a socket that carried frames runs the ladder synchronously and ends
+    // by scheduling a retry, which would then fire beside the socket opened below and drop it.
     this.#cancelRetry?.();
     this.#cancelRetry = undefined;
     this.#opened = false;
     this.#carried = false;
     this.#heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.#setStatus(status);
-    // One socket's close is handled once. The watchdog and the socket's own `closed` callback can
-    // both fire - a half-open socket that finally gets an RST minutes later is the ordinary case -
+    // One socket's close is handled once: the watchdog and the socket's own callback can both fire,
     // and running the ladder twice schedules two reconnects racing for one connection.
     let handled = false;
     const finish = (): void => {
@@ -627,33 +458,20 @@ export class Connection {
       this.#dropSocket = undefined;
       void this.#onClosed();
     };
-    // Evidence that this socket carries traffic, which is not the same as having opened: a path
-    // that completes the handshake and then forwards nothing is exactly what the silence bound
-    // exists to catch, and resetting the ladder on the handshake alone turns that into a 250 ms
-    // reconnect loop that never backs off and never shows the user a status.
-    // A socket that cannot even be CONSTRUCTED is a closed socket, not an exception thrown through
-    // whoever called `start()` or through a timer callback with nobody to catch it. `new WebSocket`
-    // throws for a blocked mixed-content or CSP-refused endpoint, and this is called from a
-    // scheduled retry - so the throw left no socket, no retry and a "connecting" banner that would
-    // never change, which is the one shape the ladder is not allowed to end in.
-    //
-    // The thrown error is swallowed rather than shown: a constructor's message quotes the arguments
-    // it refused, and the second argument here is the subprotocol list, which is where the token
-    // is. The error surface is the page, and a page is a screenshot away from being shared.
+    // A socket that cannot be CONSTRUCTED is a closed socket rather than a throw out of a timer
+    // callback. Swallowed, not shown: the message quotes the subprotocol list, where the token is.
     let socket: SocketLike;
     try {
       socket = this.#deps.connect(this.#deps.token, {
         opened: () => {
-          // A finished socket is inert. `close()` only starts the closing handshake, so a socket the
-          // watchdog gave up on can still deliver what the browser had already buffered - onto a
-          // Connection that has moved on to its replacement.
+          // A finished socket is inert: `close()` only starts the handshake, so one the watchdog
+          // gave up on can still deliver buffered frames onto a Connection that has moved on.
           if (handled) return;
           this.#opened = true;
           this.#setStatus("open");
           this.#noteTraffic();
-          // Re-attach every tab with where it got to. The server answers with chunks if the epoch
-          // matches and its buffer still covers that point, and a snapshot otherwise - and the
-          // snapshot case is the common one after the phone has been asleep.
+          // Re-attach every tab with where it got to: chunks if the epoch matches and the buffer
+          // still covers it, a snapshot otherwise - which is the common case after a sleep.
           for (const sessionId of this.#attachments.keys()) this.#sendAttach(sessionId);
           // Anything typed during the CONNECTING window is still queued rather than destroyed.
           this.#flushInput();
@@ -681,20 +499,16 @@ export class Connection {
       socket.close();
       finish();
     };
-    // Armed here rather than in `opened`, because a socket stuck in CONNECTING - the network
-    // freezing between the TCP connect and the 101 - produces no close, no error and no open, so
-    // nothing else would ever notice it. `poke()` cannot help either: it returns while a socket
-    // exists.
+    // Armed here rather than in `opened`: a socket stuck in CONNECTING produces no close, no error
+    // and no open, and `poke()` returns early while a socket exists.
     this.#noteTraffic();
   }
 
   /** A new socket starts a new budget, and nothing queued for the old one is still wanted. */
   #resetInputWindow(report: boolean): void {
     if (report) {
-      // A paste that was cut into frames can be half applied: the frames already sent have reached
-      // the pty and run, and the rest are about to be thrown away. Silence there is the worst
-      // outcome - it looks exactly like a paste that never started, so the user pastes again and
-      // the lines that already ran run twice.
+      // A paste cut into frames can be half applied, and silence looks exactly like one that never
+      // started - so the user pastes again and the lines that already ran run twice.
       const cut = new Set<string>();
       for (const entry of this.#pendingInput) {
         if (this.#partiallyReleased.has(entry.sessionId)) cut.add(entry.sessionId);
@@ -720,15 +534,8 @@ export class Connection {
     this.#resetInputWindow(true);
     if (this.#stopped) return;
 
-    // A socket that carried nothing may be a refusal wearing a network failure's clothes. One that
-    // carried a frame cannot be: the server was talking to this client seconds ago.
-    //
-    // The test is traffic and not the handshake, which is the same boundary the ladder uses. A 101
-    // is answered by whatever sits in front of the server as readily as by the server, and a token
-    // rotated mid-session closes the socket at exactly the moment the last one opened - so reading
-    // "it opened once" as "the token is still good" put the discovery a whole ladder step later
-    // and left the opened-but-silent socket, the one case that is neither the network nor the
-    // token, with nothing to diagnose it from.
+    // A socket that carried nothing may be a refusal wearing a network failure's clothes; one that
+    // carried a frame cannot be. Traffic rather than the handshake, the boundary the ladder uses.
     if (!this.#carried) {
       this.#probing = true;
       let verdict: TokenVerdict;
@@ -737,11 +544,8 @@ export class Connection {
       } finally {
         this.#probing = false;
       }
-      // The verdict describes a connection that may no longer exist. `stop()` between the request
-      // and its answer is ordinary - the user pastes a new token, which replaces this Connection -
-      // and `unauthorized()` is not a notification: it signs the user out and clears the stored
-      // token, so a dead connection's late 401 wipes what they just typed. The method already
-      // checks `#stopped` on either side of this block; the branches below were jumping both.
+      // The verdict describes a connection that may no longer exist, and `unauthorized()` is not a
+      // notification: it clears the stored token, so a late 401 would wipe a freshly pasted one.
       if (this.#stopped) return;
       if (verdict === "rejected") {
         this.#policy.closed("token-rejected");
@@ -751,9 +555,8 @@ export class Connection {
         return;
       }
       if (verdict === "forbidden") {
-        // The token is good and the server is answering. Retrying is the one thing that cannot
-        // help, and it is also what this used to do - the ladder ran forever and the user watched
-        // a reconnecting banner for a configuration mistake nothing was going to mention.
+        // The token is good and the server is answering, so retrying is the one thing that cannot
+        // help - this used to run the ladder forever over a configuration mistake.
         this.#policy.closed("origin-rejected");
         this.#stopped = true;
         this.#setStatus("forbidden");
@@ -763,9 +566,8 @@ export class Connection {
         );
         return;
       }
-      // Only for `ok`. `unreachable` retries identically but says the opposite thing: the probe
-      // did not answer either, so the network is the likeliest explanation and asserting a broken
-      // proxy would be a guess presented to the user as a finding.
+      // Only for `ok`. `unreachable` retries the same but means the opposite: the probe did not
+      // answer either, so asserting a broken proxy would be a guess presented as a finding.
       if (verdict === "ok") this.#diagnoseSilence();
     }
     if (this.#stopped) return;
@@ -781,12 +583,8 @@ export class Connection {
   }
 
   /**
-   * The probe's verdict, or `unreachable` if it does not produce one.
-   *
-   * Bounded by TOKEN_PROBE_TIMEOUT_MS, and a rejection is the same answer as the timeout for the
-   * same reason: what the ladder needs from this call is a decision it can act on, and the one
-   * thing it cannot survive is not getting one. Both are the state the probe is describing anyway -
-   * nothing answered.
+   * The probe's verdict, or `unreachable` if it does not produce one. A rejection is the same
+   * answer as the timeout: the ladder cannot survive not getting a decision, and both mean silence.
    */
   async #probe(): Promise<TokenVerdict> {
     try {
@@ -837,9 +635,8 @@ export class Connection {
   }
 
   #send(message: ClientMessage): void {
-    // Dropped rather than queued while disconnected. Everything the server needs to catch up is
-    // re-sent on open from the attachment set, and a queued keystroke arriving seconds later
-    // lands in whatever the agent is doing by then.
+    // Dropped rather than queued while disconnected: everything the server needs is re-sent on open
+    // from the attachment set, and a queued keystroke lands in whatever the agent is doing by then.
     this.#socket?.send(JSON.stringify(message));
   }
 
@@ -873,9 +670,8 @@ export class Connection {
         this.#events.error(message.sessionId, message.message);
         return;
       case "ping":
-        // Nothing is sent back. The proof of life is that the frame arrived at all, and a reply
-        // would put periodic traffic through the same window a user's typing is budgeted against -
-        // an idle tab would spend part of its input allowance on saying nothing.
+        // Nothing is sent back: the frame arriving is the proof of life, and a reply would spend
+        // part of an idle tab's input budget on saying nothing.
         this.#heartbeatIntervalMs = usableHeartbeatInterval(message.intervalMs);
         // Re-armed, because the bound set moments ago was measured against the previous interval.
         this.#noteTraffic();

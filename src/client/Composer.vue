@@ -26,11 +26,8 @@ const resize = (): void => {
 };
 
 /**
- * Hand the text up and empty the box, WITHOUT taking focus off it.
- *
- * A submit that blurs closes the soft keyboard, and the next thing a person does after answering
- * an agent is usually answer it again. `preventDefault` on the button's pointerdown is what keeps
- * the focus; the height is reset after Vue has applied the empty value.
+ * Hand the text up and empty the box WITHOUT taking focus off it: a submit that blurs closes the
+ * soft keyboard, and the next thing after answering an agent is usually answering it again.
  */
 const submit = (mode: SubmitMode): void => {
   const value = text.value;
@@ -41,10 +38,8 @@ const submit = (mode: SubmitMode): void => {
 };
 
 /**
- * Put text in the box for the person to finish, rather than on the wire.
- *
- * For the uploaded image's path: an image with no question attached is a turn spent on "what am I
- * looking at", so the path lands here and the sentence is written beside it before anything is sent.
+ * Put text in the box for the person to finish rather than on the wire - for an uploaded image's
+ * path, so the question is written beside it before anything is sent.
  */
 const insert = (value: string): void => {
   text.value = `${text.value}${value}`;

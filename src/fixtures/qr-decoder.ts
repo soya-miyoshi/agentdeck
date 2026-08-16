@@ -1,17 +1,5 @@
-// A QR decoder written from the spec, sharing no code with the encoder under test.
-//
-// It lives here rather than inside one test file because two tests need it and neither may import
-// the other: `src/qr.test.ts` decodes the grid and the rendered lines, and `src/first-run-qr.test.ts`
-// decodes what the SERVER actually printed to its stdout on a first boot. Importing one test file
-// from another would run its cases twice and make a failure ambiguous about which file it came
-// from.
-//
-// It is deliberately not a mirror of `src/qr.ts`: it reads the format information out of the grid
-// to learn which mask was applied (the encoder picks the mask by a penalty search, so assuming
-// mask 0 would decode most codes and silently mis-decode the rest), rebuilds the function-module
-// map itself, walks the zig-zag, de-interleaves the Reed-Solomon blocks and reassembles the bytes.
-// It does NO error correction, which is the point: the data codewords have to be right on their
-// own rather than being repaired on the way out.
+// A QR decoder written from the spec, sharing no code with the encoder under test. It reads the
+// mask out of the format information rather than assuming one, and does NO error correction.
 
 const MASKS: readonly ((row: number, col: number) => boolean)[] = [
   (i, j) => (i + j) % 2 === 0,
@@ -24,9 +12,8 @@ const MASKS: readonly ((row: number, col: number) => boolean)[] = [
   (i, j) => (((i + j) % 2) + ((i * j) % 3)) % 2 === 0,
 ];
 
-// Alignment pattern centre coordinates, versions 1 to 6. Beyond version 6 the grid also carries
-// version information blocks, which this decoder does not read - so it refuses a version it does
-// not handle instead of silently mis-decoding one.
+// Alignment pattern centres, versions 1 to 6. Past 6 the grid carries version information this does
+// not read, so it refuses rather than silently mis-decoding.
 const ALIGNMENT: readonly (readonly number[])[] = [
   [],
   [],
@@ -37,11 +24,8 @@ const ALIGNMENT: readonly (readonly number[])[] = [
   [6, 34],
 ];
 
-// Blocks and data codewords per block at error correction level M, versions 1 to 6. The data is
-// not laid down block by block: it is interleaved codeword-wise, so that a burst of damage across
-// the printed code is spread over every block instead of destroying one of them. A 43-character
-// token needs 45 data codewords, which is version 4 - two blocks - so this is not a corner the
-// tests could skip. Every version up to 6 has equal-sized blocks, which is why one pair suffices.
+// Blocks and data codewords per block at level M, versions 1 to 6. Data is interleaved codeword-wise
+// rather than block by block, and a 43-character token is version 4 - two blocks, not a corner case.
 const BLOCKS_M: readonly (readonly [blocks: number, dataPerBlock: number])[] = [
   [0, 0],
   [1, 16],
@@ -166,12 +150,8 @@ export const decodeGrid = (grid: readonly (readonly boolean[])[]): string => {
 };
 
 /**
- * The rendered terminal lines back to a grid, the way a camera sees them.
- *
- * Each line is one text row carrying TWO module rows: the foreground colour paints the upper half
- * block, the background the lower. Reading it back this way - rather than reading `qrModules` - is
- * what catches a swapped foreground and background, an off-by-one quiet zone, or a line that lost
- * its reset.
+ * The rendered terminal lines back to a grid, the way a camera sees them - one text row is TWO
+ * module rows. Reading it back this way catches a swapped foreground, or a line that lost its reset.
  */
 export const gridFromLines = (lines: readonly string[]): boolean[][] => {
   const rows: boolean[][] = [];
@@ -187,9 +167,8 @@ export const gridFromLines = (lines: readonly string[]): boolean[][] => {
     }
     rows.push(top, bottom);
   }
-  // The padded code is square, so one bound trims both axes. It is taken from a row rather than
-  // from `rows.length` because the last text line carries a module row that is past the bottom
-  // edge whenever the padded size is odd, which it always is: 4 * version + 17 + 8.
+  // The padded code is square, so one bound trims both axes - taken from a row, because the last
+  // text line carries a module row past the bottom edge whenever the padded size is odd.
   const padded = rows[0]?.length ?? 0;
   return rows
     .slice(QUIET_MODULES, padded - QUIET_MODULES)

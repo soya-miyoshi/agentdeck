@@ -1,12 +1,7 @@
 import type { RingBuffer } from "./ring-buffer.ts";
 
-// What to send a client that has just attached or asked to resync.
-//
-// Kept as a pure decision, separate from the socket, because this is the branch the protocol is
-// least able to get away with being wrong about: choosing "chunks" for a client that is not
-// actually covered paints a hole, and choosing it for a client from a previous epoch paints
-// nothing at all, forever, while the socket, the session list and the status field all look
-// correct.
+// What to send a client that has just attached or asked to resync, as a pure decision: "chunks" for
+// a client that is not covered paints a hole, and for a stale epoch it paints nothing, forever.
 
 export type AttachPlan =
   | { kind: "chunks"; from: number }
@@ -23,9 +18,8 @@ export const planAttach = (
     return { kind: "snapshot", reason: "no-position" };
   }
 
-  // A mismatched epoch is an unconditional snapshot, and no coverage test is run - the numbers
-  // being compared are not in the same space. This is the branch that makes a server restart
-  // uneventful rather than terminal for the tab.
+  // A mismatched epoch is an unconditional snapshot with no coverage test: the numbers are not in
+  // the same space. This is what makes a server restart uneventful for the tab.
   if (haveEpoch !== buffer.epoch) return { kind: "snapshot", reason: "epoch-changed" };
 
   if (!buffer.covers(haveEpoch, haveSeq)) return { kind: "snapshot", reason: "buffer-rolled" };
@@ -45,41 +39,25 @@ export interface Snapshot {
 export interface SnapshotSources {
   buffer: RingBuffer;
   /**
-   * `capture-pane -p -e`: lines, not terminal state.
-   *
-   * Right for text that has already scrolled away and will never be drawn on again. Wrong for the
-   * screen the agent is still drawing on - cursor position, alternate-screen mode, scroll region
-   * and any partially drawn line are all absent, so painting it into xterm diverges the client
-   * from the pane and every subsequent chunk renders against the wrong state.
+   * `capture-pane -p -e`: lines, not terminal state. Right for text that has scrolled away, wrong
+   * for the screen still being drawn on - no cursor, no scroll region, no partial line.
    */
   captureHistory: () => Promise<string>;
   /**
-   * Whether the pane is on the alternate screen.
-   *
-   * Asked BEFORE the capture rather than filtered after it, because `capture-pane` in alternate
-   * -screen mode does not return nothing - it returns the alternate screen's contents, which is
-   * the TUI's current frame and not history at all. Sent as `history` the client would write a
-   * stale copy of vim above the live one.
+   * Whether the pane is on the alternate screen, asked BEFORE the capture: there `capture-pane`
+   * returns the TUI's current frame rather than nothing, and that is not history.
    */
   alternateScreen: () => Promise<boolean>;
   /**
-   * `refresh-client -R`: the live screen, as bytes that ARE the stream.
-   *
-   * Returns what tmux repainted and the stream's byte count after the repaint's last byte, which
-   * is the only `seq` a snapshot's `data` can honestly carry.
+   * `refresh-client -R`: the live screen as bytes that ARE the stream, with the byte count after
+   * the repaint's last byte - the only `seq` a snapshot's `data` can honestly carry.
    */
   repaint: () => Promise<{ data: string; seq: number }>;
 }
 
 /**
- * Build a cold snapshot: scrollback first, then a repaint of the live screen.
- *
- * The live screen is deliberately NOT `capture-pane`, and it is not the ring buffer either. The
- * buffer holds whatever output happens to be recent, so a session that has been sitting at a
- * prompt for an hour paints as blank or as a fragment - the live screen is not in it. The repaint
- * makes tmux draw the screen into the stream we are already reading: same bytes, same format,
- * same counter, so `seq` is simply the count after the repaint's last byte. A capture is *ahead*
- * of headSeq rather than behind it, so the seq it should carry is unanswerable.
+ * Build a cold snapshot: scrollback, then a REPAINT of the live screen - not the ring buffer, which
+ * holds whatever was recent, and not a capture, whose seq would be unanswerable.
  */
 export const buildSnapshot = async (sources: SnapshotSources): Promise<Snapshot> => {
   const history = (await sources.alternateScreen()) ? "" : await sources.captureHistory();
@@ -90,9 +68,8 @@ export const buildSnapshot = async (sources: SnapshotSources): Promise<Snapshot>
     seq: live.seq,
     data: live.data,
   };
-  // Absent rather than empty when there is nothing: in alternate-screen mode there is no
-  // scrollback to show at all, and that is correct rather than degraded - a full-screen TUI has
-  // no history.
+  // Absent rather than empty: on the alternate screen there is no scrollback at all, which is
+  // correct rather than degraded.
   if (history !== "") snapshot.history = history;
   return snapshot;
 };

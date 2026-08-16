@@ -2,14 +2,8 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { scanRepos } from "./repo-scan.ts";
 
-// One list with two jobs: the `cwd` allowlist that POST /api/sessions validates against, and what
-// GET /api/cwds serves to the phone's new-session picker. It has two sources: AGENTDECK_MOUNTS,
-// whose name is older than the decision to run on the Mac directly, and AGENTDECK_ROOTS, which
-// names directories to scan for repositories every time the list is read.
-//
-// GET /api/cwds exists because the client cannot construct a valid `cwd` on its own. The
-// allowlist is knowable only to the server, and a phone user typing an absolute path into a soft
-// keyboard is not a design.
+// One list with two jobs: the allowlist `POST /api/sessions` validates against, and what the picker
+// is served. AGENTDECK_MOUNTS is fixed; AGENTDECK_ROOTS is rescanned every time the list is read.
 
 export interface Cwd {
   path: string;
@@ -55,11 +49,8 @@ export class CwdAllowlist {
   }
 
   /**
-   * The allowlist as it is right now: the fixed entries plus whatever the roots hold this second.
-   *
-   * Read afresh rather than captured at boot, which is the whole point of the roots: a repository
-   * cloned a moment ago is startable at the next tap of `New session`, with no restart and so no
-   * loss of any running agent's hook secret.
+   * The allowlist right now: the fixed entries plus whatever the roots hold this second. Read
+   * afresh rather than captured at boot, so a repository cloned a moment ago needs no restart.
    */
   get paths(): readonly string[] {
     if (this.#roots.length === 0) return this.#mounts;
@@ -72,31 +63,19 @@ export class CwdAllowlist {
   }
 
   /**
-   * Exact membership, never prefix membership.
-   *
-   * A prefix test would accept `/workspace/agentdeck/../../etc`, and resolving first is not
-   * enough on its own: `/workspace/agentdeck-secrets` also starts with an allowed path. The list
-   * names the repositories chosen, and only those are startable.
+   * Exact membership, never prefix: resolving first is not enough on its own, because
+   * `/workspace/agentdeck-secrets` also starts with an allowed path.
    */
   allows(cwd: string): boolean {
-    // The empty string is "we do not know where this session is", which is what a session started
-    // by hand or one that outlived the process that created it reports. It must never be allowed,
-    // and it would be: `resolve("")` is the server's own working directory, so a server started
-    // inside an allowlisted repository would silently adopt every unknown session on the socket.
+    // The empty string is "we do not know where this session is". It must never be allowed, and it
+    // would be: `resolve("")` is the server's own working directory.
     if (cwd === "") return false;
     return this.paths.includes(resolve(cwd));
   }
 
   /**
    * The refusal a person meets most often, so it says what would have to change rather than 403.
-   *
-   * Two ways out, and they do not cost the same. A clone under a root is free and immediate; an
-   * AGENTDECK_MOUNTS entry needs a restart. That restart used to cost every running session its
-   * `waiting` alerts - the hook secret was minted at random and could not be handed to a process
-   * already running - and this sentence existed to stop someone paying it casually. The secret is
-   * derived now, so the cost is a reconnect and nothing else. Said plainly rather than left as the
-   * old warning, because a refusal that overstates the price is as misleading as one that
-   * understates it.
+   * It prices the restart at a reconnect: overstating that misleads exactly as much as understating.
    */
   refusal(cwd: string): string {
     const free =
@@ -114,10 +93,8 @@ export class CwdAllowlist {
   }
 
   /**
-   * What GET /api/cwds serves: the list, with the live sessions in each.
-   *
-   * A basename shared by two entries is qualified with its parent, because a root holds one
-   * directory per owner and two owners' `dotfiles` would otherwise be two identical rows.
+   * What GET /api/cwds serves: the list, with the live sessions in each. A shared basename is
+   * qualified with its parent, or two owners' `dotfiles` under one root are identical rows.
    */
   list(sessionsByCwd: ReadonlyMap<string, string[]>): Cwd[] {
     const paths = this.paths;

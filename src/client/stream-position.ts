@@ -1,9 +1,5 @@
-// What the client does with a `snapshot` or a `chunk`, as a pure decision.
-//
-// This is the branch the client is least able to get away with being wrong about, and the
-// symptoms are all silent: render a chunk over a gap and the pane is missing the escape sequence
-// that would have reset the colour, render one from a stale epoch and every subsequent byte lands
-// against the wrong screen state. Neither shows up as an error anywhere.
+// What the client does with a `snapshot` or a `chunk`, as a pure decision. Every symptom of getting
+// it wrong is silent: a hole where a colour reset was, or every later byte against a stale screen.
 
 /** Where a tab has got to. Only meaningful as a pair: a seq without an epoch is a number in no
  * particular space. */
@@ -37,21 +33,14 @@ export type RenderAction =
 const encoder = new TextEncoder();
 
 /**
- * `seq` counts BYTES, and `data` is a string, so the two are only comparable through an encode.
- *
- * A chunk containing one emoji advances seq by four while advancing `data.length` by two, and a
- * client that used the string length would declare a gap on the first non-ASCII byte the agent
- * printed - which for a coding agent is roughly immediately.
+ * `seq` counts BYTES and `data` is a string, so the two compare only through an encode: one emoji
+ * advances seq by four and `length` by two, which would declare a gap on the first one printed.
  */
 export const byteLength = (data: string): number => encoder.encode(data).length;
 
 /**
- * A snapshot supersedes everything before it: clear and repaint, unconditionally.
- *
- * No comparison against the current position, on purpose. The server sends a snapshot exactly
- * when the two positions are not comparable - a new epoch, or a buffer that has rolled past us -
- * and a client that tried to be clever here would reintroduce the case the snapshot exists to
- * end. This is what makes reconnect uneventful.
+ * A snapshot supersedes everything before it: clear and repaint, unconditionally. No comparison, on
+ * purpose - the server sends one exactly when the positions are not comparable.
  */
 export const receiveSnapshot = (message: SnapshotMessage): RenderAction => {
   const action: RenderAction = {
@@ -71,10 +60,8 @@ export const receiveChunk = (
 ): RenderAction => {
   const start = message.seq - byteLength(message.data);
 
-  // No position at all, or one from an epoch that no longer exists. Asking to resync from byte 0
-  // of the epoch the chunk names is the honest statement of what we hold: nothing of it. The
-  // server answers with the whole buffer if it still has it and a snapshot if it does not, and
-  // both are correct - which is more than can be said for guessing that this chunk is the start.
+  // No position, or one from an epoch that no longer exists. Resyncing from byte 0 of the epoch the
+  // chunk names is the honest statement of what we hold, which guessing would not be.
   if (position === undefined) return { kind: "resync", haveEpoch: message.epoch, haveSeq: 0 };
   if (position.epoch !== message.epoch) {
     return { kind: "resync", haveEpoch: position.epoch, haveSeq: position.seq };
@@ -84,16 +71,14 @@ export const receiveChunk = (
   // snapshot superseded it, and painting it again would duplicate output on the screen.
   if (message.seq <= position.seq) return { kind: "ignore" };
 
-  // A gap. The bytes between what we rendered and where this chunk begins are gone, and the most
-  // likely thing in them is the escape sequence that would have reset the colour - so a repaint
-  // is cheap and a hole is not.
+  // A gap: the missing bytes most likely hold the escape sequence that would have reset the colour,
+  // so a repaint is cheap and a hole is not.
   if (start > position.seq) {
     return { kind: "resync", haveEpoch: position.epoch, haveSeq: position.seq };
   }
 
-  // A partial overlap: this chunk starts before where we are. The server does not produce these,
-  // and the reason it cannot be sliced is that the overlap is measured in bytes while `data` is a
-  // string - cutting it at a byte offset can cut a character in half. Resync rather than guess.
+  // A partial overlap, which the server does not produce. It cannot be sliced: the overlap is bytes
+  // and `data` is a string, so cutting at that offset can halve a character.
   if (start < position.seq) {
     return { kind: "resync", haveEpoch: position.epoch, haveSeq: position.seq };
   }

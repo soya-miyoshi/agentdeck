@@ -10,9 +10,8 @@ const PROTOCOL = "agentdeck";
 export const socketUrl = (href: string): string => {
   const url = new URL(href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  // The server's upgrade handler does not look at the path, so any would work. A distinct one is
-  // chosen so a dev proxy - and later any reverse proxy - can route the upgrade separately from
-  // the page itself, which is served from "/".
+  // The upgrade handler ignores the path, so any would work. A distinct one lets a proxy route the
+  // upgrade separately from the page.
   url.pathname = "/ws";
   url.search = "";
   url.hash = "";
@@ -29,9 +28,8 @@ export const browserSocket: SocketFactory = (token, handlers) => {
   socket.addEventListener("message", (event: MessageEvent<string>) => {
     handlers.message(event.data);
   });
-  // `close` fires for a failed handshake too, and the browser deliberately does not say which -
-  // a rejected token and a phone in a lift are the same event here. `error` always precedes a
-  // `close`, so only `close` is listened for and the two are told apart over HTTP instead.
+  // `close` fires for a failed handshake too, and a rejected token looks like a phone in a lift.
+  // `error` always precedes it, so only `close` is listened for and HTTP tells the two apart.
   socket.addEventListener("close", () => {
     handlers.closed();
   });

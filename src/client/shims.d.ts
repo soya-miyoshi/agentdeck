@@ -1,8 +1,5 @@
-// Single-file components and stylesheets are Vite's to resolve, not tsc's.
-//
-// The components are deliberately thin - all the logic that can be wrong lives in the .ts files
-// beside them, where node:test can reach it - so typing them as generic components buys accuracy
-// that would cost a `vue-tsc` dependency to collect.
+// Single-file components and stylesheets are Vite's to resolve, not tsc's. The components are thin
+// by design, so typing them generically costs accuracy a `vue-tsc` dependency would have to buy.
 
 declare module "*.vue" {
   import type { DefineComponent } from "vue";

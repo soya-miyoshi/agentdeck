@@ -1,9 +1,5 @@
-// What each live session is actually running, for GET /api/processes and the phone's view of it.
-//
-// The deck knows which tmux pane belongs to which session; nothing else on the Mac does. That map
-// is the whole reason this lives here rather than being a `ps` a person runs: `ps` shows a flat
-// list where a pane's tree looks like every other process, and the question being answered is
-// "what has THIS agent left running".
+// What each live session is actually running. Here rather than a `ps` someone runs, because only
+// the deck knows which pane belongs to which session, and `ps` shows one flat list.
 
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -76,10 +72,8 @@ export const readProcessTable = async (
 };
 
 /**
- * The pane's tree, breadth first so a child is always listed under the parent it belongs to.
- *
- * Cycles cannot happen in a process table, but a `seen` set is kept anyway: this walks data read
- * from a subprocess, and a malformed row must not be able to spin the event loop the deck serves on.
+ * The pane's tree, breadth first so a child is listed under its parent. The `seen` set is kept even
+ * though a process table has no cycles: this walks a subprocess's output, which could be malformed.
  */
 export const treeOf = (rows: readonly RawRow[], panePid: number): ProcessRow[] => {
   const children = new Map<number, RawRow[]>();
@@ -134,11 +128,8 @@ export interface EndTreeOptions {
 }
 
 /**
- * SIGTERM then SIGKILL every pid given, deepest first.
- *
- * Deepest first so a supervisor cannot see a child die and restart it before its own turn comes.
- * The caller collects the pids BEFORE whatever ends the session, because once the pane process is
- * gone its children are reparented to launchd and the tree that named them no longer exists.
+ * SIGTERM then SIGKILL every pid, DEEPEST FIRST so a supervisor cannot restart a child before its
+ * own turn. The caller collects the pids first: once the pane is gone, so is the tree naming them.
  */
 export const endTree = async (
   pids: readonly number[],

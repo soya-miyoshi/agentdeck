@@ -3,19 +3,8 @@ import { randomBytes } from "node:crypto";
 import { RingBuffer } from "./ring-buffer.ts";
 import type { SessionState } from "./tmux.ts";
 
-// One of these per session, for the session's lifetime - not per attached browser client.
-//
-// Two things force that, and neither is negotiable (plan 001):
-//
-//   `state` is on the session LIST, so the strip can say which agent needs you without opening N
-//   streams. That is the entire point of the strip.
-//
-//   Output cadence is a property of the byte stream. Something has to be reading it whether or
-//   not a phone is looking, or an unwatched session has no status at all - and that is the
-//   session most likely to be the one that needs you.
-//
-// The cost, stated rather than discovered: memory is sessions * ring size, not attached tabs *
-// ring size. Ten repos at 256 KB is 2.5 MB, which is not a consideration.
+// One per session for its lifetime, never per attached client: `state` is on the session LIST, and
+// cadence needs reading whether or not a phone is looking. Cost is sessions x ring size.
 
 /** Bytes in a window count as `working`. One keystroke echoing back is not an agent thinking. */
 export const WORKING_BYTE_THRESHOLD = 16;
@@ -44,9 +33,8 @@ export class SessionStream {
   #lastOutputAt = 0;
   #bytesSinceQuiet = 0;
 
-  // Set by a signal more reliable than cadence, and sticky until something contradicts it: an
-  // agent's own turn boundary (plan 004's hook), or process exit. Cadence never overrides these,
-  // because cadence is an inference and these are statements.
+  // Set by a signal more reliable than cadence and sticky until contradicted: a hook, or exit.
+  // Cadence never overrides one, because cadence is an inference and these are statements.
   #declared: SessionState | undefined;
   #exitCode: number | undefined;
 
@@ -56,9 +44,8 @@ export class SessionStream {
   constructor(options: StreamOptions) {
     this.sessionId = options.sessionId;
     this.#now = options.now ?? Date.now;
-    // A random epoch per process. Session ids deliberately survive a restart; this counter must
-    // not appear to, or a client resuming with a stale seq is told it is covered and then paints
-    // nothing forever while every other signal looks healthy.
+    // A random epoch per process: session ids survive a restart and this counter must not appear
+    // to, or a client resuming with a stale seq is told it is covered and paints nothing.
     this.buffer = new RingBuffer(randomBytes(8).toString("hex"), options.capacity);
   }
 
@@ -85,13 +72,8 @@ export class SessionStream {
   }
 
   /**
-   * The state the session list reports.
-   *
-   * Signal order is the plans' order of reliability: process exit is definitive, the agent's own
-   * statement about itself comes next, and cadence is the agent-agnostic fallback. An agent with
-   * no mechanism still gets a useful tab; it simply never claims `waiting`. The design degrades
-   * to fewer states, never to a wrong one - a strip that is confidently wrong is worse than one
-   * that admits it does not know.
+   * The state the session list reports, in order of reliability: exit, the agent's own statement,
+   * then cadence. Fewer states, never a wrong one - an agent with no hook never claims `waiting`.
    */
   state(): SessionState {
     if (this.#declared === "exited") return "exited";

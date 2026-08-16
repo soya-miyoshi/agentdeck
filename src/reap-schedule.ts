@@ -1,9 +1,5 @@
-// The deck collecting what its own sessions leave behind, on an interval, while it is running.
-//
-// The server is the gate on purpose: "reap while agentdeck is up" needs no launchd job, no install
-// step and no second thing to remember to stop. When the deck is down nothing is collected, which is
-// the behaviour asked for. Why it kills whole trees, and what it will not touch, are in
-// scripts/reap.mjs and audit.md.
+// The deck collecting what its sessions leave behind, on an interval while it runs. The server is
+// the gate on purpose: no launchd job, and nothing collected when the deck is down (audit.md).
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -78,11 +74,8 @@ export const runReaper =
     });
 
 /**
- * Run the reaper every `intervalMs` until the returned function is called.
- *
- * Never two at once: a pass that outlives its own interval would otherwise stack up passes that
- * each signal the same pids, and the second one's "SURVIVED the kill" would be the first one's
- * grace period rather than a failure. Unref'd, so this timer alone never holds the process open.
+ * Run the reaper every `intervalMs` until the returned function is called, never two at once: a
+ * second pass would read the first's grace period as "SURVIVED the kill". Unref'd.
  */
 export const startReaping = (
   intervalMs: number,

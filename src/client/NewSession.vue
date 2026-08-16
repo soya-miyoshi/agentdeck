@@ -5,9 +5,8 @@ import type { AgentSummary } from "../agent-profiles.ts";
 import type { Cwd } from "../cwds.ts";
 import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 
-// The picker: a directory and an agent, both chosen from what the server reported. Text labels
-// only, 44px targets, and the sheet carries the bottom inset because it is the last thing above
-// the home indicator while it is open.
+// The picker: a directory and an agent, both from what the server reported. 44px targets, and the
+// sheet carries the bottom inset because it is the last thing above the home indicator.
 
 const props = defineProps<{ cwds: Cwd[]; agents: AgentSummary[]; busy: boolean }>();
 const emit = defineEmits<{ start: [cwd: string, agent: string]; open: [] }>();

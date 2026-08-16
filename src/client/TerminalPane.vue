@@ -6,29 +6,19 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
-// The deck's width is the SERVER's number, arriving as a prop rather than imported here, because
-// the agent lays its output out at the width the PTY reports and a client rendering at a different
-// one leaves the difference as dead margin. `App.vue` holds it and the socket states it.
+// The deck's width is the SERVER's number, arriving as a prop: the agent lays its output out at the
+// width the PTY reports, and rendering at another leaves the difference as dead margin.
 const BASE_FONT_SIZE = 13;
 
 /**
- * What FitAddon subtracts from the width before it divides, and does not tell anyone about.
- *
- * With `scrollback` non-zero it reserves `options.overviewRuler?.width || 14` for a ruler this deck
- * does not draw, and 0 is falsy, so configuring the width to zero yields 14 again - the reserve
- * cannot be turned off. It is added back here because 14 of a phone's 393 CSS pixels is a blank
- * column and a half at the right-hand edge.
+ * What FitAddon silently subtracts before dividing: 14px for an overview ruler this deck does not
+ * draw, and `|| 14` means zero cannot turn it off. Added back - it is 1.5 columns on a phone.
  */
 const RULER_RESERVE = 14;
 
 /**
- * The font size the cell width is measured at, once.
- *
- * `proposeDimensions` reports whole columns, so the cell width read back from it carries the error
- * of that floor - and at a font that nearly fills the pane, the pane's own column count is all
- * the resolution there is, so the error is a percent or two. Measured at the smallest font instead,
- * the same floor lands across several times as many columns and the ratio is good to well under one
- * percent.
+ * The font size the cell width is measured at, once. `proposeDimensions` reports WHOLE columns, so
+ * the smallest font spreads that floor over the most columns and the ratio is best there.
  */
 const PROBE_FONT_SIZE = MIN_FONT_SIZE;
 
@@ -52,19 +42,14 @@ let pending: number | undefined;
 // it is measured once: every later rotation and keyboard open sizes in a single pass off this.
 let cellPerFontPx: number | undefined;
 
-// One finger's position and the fraction of a row it has not yet paid for. xterm has no touch
-// scrolling of its own - `.xterm-screen` sits over `.xterm-viewport`, so a drag on the text reaches
-// an element that does not scroll - and on iOS the page rubber-bands instead.
+// One finger's position and the fraction of a row it has not paid for. xterm has no touch scrolling:
+// `.xterm-screen` sits over the viewport, so a drag on the text rubber-bands the page instead.
 let touchY: number | undefined;
 let carry = 0;
 
 /**
- * The text a copy takes: the selection if there is one, the visible screen otherwise.
- *
- * A phone has no selection to offer. The pane claims every touch gesture so that dragging scrolls
- * the terminal rather than rubber-banding the page, and that is the same gesture iOS would have
- * used to select - so on the device this deck is for, "copy" can only mean the screen. The
- * selection branch is for a desktop browser, which has a mouse and does select.
+ * The text a copy takes: the selection, or the visible screen. A phone has no selection to offer -
+ * the pane claims the gesture iOS would have used to make one - so that branch is the desktop's.
  */
 const copyableText = (term: Terminal): string => {
   const selected = term.getSelection();
@@ -113,13 +98,8 @@ const onTouchEnd = (): void => {
   carry = 0;
 };
 
-// Bring the font to the size at which `cols` fills the width, then take the rows from what that
-// font actually measures. One pass cannot do both: the addon measures the font in effect, so the
-// rows for a font size just assigned are still the previous font's until it has been applied.
-//
-// The size is NOT rounded to a whole pixel. It was, and a floored font is up to a whole step of
-// cell width narrower than the pane on every column - 19 CSS pixels of dead margin,
-// measured off a phone, on top of the 14 the addon reserves.
+// Two passes, because the addon measures the font IN EFFECT: rows for a size just assigned are
+// still the previous font's. The size is not rounded - a floored font is narrow on every column.
 const refit = (): void => {
   // A hidden pane has no size, and fitting it would report 0 rows as this client's constraint -
   // which the server takes as the minimum over attached clients and applies to everybody's pane.
@@ -171,22 +151,15 @@ onMounted(() => {
   const addon = new FitAddon();
   term.loadAddon(addon);
   if (host.value !== undefined) term.open(host.value);
-  // The pane is a VIEW. Everything a person types arrives from the composer instead, because a
-  // keystroke typed here paints nothing until the pty echoes it back - a round trip per character -
-  // and an IME's half-composed text reaches the agent as it is being composed.
-  //
-  // Not xterm's `disableStdin`, which gates `triggerDataEvent` and would swallow the terminal's OWN
-  // replies with it: a TUI that asks where the cursor is (DSR) would wait forever for an answer.
-  // The helper textarea is made read-only instead - which is also what keeps iOS from opening the
-  // soft keyboard over the pane - and the key handler refuses keystrokes from a hardware keyboard.
+  // The pane is a VIEW; everything typed arrives from the composer. NOT `disableStdin`, which gates
+  // `triggerDataEvent` and would swallow the terminal's own DSR replies - read-only textarea instead.
   if (term.textarea !== undefined) {
     term.textarea.readOnly = true;
     term.textarea.inputMode = "none";
   }
   term.attachCustomKeyEventHandler(() => false);
-  // Never rendered locally. Input comes back as ordinary output because that is what a PTY does,
-  // and the agent may be in a mode that transforms or refuses it. What still reaches this after the
-  // read-only textarea is the terminal's answers to the agent's own escape sequences.
+  // Never rendered locally: the pty echoes, and the agent may transform or refuse it. What still
+  // reaches this past the read-only textarea is the terminal's own replies.
   term.onData((data) => {
     emit("input", props.sessionId, data);
   });
@@ -234,10 +207,8 @@ watch(
   },
 );
 
-// The socket states the width after this pane may already have been mounted and sized, and states
-// it again on every reconnect - so a server restarted at a different width corrects the pane it is
-// already streaming to rather than only the next one opened. `cellPerFontPx` is a property of the
-// font and survives, so this costs one font pass and not a re-measure.
+// The socket states the width after this pane may already be mounted, and again on every reconnect,
+// so a restarted server corrects a live pane. `cellPerFontPx` survives, so it is one font pass.
 watch(
   () => props.cols,
   () => {

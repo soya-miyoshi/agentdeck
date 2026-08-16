@@ -1,9 +1,8 @@
 import { readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// Finding the repositories under a root, so a clone made after boot is startable without one.
-// The server knows nothing about ghq: a root is a directory, and a repository is a directory
-// holding a `.git`. `ghq root` is what the Makefile happens to pass.
+// Finding the repositories under a root, so a clone made after boot needs no restart. The server
+// knows nothing about ghq: a repository is a directory holding a `.git`, and that is all.
 
 /** ghq's own layout is host/owner/repo; a host with subgroups adds one level below that. */
 const MAX_DEPTH = 4;

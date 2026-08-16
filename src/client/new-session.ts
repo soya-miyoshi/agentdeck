@@ -31,9 +31,8 @@ export const directoryChoices = (cwds: readonly Cwd[]): DirectoryChoice[] =>
   });
 
 /**
- * The profiles as offerable agents. An agent whose command does not resolve on PATH is offered
- * disabled with the reason rather than hidden. Said in full here rather than as the strip's one
- * word: this is a list being read once, with room, by someone choosing - not a tab at 40 columns.
+ * The profiles as offerable agents: one whose command does not resolve is offered disabled with the
+ * reason rather than hidden, said in full because this is a list read once, with room.
  */
 export const agentChoices = (agents: readonly AgentSummary[]): AgentChoice[] =>
   agents.map((agent) => {

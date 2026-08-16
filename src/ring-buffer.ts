@@ -1,18 +1,5 @@
-// The per-session buffer of recent output, and the arithmetic the wire protocol rests on.
-//
-// `seq` is a cumulative BYTE COUNT, not a message counter. That is the definition that makes the
-// one question the protocol has to answer answerable - whether the buffer still covers a client
-// at `haveSeq` is arithmetic on `headSeq - byteLength` and nothing else. A message counter cannot
-// answer it without keeping every chunk boundary forever, which is a second buffer holding the
-// same bytes (plan 002).
-//
-// `seq` is only meaningful inside an `epoch`, and the two always travel together. The counter
-// lives in memory; session ids deliberately do not. After a server restart the session is still
-// alive with the same id, the client still holds a `haveSeq` in the millions, and `headSeq` has
-// gone back to zero - at which point a one-sided coverage test says "covered" for a client far
-// ahead of anything the server holds, the server sends chunks, and the client discards every one
-// as already seen. The tab paints nothing, forever, while the socket, the session list and the
-// status field all look correct. That is the failure this protocol is least able to notice.
+// The per-session buffer of recent output. `seq` is a cumulative BYTE COUNT, so coverage is
+// arithmetic - and it is meaningful only inside an `epoch`, which a restart is what resets.
 
 export const DEFAULT_CAPACITY = 256 * 1024;
 
@@ -54,9 +41,8 @@ export class RingBuffer {
     return this.#headSeq;
   }
 
-  // Whole chunks are dropped until the buffer fits, then the oldest survivor is sliced. Slicing
-  // rather than dropping it whole is what keeps `tailSeq` exact: a client whose position falls
-  // inside that chunk is still served, and `covers` must not claim more than `since` can deliver.
+  // Whole chunks are dropped until it fits, then the oldest survivor is SLICED: that is what keeps
+  // `tailSeq` exact, and `covers` must never claim more than `since` can deliver.
   #evict(): void {
     while (this.#bytes > this.capacity) {
       const oldest = this.#chunks[0];
@@ -73,14 +59,8 @@ export class RingBuffer {
   }
 
   /**
-   * Whether a client at (haveEpoch, haveSeq) can be served incrementally.
-   *
-   * A missing or mismatched epoch is an unconditional false - no coverage test is run, because
-   * the numbers being compared are not in the same space.
-   *
-   * Within an epoch the test is two-sided: `headSeq >= haveSeq >= tailSeq`. The upper bound is
-   * redundant once epochs are correct, which is exactly why it is there - it is the assertion
-   * that fails loudly if they are ever not.
+   * Whether a client at (haveEpoch, haveSeq) can be served incrementally. A mismatched epoch is an
+   * unconditional false, and the upper bound is redundant once epochs are right - hence kept.
    */
   covers(haveEpoch: string | undefined, haveSeq: number | undefined): boolean {
     if (haveEpoch !== this.epoch) return false;
@@ -89,9 +69,8 @@ export class RingBuffer {
   }
 
   /**
-   * The bytes a covered client has not seen. Callers must check `covers` first; asking for a
-   * position the buffer no longer holds is a programming error rather than a runtime condition,
-   * because the answer would be a silent hole in someone's terminal.
+   * The bytes a covered client has not seen. Callers must check `covers` first: a position the
+   * buffer no longer holds would answer with a silent hole in someone's terminal.
    */
   since(haveSeq: number): Buffer {
     if (haveSeq > this.#headSeq || haveSeq < this.tailSeq) {

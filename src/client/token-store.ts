@@ -11,12 +11,8 @@ export interface TokenStorage {
 }
 
 /**
- * Trim and reject the empty string.
- *
- * A pasted token arrives with whatever whitespace came with it - a trailing newline from a
- * terminal, a leading space from a keyboard - and the subprotocol header this ends up in cannot
- * carry either. The failure would be at the socket layer, before any code of ours runs, and would
- * present as "the socket just will not open" with nothing logged.
+ * Trim and reject the empty string: a pasted token carries whatever whitespace came with it, and
+ * the subprotocol header cannot. That failure is below our code, with nothing logged.
  */
 export const normaliseToken = (raw: string): string | undefined => {
   const trimmed = raw.trim();

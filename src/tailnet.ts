@@ -1,9 +1,6 @@
 /**
- * What `tailscale serve` needs, and which of it this machine actually has (plan 006).
- *
- * Reads `tailscale status --json` - the one cheap, non-mutating source - and turns the two
- * default-off tailnet switches into sentences naming the admin page. Reporting only: nothing here
- * runs `tailscale serve`, because exposure is decided on the host in one place (plan 001).
+ * What `tailscale serve` needs and which of it this machine has (plan 006), from the one cheap
+ * non-mutating source. Reporting only: exposure is decided on the host, in one place.
  */
 
 import { execFile } from "node:child_process";
@@ -121,9 +118,8 @@ export const tailnetAdvice = (
 };
 
 /**
- * Whether `tailscale serve status` output shows Funnel on, i.e. exposure to the public internet
- * rather than to the tailnet. One definition, because the install script and the watchdog must not
- * disagree about what it looks like.
+ * Whether `tailscale serve status` shows Funnel on - the public internet rather than the tailnet.
+ * One definition, because the install script and the watchdog must not disagree about it.
  */
 export const funnelLine = (text: string): string | undefined =>
   text.split("\n").find((line) => /funnel\s+on/i.test(line) || /^\s*Funnel on\b/i.test(line));

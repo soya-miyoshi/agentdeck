@@ -4,20 +4,8 @@ import { realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream";
 
-// The one unauthenticated surface (plan 001, Authentication): the page has to load before there
-// is a token to send, so a bearer check in front of the SPA would make the paste field
-// unreachable. What that buys an attacker is bounded by this file being an inert asset server and
-// nothing else - it injects nothing into the HTML, and it resolves strictly inside the build
-// directory.
-//
-// Strictly means resolved-and-verified, not string-inspected. On this machine there is no
-// boundary between an agent and the home directory, so a path that escapes `dist/client` reads
-// ~/.ssh, ~/.agentdeck/token - which starts sessions in every allowed repository - and every
-// repo on the allowlist. `..`, `%2e%2e`, an absolute path, a null byte and a decomposed unicode
-// spelling all end up as one resolved path, and a SYMLINK planted inside the build output escapes
-// without any of those appearing in the request at all. So both the lexical join and the real
-// path of what was opened are checked against the real path of the root, and anything outside is
-// refused rather than served.
+// The one unauthenticated surface (plan 001): the page must load before a token exists. The lexical
+// join AND the real path opened are both checked, because a planted symlink looks like nothing.
 
 /** A `.js` served as `text/plain` does not execute, so this map is load-bearing, not cosmetic. */
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
@@ -47,10 +35,8 @@ const contentTypeFor = (path: string): string =>
   CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
 
 /**
- * Vite writes a content hash into every filename under `assets/`, so those are safe to cache
- * forever - a new build is a new name. `index.html` is not: it is the file that names the current
- * bundle, and caching it hard leaves a phone on the previous deploy until someone clears a
- * browser they cannot reach.
+ * Vite hashes every filename under `assets/`, so those cache forever - a new build is a new name.
+ * `index.html` names the current bundle, so caching it strands a phone on the previous deploy.
  */
 const cacheControlFor = (urlPath: string): string =>
   urlPath.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
@@ -63,25 +49,13 @@ const NOT_BUILT = (root: string): string =>
   `agentdeck: the client is not built, so there is no page to serve. ` +
   `Run \`pnpm build\`, which writes ${root}.`;
 
-// What an UNAUTHENTICATED caller is told, which is deliberately less. The sentence above names an
-// absolute path, so on the wire it hands out the account name, the checkout layout and the forge
-// owner before any token is presented - and this is the state the server is in when it is most
-// likely to be probed. `/api/health`, the only other unauthenticated route, was held to liveness
-// and a version for the same reason. The instruction still goes to the log, where the person who
-// can act on it is.
+// What an UNAUTHENTICATED caller is told, deliberately less: the sentence above names an absolute
+// path, which hands out the account name and checkout layout before any token is presented.
 const NOT_BUILT_PUBLIC = "the client is not built - run `pnpm build`; see the server log\n";
 
 /**
- * On every answer, including the refusals.
- *
- * `frame-ancestors` is the one that matters most: the `Origin` check on the socket (plan 001)
- * stops a foreign page opening a socket, but a foreign page that FRAMES the deck reaches the same
- * place with a correct origin - the framed document is ours, reads the token from `localStorage`,
- * and forwards keystrokes to a live session's stdin. `X-Frame-Options` says the same thing to
- * anything that predates CSP. `default-src 'self'` is the containment for the other direction: the
- * app renders agent-controlled bytes and loads nothing off-origin, so an injection in the terminal
- * renderer has nowhere to send the token. Styles are inline because the terminal renderer writes
- * them at runtime; images and fonts allow `data:` for the same reason.
+ * On every answer, including the refusals. `frame-ancestors` matters most: a foreign page that
+ * FRAMES the deck passes the Origin check, reads the token and types into a live session.
  */
 const SAFETY_HEADERS: Readonly<Record<string, string>> = {
   "x-content-type-options": "nosniff",
@@ -116,11 +90,8 @@ const sendText = (
 };
 
 /**
- * Resolve `urlPath` to a real file inside `root`, or say why not.
- *
- * `outside` is the refusal: the request named something that does not live under the build
- * directory, however it spelled it. `missing` is the ordinary case of a path this build has no
- * file for, which is what the history fallback answers.
+ * Resolve `urlPath` to a real file inside `root`, or say why not. `outside` is the refusal;
+ * `missing` is the ordinary case of a path this build has no file for, which the fallback answers.
  */
 const locate = async (
   root: string,
@@ -139,14 +110,13 @@ const locate = async (
       return { reason: "outside" };
     }
     // A null byte truncates a path at the syscall boundary, and an ENCODED separator is a segment
-    // lying about how many segments it is - `%2f`, `%5c` and `%00` are how a single component
-    // becomes a path. A segment is one name; anything claiming otherwise does not get resolved.
+    // lying about how many segments it is. A segment is one name; anything else is refused.
     if (/[\0/\\]/.test(piece)) return { reason: "outside" };
     segments.push(piece);
   }
 
-  // Joined onto the root rather than resolved from `/`, so an absolute-looking request is a
-  // relative one - and it is the containment check, not this, that stops `..` climbing out.
+  // Joined onto the root rather than resolved from `/`, so an absolute-looking request is relative.
+  // The containment check below, not this, is what stops `..` climbing out.
   const lexical = resolve(join(root, ...segments));
   if (!contains(root, lexical)) return { reason: "outside" };
 
@@ -160,9 +130,8 @@ const locate = async (
   }
   if (!contains(root, real)) return { reason: "outside" };
 
-  // The file can go away between `realpath` and `stat` - `pnpm build` empties `dist/client` on
-  // every run - and an ENOENT here is the same fact as an ENOENT there: this build has no such
-  // file. Answered as a miss rather than allowed to escape as a rejection.
+  // The file can go away between `realpath` and `stat` - `pnpm build` empties the directory - and
+  // that ENOENT means the same thing: this build has no such file.
   let info: Awaited<ReturnType<typeof stat>>;
   try {
     info = await stat(real);
@@ -175,15 +144,8 @@ const locate = async (
 };
 
 /**
- * Whether the request names a concrete file rather than a client route.
- *
- * The history fallback must not answer these. A browser evicts a registered service worker only
- * when the update check for its script URL comes back 404 (or another error status); a 200 that
- * is `text/html` is an update FAILURE, and the old worker keeps running. So a build that shipped
- * a bad `/sw.mjs` could never be recalled by deleting the file and rebuilding - the phone, which
- * is the one device nobody can open a devtools window on, would keep the worker forever. Anything
- * whose last segment carries an extension this file knows how to serve is a file: absent, it is
- * 404, which is the response that makes the eviction happen.
+ * Whether the request names a concrete file rather than a client route: the history fallback must
+ * not answer these, because only a 404 evicts a service worker - a 200 of HTML is an update failure.
  */
 const namesAFile = (urlPath: string): boolean => {
   if (urlPath.startsWith("/assets/")) return true;
@@ -196,11 +158,8 @@ const contains = (root: string, candidate: string): boolean =>
   candidate === root || candidate.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 
 /**
- * The static half of the server: `dist/client` on every path an API or socket route does not own.
- *
- * A missing build is not a reason to refuse to start - the API and the sockets are the part that
- * is holding someone's agents - but it must not present as a silent 404 on every page load
- * either, so it says the sentence that names the command to run, at boot and on every request.
+ * The static half of the server: `dist/client` on every path no API or socket route owns. A missing
+ * build is not a reason to refuse to start, but it says which command to run rather than 404ing.
  */
 const createStaticHandler = (
   rootDir: string,
@@ -233,10 +192,8 @@ const createStaticHandler = (
         return;
       }
 
-      // History fallback. An unknown path that is not a file is a client route, so the SPA gets
-      // to decide what it means - except where the request NAMES a file, where a miss is a
-      // genuinely absent build artifact and answering it with HTML would give the browser a
-      // script that is a document.
+      // History fallback: an unknown path that is not a file is a client route. Where it NAMES a
+      // file, answering with HTML would hand the browser a script that is a document.
       const target =
         "file" in found
           ? found.file
@@ -258,10 +215,8 @@ const createStaticHandler = (
         res.end();
         return;
       }
-      // `pipe` unpipes on a client disconnect but never destroys the source, and an `fs.ReadStream`
-      // holds a raw descriptor with no finaliser - so every navigation away mid-load, and every
-      // aborted request from anywhere on the tailnet, used to leak one fd until EMFILE. `pipeline`
-      // destroys the source when the destination closes or errors.
+      // `pipe` unpipes on a disconnect but never destroys the source, so every aborted request
+      // leaked an fd until EMFILE. `pipeline` destroys it when the destination closes.
       pipeline(createReadStream(target), res, (error) => {
         if (error !== null && error !== undefined) {
           console.error(`agentdeck: could not read ${target}:`, error);
@@ -269,9 +224,8 @@ const createStaticHandler = (
         }
       });
     })().catch((error: unknown) => {
-      // Nothing supervises this process (plan 001, M4), so an unhandled rejection here is the deck
-      // gone until a human is at the Mac. Answered like the API's handler answers: logged, 500 if
-      // the response has not started, closed if it has.
+      // Nothing supervises this process, so an unhandled rejection is the deck gone until a human
+      // is at the Mac: logged, 500 if the response has not started, closed if it has.
       console.error("agentdeck: static request failed:", error);
       if (res.headersSent) res.end();
       else sendText(req, res, 500, { "cache-control": "no-store" }, "internal error\n");
@@ -280,11 +234,8 @@ const createStaticHandler = (
 };
 
 /**
- * One listener: API and socket routes to `api`, everything else to the built client.
- *
- * Composed rather than folded into `createHandler` so that the `Origin` check and the JSON 404 on
- * `/api/*` are untouched by this - a client that asked for JSON and got the HTML page fails in a
- * way nobody can read.
+ * One listener: API and socket routes to `api`, everything else to the built client. Composed
+ * rather than folded in, so `/api/*` keeps its own Origin check and JSON 404.
  */
 export const withClient = (
   api: (req: IncomingMessage, res: ServerResponse) => void,
@@ -292,16 +243,12 @@ export const withClient = (
 ): ((req: IncomingMessage, res: ServerResponse) => void) => {
   const client = createStaticHandler(rootDir);
   return (req, res) => {
-    // Routing asks the normalised path, because that is the path the API's own routes match on.
-    // Serving asks the RAW one: `new URL` resolves `/../x` to `/x` before any check of ours runs,
-    // so the traversal the client sent has to reach the static handler as it was written.
+    // Routing asks the normalised path; serving asks the RAW one, because `new URL` resolves
+    // `/../x` to `/x` before any check of ours sees the traversal the client actually sent.
     const target = req.url ?? "/";
     const raw = target.split(/[?#]/)[0] ?? "/";
-    // `new URL` runs synchronously in the request listener, before any catch of ours: the WHATWG
-    // parser reads `//` and `/\` as an authority and throws on the empty host, which with nothing
-    // supervising the process is the deck gone. A target the parser refuses is not one of our API
-    // routes, so route it as the raw path - `locate` resolves that itself and refuses anything that
-    // leaves the build directory.
+    // The WHATWG parser reads `//` as an authority and THROWS on the empty host, synchronously in
+    // the request listener. A target it refuses is not an API route, so it is served as raw.
     let pathname: string;
     try {
       pathname = new URL(target, "http://localhost").pathname;

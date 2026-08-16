@@ -4,17 +4,8 @@ import { spawn } from "node-pty";
 import { SessionStream } from "./stream.ts";
 import { baseEnv, exactTarget } from "./tmux.ts";
 
-// The producer the stream has been waiting for: a PTY running `tmux attach`.
-//
-// The server attaches to every session for the session's lifetime, not per attached browser
-// client (plan 001). Two things force it: `state` is on the session LIST, so the strip can say
-// which agent needs you without opening N streams, and output cadence is a property of the byte
-// stream - something has to read it whether or not a phone is looking, or an unwatched session
-// has no status at all. That is the session most likely to be the one that needs you.
-//
-// This spawns `attach` rather than `new-session`. Creating the session is the registry's job and
-// has already happened by the time we get here; conflating the two would mean the thing that
-// reads output also decides what runs, and a reattach after a crash would try to create.
+// The producer the stream waits on: a PTY running `tmux attach`, one per session (plan 001).
+// Never `new-session` - creating is the registry's job, and a reattach must not try to create.
 
 export interface PtyOptions {
   socket: string;
@@ -42,25 +33,19 @@ export class SessionPty {
     this.stream = new SessionStream({ sessionId: options.sessionId });
 
     const spawnFn = options.spawnPty ?? spawn;
-    // `-d` detaches any other client from the session. Without it, a second attach makes tmux
-    // size the pane to the smallest of ALL its clients, including the stale ones we thought had
-    // gone - which would quietly override the minimum-over-attached-browsers rule with tmux's
-    // own arithmetic over a set we do not control.
+    // `-d` detaches every other client: otherwise tmux sizes the pane to the smallest of ALL of
+    // them, overriding the minimum-over-attached-browsers rule with a set we do not control.
     this.#pty = spawnFn(
       "tmux",
       ["-L", options.socket, "attach-session", "-d", "-t", exactTarget(options.sessionId)],
-      // The same explicit environment every other tmux invocation gets. This one is a tmux
-      // CLIENT, and a client is a way into a session's environment: `update-environment` copies
-      // named variables from the attaching client into the session. That option is emptied in
-      // `Tmux.ensureServer`, so this is the belt to that braces - and it costs nothing, because
-      // nothing in this process's environment is anything an attach needs.
+      // The same explicit environment every tmux invocation gets. A CLIENT is a way into a
+      // session's environment via `update-environment`, so this is the belt to that braces.
       { cols: options.cols, rows: options.rows, env: baseEnv() },
     );
 
     this.#pty.onData((data: string) => {
-      // node-pty hands us a string it decoded as UTF-8. Re-encoding is lossless for valid input
-      // and is what keeps `seq` a count of the bytes the socket will actually carry - the whole
-      // definition depends on the counter agreeing with what the client receives.
+      // node-pty hands back a string it decoded as UTF-8; re-encoding keeps `seq` a count of the
+      // bytes the socket will actually carry, which is what the whole definition rests on.
       this.stream.write(Buffer.from(data, "utf8"));
     });
 
