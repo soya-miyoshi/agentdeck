@@ -1,9 +1,5 @@
-// Closing a session from the phone. The route was there from m1; what was missing was any way to
-// reach it, so a session started from the phone could only be ended from the Mac.
-//
-// Two properties are load-bearing and neither is about the request: one tap must not kill an agent,
-// and the cap must not be reachable on a tab the operator is not looking at. Both are asserted on
-// the rule itself; the wiring that carries it is asserted as shape, as in key-row.test.ts.
+// Closing a session from the phone: the route existed, the way to reach it did not. One tap must not
+// kill an agent, and the cap must not be reachable on a tab nobody is looking at.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

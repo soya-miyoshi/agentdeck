@@ -9,10 +9,7 @@ import { Tmux } from "./tmux.ts";
 
 const SEP = "\u001f";
 
-/**
- * A tmux stand-in that actually models sessions, so create/list/kill can be exercised as a whole
- * rather than one call at a time.
- */
+/** A tmux stand-in that models sessions, so create/list/kill can be exercised as a whole. */
 type FakeSessions = Map<string, { dead: boolean; status: string; created: number; path: string }>;
 
 // `list-throws` and `list-omits` are the two ways the call after a create can fail (m0/create-500):
@@ -28,17 +25,15 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
   const tmux = new Tmux({
     socket: "test",
     exec: async (args) => {
-      // One invocation chains several tmux commands and the interesting one is not always first -
-      // a create is preceded by the `set-option -g update-environment <names>` that carries the
-      // session's secrets in the client environment rather than in argv.
+      // One invocation chains several commands and the interesting one is not always first: a create
+      // is preceded by the `set-option -g update-environment` that keeps secrets out of argv.
       const verbAt = (name: string) => args.indexOf(name);
       const verb = ["list-sessions", "new-session", "kill-session", "display-message"].find(
         (n) => verbAt(n) !== -1,
       );
       const rest = verb === undefined ? args : args.slice(verbAt(verb) + 1);
-      // `#undoCreate` confirms with display-message rather than with `list()`, because it runs
-      // exactly when `list()` has failed. `list-omits` is about what the LIST reports, so this
-      // still answers - the session is on the socket either way, which is the point of the check.
+      // `#undoCreate` confirms with display-message because it runs exactly when `list()` failed.
+      // `list-omits` is about the LIST, so this still answers - the session is on the socket.
       if (verb === "display-message") {
         const target = (rest[rest.indexOf("-t") + 1] ?? "").replace(/^=/, "").replace(/:$/, "");
         const found = sessions.get(target);
@@ -60,12 +55,8 @@ const fakeTmux = (sessions: FakeSessions = new Map()) => {
       if (verb === "new-session") {
         const id = rest[rest.indexOf("-s") + 1] ?? "";
         const path = rest[rest.indexOf("-c") + 1] ?? "";
-        // `-A` is attach-if-exists, so a name already on the socket keeps its session and its
-        // creation time rather than being replaced. Modelling that is what lets a test put a
-        // session under our name and check the undo does not kill it.
-        //
-        // A genuinely new one is stamped now, not at a fixed past instant: `#undoCreate` refuses
-        // to kill a session tmux reports as older than the create it is undoing.
+        // `-A` keeps an existing session and its creation time, which is what lets a test plant one
+        // under our name. A new one is stamped now, since the undo refuses anything older.
         if (!sessions.has(id)) {
           sessions.set(id, {
             dead: false,
@@ -132,9 +123,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("its waiting detection SURVIVES the restart, because the secret is derived", async () => {
-    // This is the case that used to mute every tab. The secret was `randomBytes(24)` held only in
-    // memory and in the agent's environment; a new process could not learn it and cannot inject a
-    // replacement into a live session. Derived from a key that outlives the process, it comes back.
+    // What used to mute every tab: a random secret held in memory and in the agent's environment,
+    // which a new process could neither learn nor replace. Derived, it comes back.
     const { registry, sessions } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
@@ -151,9 +141,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("an agent holding a secret from before derivation is reported as muted, not as healthy", async () => {
-    // The one population derivation cannot help: started when the secret was random, so it can
-    // never match. It must not look healthy - a tab that quietly never asks for you is the failure
-    // the flag exists to prevent - so the first refused hook marks it.
+    // The one population derivation cannot help - started when the secret was random - and it must
+    // not look healthy, so the first refused hook marks it.
     const { registry, sessions } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
@@ -168,9 +157,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("recreating it reattaches to the same agent and the hook path still works", async () => {
-    // `new-session -A` attaches to the live session and injects no environment. That used to be
-    // where the secret was lost; the derived one is the SAME string the running agent already
-    // holds, so the reattach path needs to deliver nothing.
+    // `-A` attaches to the live session and injects no environment, which used to lose the secret.
+    // The derived one is the SAME string the agent holds, so nothing needs delivering.
     const { registry, sessions } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
@@ -185,9 +173,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("a session outside the allowlist is not adopted, however it is named", async () => {
-    // The hole m0/host-boundary closed. The name is exactly the one this server would derive for
-    // that path, so the allowlist check on `#{session_path}` is the only thing in the way - and a
-    // same-uid process owns the socket, so it is the thing that has to hold.
+    // The name is exactly the one this server would derive for that path, so the check on
+    // `#{session_path}` is the only thing in the way - and a same-uid process owns the socket.
     const { registry, sessions, plant } = build();
     plant(sessionId("/", "claude"), "/");
     plant(sessionId("/home/someone", "claude"), "/home/someone");
@@ -198,9 +185,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("an allowlisted session whose name is not one of ours is left alone", async () => {
-    // Adoption is a check, not a parse: the id has to be `sessionId(path, agent)` for a CONFIGURED
-    // agent. A hand-started session in an allowlisted repo, or one naming an agent this server
-    // does not have, is not something it can attach a profile to.
+    // Adoption is a check rather than a parse: the id must be `sessionId(path, agent)` for a
+    // CONFIGURED agent, or there is no profile to attach to it.
     const { registry, plant } = build();
     plant("agentdeck-claude-deadbeef", "/workspace/agentdeck");
     plant(sessionId("/workspace/agentdeck", "codex"), "/workspace/agentdeck");
@@ -210,9 +196,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("a session tmux reports with no path at all is not adopted", async () => {
-    // `#{session_path}` is the whole of what adoption recovers, so an entry without one has
-    // nothing to check against the allowlist and nothing to derive an id from. It is left alone
-    // rather than defaulted to anything.
+    // `#{session_path}` is the whole of what adoption recovers, so an entry without one has nothing
+    // to check and nothing to derive from. Left alone rather than defaulted.
     const { registry, sessions, plant } = build();
     plant(sessionId("", "claude"), "");
 
@@ -222,8 +207,7 @@ void describe("adopting a session that outlived the process which created it", (
 
   void test("an adopted corpse is listed as exited, and reap at boot leaves it alone", async () => {
     // `reap()` used to ask "has a secret?" for "did this process start it?", and the secret is now
-    // always present. Left that way, reaping at boot would destroy every adopted corpse - the pane
-    // whose scrollback and exit code are the only answer to "did it finish, or did I lose it".
+    // always present - so left that way, reaping at boot would destroy every adopted corpse.
     const { registry, sessions, die } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     const restarted = restart(sessions);
@@ -260,10 +244,8 @@ void describe("adopting a session that outlived the process which created it", (
   });
 
   void test("a corpse from before the restart survives reap at boot, and a human can still close it", async () => {
-    // The exit report is the whole point. An agent that died while the server was down leaves a
-    // pane whose scrollback says why, and `reap()` at boot runs before the listener is open - so
-    // killing it would delete the answer before any client could ever see it, and take the
-    // `tmux attach` recovery path with it. It stays listed as `exited` until a human closes it.
+    // An agent that died while the server was down leaves a pane whose scrollback says why, and
+    // `reap()` runs before the listener opens - so killing it deletes the answer unseen.
     const { registry, sessions, die } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     die(session.id, "1");
@@ -323,11 +305,8 @@ void describe("creating sessions", () => {
   });
 
   void test("two DIFFERENT agents in one tree produce two sessions and no warning", async () => {
-    // Allowed, and silent since 2026-08-09 (plan 004). The neighbour is usually the `shell`
-    // profile - the operator's own terminal in the repository they are working in - so the
-    // warning fired mostly on the legitimate case, and a warning dismissed by habit is worse than
-    // none. What is live per directory is still shown by `GET /api/cwds`, at the moment of
-    // choosing, which is when it can still change the decision.
+    // Allowed and silent since plan 004: the neighbour is usually the operator's own shell, so the
+    // warning fired mostly on the legitimate case. The picker still shows what is live.
     const { registry } = build();
     await registry.create("/workspace/agentdeck", "claude");
     const second = await registry.create("/workspace/agentdeck", "gemini");
@@ -349,10 +328,8 @@ void describe("creating sessions", () => {
   });
 
   void test("a dead session left by a previous run is replaced, not reported as already running", async () => {
-    // The restart case. `remain-on-exit on` keeps an exited session on the socket, and `#meta` is
-    // memory only - so after a restart `list()` cannot see it and `reap()` at boot cannot clear
-    // it. Without this the next create attaches to the corpse and answers "already running" with
-    // a tab pinned at `exited` and no agent started.
+    // `remain-on-exit on` keeps an exited session on the socket, so without this the next create
+    // attaches to the corpse and answers "already running" with no agent started.
     const { registry, die, sessions } = build();
     const first = await registry.create("/workspace/agentdeck", "claude");
     die(first.session.id, "exited");
@@ -474,9 +451,8 @@ void describe("closing", () => {
   });
 
   void test("will not kill a session it would not list", async () => {
-    // The boundary was one-way: a session started by hand under the same socket is not listed,
-    // not attached and not reaped - and was still killable by DELETE /api/sessions/:id, along
-    // with everything running in it.
+    // The boundary was one-way: a session not listed, attached or reaped was still killable by
+    // `DELETE /api/sessions/:id`, along with everything running in it.
     const { registry, sessions, plant } = build();
     plant("notes", "/home/someone");
     await registry.close("notes");
@@ -496,9 +472,8 @@ void describe("closing", () => {
 
 void describe("the allowlist is matched against where tmux says a session is", () => {
   void test("a session renamed onto ours, pointed elsewhere, is not listed", async () => {
-    // The session name is sessionId(cwd, agent) - a pure function of two knowable things - so
-    // anything running as this user can kill ours and recreate it under the same name with -c /.
-    // Enforcing against the remembered cwd made that shell a tab, reported as being in the repo.
+    // The name is a pure function of two knowable things, so anything running as this user can
+    // recreate ours with `-c /` - and enforcing against the remembered cwd made that a tab.
     const { registry, sessions, plant } = build();
     const { session } = await registry.create("/workspace/agentdeck", "claude");
     sessions.delete(session.id);
@@ -513,10 +488,8 @@ void describe("the allowlist is matched against where tmux says a session is", (
   });
 });
 
-// m0/create-500's second property, over the modelled tmux: a create that cannot finish takes back
-// the session it made. The real-binary version of this lives in src/create-500.test.ts; these are
-// the branches that are hard to provoke against a real tmux - a list that succeeds but omits the
-// session, and the attach path, where killing would destroy somebody else's running agent.
+// A create that cannot finish takes back the session it made. These are the branches hard to
+// provoke against a real tmux: a list that omits the session, and the attach path.
 void describe("a create that cannot finish leaves no orphan", () => {
   void test("the session is killed when the list after the create throws", async () => {
     // The shape of the reported bug, minus its cause: tmux made the session, the call could not
@@ -540,9 +513,8 @@ void describe("a create that cannot finish leaves no orphan", () => {
   });
 
   void test("a retry after a failed create succeeds rather than colliding with its own leftovers", async () => {
-    // Undoing the create has to clear the remembered metadata too. If it did not, the id would
-    // still be in `#meta` and the next create would report an attach to a session that no longer
-    // exists - a failure that outlives the failure.
+    // Undoing has to clear the remembered metadata too, or the next create reports an attach to a
+    // session that no longer exists - a failure outliving the failure.
     const { registry, sessions, fail } = build();
     fail("list-throws");
     await assert.rejects(async () => await registry.create("/workspace/agentdeck", "claude"));
@@ -554,11 +526,8 @@ void describe("a create that cannot finish leaves no orphan", () => {
   });
 
   void test("a session under our name that we did not just create is not killed", async () => {
-    // `attached === false` is not a warrant on its own: it comes from a `has()` that ran BEFORE
-    // `new-session -A`, and the name is `sessionId(cwd, agent)` - computable offline by anything
-    // running as this user, and readable from GET /api/cwds and GET /api/agents by any client.
-    // Something that puts that name on the socket inside the window makes `-A` attach to ITS
-    // session while `attached` still reports false, and the undo would then kill it.
+    // `attached === false` comes from a `has()` that ran BEFORE `-A`, and the name is computable
+    // offline - so something planting it inside that window is killed by the undo.
     const { registry, sessions, plant, fail } = build();
     const id = sessionId("/workspace/agentdeck", "claude");
     plant(id, "/workspace/agentdeck");
@@ -574,10 +543,8 @@ void describe("a create that cannot finish leaves no orphan", () => {
   });
 
   void test("an ATTACH that cannot finish leaves the running agent alone", async () => {
-    // The line between taking back your own mess and destroying somebody's work. The second call
-    // created nothing - tmux handed back a session that was already running - so a failure after
-    // that point must not kill it. Getting this wrong turns a transient tmux error into hours of
-    // an agent's work ended by a request that only wanted to look at it.
+    // The line between taking back your own mess and destroying somebody's work: the second call
+    // created nothing, so a failure after it must not kill what was already running.
     const { registry, sessions, fail } = build();
     const first = await registry.create("/workspace/agentdeck", "claude");
     fail("list-throws");

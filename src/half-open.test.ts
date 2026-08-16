@@ -19,25 +19,8 @@ import {
   PONG_TIMEOUT_MS,
 } from "./ws.ts";
 
-// THE HALF-OPEN CONNECTION, which is the only failure the ping exists for.
-//
-// A socket that is closed, destroyed or errored proves nothing about this: all three produce an
-// event the server already reacts to without any ping at all. The connection this file drives is
-// genuinely silent in both directions and closed at neither end - a TCP proxy sits between the ws
-// client and the server, forwards both ways, and then simply STOPS forwarding while holding both
-// sockets open. That is the closest honest model of a phone that walked out of signal: the peer is
-// gone, no FIN, no RST, nothing arrives, nothing errors.
-//
-// What the proxy does not model: a real radio drop also stops the SERVER's writes from being
-// acknowledged, so a large enough write would eventually fill the send buffer and time out at the
-// TCP layer. Here the proxy accepts the server's bytes happily. That difference makes the test
-// HARDER rather than easier - the server gets no help from the transport, so the ping is the only
-// thing that can notice, which is precisely what is being demonstrated.
-//
-// The ping runs on a scaled interval so a test suite can wait it out. The mechanism, the phase
-// (mark not-alive, ping, terminate on the next tick if no pong came back) and the two-intervals
-// bound are the production ones; only the length of the interval differs, and the relation
-// between the two production constants is asserted below so the scaling cannot drift.
+// THE HALF-OPEN CONNECTION, the only failure the ping exists for: a proxy that stops forwarding while
+// holding both sockets open. Only the interval is scaled; the mechanism is production.
 
 const TOKEN = "half-open-token";
 const TEST_PING_MS = 300;
@@ -153,11 +136,8 @@ interface ClientUnderTest {
 }
 
 /**
- * The real client module against the real server, over a socket that may be proxied.
- *
- * `browserSocket` is the one file that names the browser's WebSocket, and it is the only piece not
- * reachable from node:test; everything the heartbeat lives in - Connection's silence bound, its
- * ladder, its status - is exercised unmodified.
+ * The real client module against the real server, over a socket that may be proxied. Everything the
+ * heartbeat lives in - the silence bound, the ladder, the status - is exercised unmodified.
  */
 const connectClient = async (wsPort: number, sessionId: string): Promise<ClientUnderTest> => {
   const sent: string[] = [];
@@ -210,9 +190,8 @@ const connectClient = async (wsPort: number, sessionId: string): Promise<ClientU
   assert.ok(await waitFor(() => opened, 2000), `client for ${sessionId} never opened`);
   connection.attach(sessionId, 80, 24);
   assert.ok(await waitFor(() => lastStateAt > 0, 2000), `attach to ${sessionId} failed`);
-  // The client's silence bound is the SERVER's interval, carried on the heartbeat itself, and until
-  // the first one lands it is still the production-sized default. Freezing the network before then
-  // would be timing a bound this suite never scaled.
+  // The client's silence bound is the SERVER's interval, carried on the heartbeat, and until the
+  // first lands it is the production default - so freezing before then times an unscaled bound.
   assert.ok(
     await waitFor(() => pings > 0, 2000),
     `no heartbeat reached the client for ${sessionId}`,
@@ -235,10 +214,8 @@ void describe("a half-open connection", () => {
     const proxy = await startProxy(port);
     const deadClient = await attach(proxy.port, "dead");
     const liveClient = await attach(port, "live");
-    // Cleanup has to survive a failing assertion. Without it, the negative control - taking the
-    // terminate() away - leaves a half-open socket and a proxy holding the loop open, and the run
-    // hangs instead of reporting which assertion failed. A test whose failure mode is a hang is a
-    // test nobody can read the result of.
+    // Cleanup has to survive a failing assertion, or the negative control leaves a proxy holding the
+    // loop open - and a test whose failure mode is a hang reports nothing.
     try {
       assert.equal(dead.attachedCount, 1);
       assert.equal(live.attachedCount, 1);
@@ -247,9 +224,8 @@ void describe("a half-open connection", () => {
       const frozenAt = Date.now();
       proxy.freeze();
 
-      // The server drops the client when the ping goes unanswered: it detaches from the stream in
-      // its close handler, so the attached count falling is the server having NOTICED, observed
-      // where the noticing happens rather than where a socket event happens.
+      // The server detaches in its close handler, so the attached count falling is the server having
+      // NOTICED - observed where the noticing happens rather than where a socket event does.
       const noticed = await waitFor(() => dead.attachedCount === 0, TEST_PONG_TIMEOUT_MS * 3);
       const pingNoticedMs = Date.now() - frozenAt;
 
@@ -259,15 +235,13 @@ void describe("a half-open connection", () => {
         `ping noticed after ${String(pingNoticedMs)}ms, past the ${String(TEST_PONG_TIMEOUT_MS)}ms bound`,
       );
 
-      // The connection really was half-open, not closed or errored: the client end is still OPEN and
-      // heard nothing at all after the freeze. Neither of those is true of a socket that was closed
-      // or destroyed, which is the whole reason this test carries a proxy.
+      // The connection really was half-open: the client end is still OPEN and heard nothing after the
+      // freeze, neither of which is true of a closed socket.
       assert.equal(deadClient.socket.readyState, WebSocket.OPEN);
       assert.equal(deadClient.frames.length, framesBeforeFreeze);
 
-      // THE OTHER CLOCK. The dead session's status has not changed since its attach - and neither
-      // has the live one's, because an idle agent legitimately says nothing for minutes. Both look
-      // identical from the strip, which is the confidently-wrong tab this design refuses.
+      // THE OTHER CLOCK: neither session's status has changed since its attach, because an idle
+      // agent says nothing for minutes - so both look identical from the strip.
       const deadStatusUnchangedMs = Date.now() - deadClient.lastStateAt;
       const liveStatusUnchangedMs = Date.now() - liveClient.lastStateAt;
 
@@ -277,9 +251,8 @@ void describe("a half-open connection", () => {
       liveClient.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));
       assert.ok(await waitFor(() => input.length === 1, 2000), "the live socket was not alive");
 
-      // Both timings, in the assertion. Any status-staleness threshold low enough to have called the
-      // dead socket by now would have called the live one at the same moment - so the status clock
-      // cannot beat the ping without being wrong about a healthy session.
+      // Both timings in one assertion: a status-staleness threshold low enough to call the dead
+      // socket would have called the live one at the same moment.
       assert.ok(
         pingNoticedMs <= deadStatusUnchangedMs && liveStatusUnchangedMs >= pingNoticedMs,
         `ping noticed at ${String(pingNoticedMs)}ms; the dead session's status had been unchanged for ` +
@@ -292,11 +265,8 @@ void describe("a half-open connection", () => {
     }
   });
 
-  // THE CLIENT HALF, over the same proxy. The server's ping is a WebSocket control frame, which a
-  // browser answers below the JavaScript API - the page never sees it - so nothing above proves the
-  // CLIENT can notice anything. What the client measures instead is the `{ t: "ping" }` data frame
-  // the server sends on the same timer regardless of agent activity, and the tab that must survive
-  // it untouched is the one whose agent has simply gone quiet.
+  // THE CLIENT HALF, over the same proxy: a control frame is answered below the JavaScript API, so
+  // nothing above proves the client notices. What it measures is the `ping` DATA frame.
   void test("the client's heartbeat default agrees with the server's interval", () => {
     assert.equal(DEFAULT_HEARTBEAT_INTERVAL_MS, PING_INTERVAL_MS);
   });
@@ -325,10 +295,8 @@ void describe("a half-open connection", () => {
         `the client noticed after ${String(clientNoticedMs)}ms`,
       );
 
-      // BOTH CLOCKS, in the assertion. Neither session's status has changed since its attach - an
-      // idle agent legitimately says nothing for minutes - so a status-staleness threshold low
-      // enough to have called the dead socket by now would have called the LIVE one at the same
-      // moment. The heartbeat clock beats the status clock without being wrong about a healthy tab.
+      // BOTH CLOCKS: neither status has changed since its attach, so a staleness threshold low enough
+      // to call the dead socket would have called the LIVE one at the same moment.
       const deadStatusUnchangedMs = Date.now() - dropped.lastStateAt();
       const quietStatusUnchangedMs = Date.now() - quiet.lastStateAt();
       assert.ok(
@@ -337,9 +305,8 @@ void describe("a half-open connection", () => {
           `${String(deadStatusUnchangedMs)}ms and a LIVE tab's for ${String(quietStatusUnchangedMs)}ms`,
       );
 
-      // THE FAILURE MODE THIS DESIGN REFUSES. The quiet tab's agent has produced nothing for the
-      // whole run - several heartbeat intervals - and it is still open, never reconnected, never
-      // reported dead. A blind silence timer would have dropped it at the same moment as the other.
+      // The quiet tab's agent produced nothing for the whole run and is still open, never
+      // reconnected: a blind silence timer would have dropped it alongside the other.
       await new Promise((resolve) => setTimeout(resolve, TEST_PONG_TIMEOUT_MS * 2));
       assert.equal(quiet.connection.status, "open");
       assert.deepEqual(quiet.statuses, []);
@@ -382,16 +349,12 @@ void describe("a half-open connection", () => {
   });
 });
 
-// THE SERVER'S HALF of the client-visible heartbeat, separately from the client that consumes it.
-// The end-to-end test above passes if the two halves agree; these say what the server owes any
-// client, including the two properties plan 002 chose this frame FOR - that it does not depend on
-// a session, and that it does not depend on the agent doing anything.
+// THE SERVER'S HALF, separately from the client that consumes it: the test above passes if the two
+// agree, while these say what the server owes ANY client, session or agent activity notwithstanding.
 void describe("the client-visible heartbeat, as the server sends it", () => {
   void test("reaches a socket that has attached nothing at all", async () => {
-    // Why `state` on a timer was rejected: `state` is per session, so this socket - open,
-    // authenticated, attached to nothing - would receive no heartbeat whatsoever and time itself
-    // out while perfectly healthy. A socket the user has not yet picked a tab in is the ordinary
-    // state of a page that just loaded.
+    // Why `state` on a timer was rejected: it is per session, so a socket attached to nothing would
+    // time itself out while healthy - which is the ordinary state of a page that just loaded.
     const socket = new WebSocket(`ws://127.0.0.1:${String(port)}`, TOKEN);
     const frames: Record<string, unknown>[] = [];
     socket.on("message", (raw: Buffer) => {
@@ -408,9 +371,8 @@ void describe("the client-visible heartbeat, as the server sends it", () => {
       // On a timer, whatever the agent is doing: neither session wrote a byte for the whole wait,
       // and nothing here asked for anything.
       assert.deepEqual(
-        // `hello` and `sessions` are not on a timer: they are sent once, when the socket opens, as
-        // the baseline a reconnecting phone has no other way back to. So they are excluded here
-        // rather than counted as traffic the heartbeat measurement is contaminated by.
+        // `hello` and `sessions` are sent once on open rather than on a timer, so they are excluded
+        // rather than counted as traffic contaminating the measurement.
         frames.filter(
           (frame) => frame["t"] !== "ping" && frame["t"] !== "sessions" && frame["t"] !== "hello",
         ),
@@ -427,9 +389,8 @@ void describe("the client-visible heartbeat, as the server sends it", () => {
   });
 
   void test("does not spend the receiving tab's frame budget", async () => {
-    // The starvation direction: the per-socket budget counts frames RECEIVED from a client, so
-    // heartbeats going the other way must leave a user's typing allowance untouched. Were they
-    // counted, a tab that had been open for a second would arrive at the keyboard already short.
+    // The starvation direction: the budget counts frames RECEIVED, so heartbeats going the other way
+    // must leave a user's typing allowance untouched.
     const client = await attach(port, "live");
     try {
       const pings = (): number => client.frames.filter((frame) => frame["t"] === "ping").length;
@@ -437,9 +398,8 @@ void describe("the client-visible heartbeat, as the server sends it", () => {
 
       input.length = 0;
       client.frames.length = 0;
-      // One short of the full allowance, because the `attach` above may still be inside this
-      // window and is a frame the client really did send. The two-plus heartbeats are the only
-      // thing that could take it over.
+      // One short of the full allowance, because the `attach` above may still be inside this window
+      // and is a frame the client really did send.
       const sent = MAX_FRAMES_PER_WINDOW - 1;
       for (let i = 0; i < sent; i++) {
         client.socket.send(JSON.stringify({ t: "input", sessionId: "live", data: "x" }));

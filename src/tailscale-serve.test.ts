@@ -1,9 +1,5 @@
-// scripts/tailscale-serve.mjs: the one command the operator runs, driven against a STUB tailscale.
-//
-// Both tailnet switches are off on this Mac (TODO.md), so the success path cannot be run against
-// the real CLI. Everything that does not need the switches is here: the two refusals, the hang,
-// the serve-status check, and the AGENTDECK_ORIGIN value the run finishes by naming. The stub is
-// injected the way src/watchdog.test.ts injects one - AGENTDECK_TAILSCALE naming an absolute path.
+// The one command the operator runs, against a STUB tailscale, because the success path needs both
+// tailnet switches. Everything that does not need them is here: the refusals, the hang, the origin.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,10 +11,8 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 const script = new URL("../scripts/tailscale-serve.mjs", import.meta.url).pathname;
-// A name that cannot resolve, deliberately. This was the operator's real ts.net name, and the
-// probe in these tests is a REAL fetch - so once the deck was actually deployed the URL started
-// answering and the test that asserts the fetch fails began failing. A test may not depend on
-// whether the machine it runs on happens to be serving. `.invalid` is reserved for exactly this.
+// A name that cannot resolve, deliberately: this was the operator's real one, and the probe is a REAL
+// fetch - so the test broke the moment the deck was deployed. `.invalid` is reserved for this.
 const DNS_NAME = "agentdeck-test.invalid";
 
 let dir = "";
@@ -79,9 +73,8 @@ exit 1
   );
 };
 
-/** A child process answering `/api/health` 200 with agentdeck's body, and the port it got. Its port
- *  is printed on stdout because the parent must not pick one this test would then race for.
- *  `body` is how a DIFFERENT process holding the port is played. */
+/** A child answering `/api/health` with agentdeck's body, printing its own port so the parent does not
+ *  pick one to race for. `body` is how a DIFFERENT process holding the port is played. */
 const healthResponder = async (
   body = '{"ok":true,"version":"0.0.0-test"}',
 ): Promise<{ server: ChildProcess; port: string }> => {
@@ -137,9 +130,8 @@ void describe("the operator's serve command", () => {
     assert.match(out, /HTTPS certificates are DISABLED/);
     assert.match(out, /https:\/\/login\.tailscale\.com\/admin\/dns/);
     assert.match(out, /NOT running `tailscale serve --bg`/);
-    // The refusal is the point: it never reached the command that blocks forever. Asserted on
-    // what the stub was CALLED with, not on what the script printed - a script that ran
-    // `serve --bg` and then printed a refusal would pass the message check and hang in practice.
+    // The refusal is the point: it never reached the command that blocks forever. Asserted on what
+    // the stub was CALLED with, since printing a refusal after running it would still hang.
     assert.doesNotMatch(out, /putting tailscale serve in front of/);
     assert.equal(invocations().trim(), "status --json");
   });
@@ -316,10 +308,8 @@ void describe("the operator's serve command", () => {
   });
 
   void test("with the server up, the last thing it cannot do is the ts.net fetch", async () => {
-    // The furthest this can be driven without the switches: everything up to the HTTPS request,
-    // which needs a certificate this tailnet has not been given. The health responder is a CHILD
-    // process, because the script is run with spawnSync and an in-process server would never get
-    // the event loop back to answer it.
+    // The furthest this drives without the switches: everything up to the HTTPS request. The health
+    // responder is a CHILD, because `spawnSync` never gives an in-process server the loop back.
     const { server, port } = await healthResponder();
     stubTailscale({
       certDomains: DNS_NAME,
@@ -340,9 +330,8 @@ void describe("the documents say what could not be demonstrated", () => {
   });
 
   void test("the TODO entry records what was demonstrated and what was not", async () => {
-    // This asserted the item was NOT ticked, which was right while both tailnet switches were off.
-    // They were enabled on 2026-08-09 and the HTTPS half was demonstrated, so what has to hold now
-    // is the honest half: the phone itself was never part of it.
+    // This asserted the item was NOT ticked, which was right while both switches were off. What has
+    // to hold now is the honest half: the phone itself was never part of it.
     const todo = await readFile(new URL("../TODO.md", import.meta.url), "utf8");
     const rest = todo.slice(todo.indexOf("**`m4/tailscale-serve`**"));
     const item = rest.slice(0, rest.indexOf("\n- ["));

@@ -1,10 +1,5 @@
-// The toolchain is what M0 delivers, so it is what M0 tests. Every assertion here runs the real
-// tool against a real file rather than reading a config key and trusting it: a setting that is
-// present but not wired up looks identical from the outside, and that is the failure this
-// milestone exists to prevent.
-//
-// The suite deliberately does not shell out to the `test` script - that would recurse. That this
-// file ran at all is the evidence the runner works.
+// Every assertion runs the real tool against a real file rather than reading a config key: a setting
+// present but not wired up looks identical from outside. That this file ran proves the runner.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -55,18 +50,15 @@ const run = (command: string, cwd: string = repoRoot): RunResult => {
   }
 };
 
-// Scratch space for fixtures that must NOT compile, must NOT lint clean, or must NOT be
-// formatted. It lives outside the repo because this suite runs the repo's own typecheck, lint
-// and format check for real, and a deliberately broken file inside the tree would fail them.
+// Scratch space for fixtures that must NOT compile, lint or format cleanly. Outside the repo,
+// because this suite runs the repo's own checks for real and would fail on them.
 const scratchRoot = mkdtempSync(join(tmpdir(), "agentdeck-toolchain-"));
 after(() => {
   rmSync(scratchRoot, { recursive: true, force: true });
 });
 
-// A fixture directory that the toolchain treats exactly as it treats src/: ESM, and the project's
-// own tsconfig rather than a hand-picked set of flags, so the test fails if the real config stops
-// rejecting the construct. typeRoots is repointed only because the directory is outside the repo
-// and would otherwise not find @types/node.
+// A fixture directory the toolchain treats exactly as src/, on the project's own tsconfig rather
+// than hand-picked flags. typeRoots is repointed only because it sits outside the repo.
 const fixture = (label: string, files: Readonly<Record<string, string>>): string => {
   const dir = join(scratchRoot, label);
   mkdirSync(dir, { recursive: true });
@@ -120,9 +112,8 @@ void describe("the M0 acceptance criterion", () => {
     assert.match(script, /"src\/\*\*\/\*\.test\.ts"/);
   });
 
-  // The suites spawn real servers, tmux and ptys, so `node --test`'s default of one worker per core
-  // oversubscribes the machine and starves the wall-clock-bound reconnect tests. Measured, not
-  // guessed: see audit.md under `test-concurrency`.
+  // The suites spawn real servers, tmux and ptys, so one worker per core oversubscribes the machine
+  // and starves the wall-clock-bound tests. Measured rather than guessed (audit.md).
   void test("the test run is capped below the core count, because the suites spawn real processes", async () => {
     const pkg = await readPackageJson();
     const capped = /--test-concurrency=(\d+)/.exec(pkg.scripts?.["test"] ?? "");
@@ -149,9 +140,8 @@ void describe("the M0 acceptance criterion", () => {
 });
 
 void describe("the dependency budget", () => {
-  // A repo guardrail, not a preference: six runtime dependencies, and the budget is already
-  // spent. A test runner or a lint plugin arriving as a runtime dependency is how it gets
-  // overspent without anyone deciding to.
+  // A guardrail rather than a preference: six runtime dependencies and the budget is spent. A lint
+  // plugin arriving as a runtime dependency is how it is overspent without a decision.
   void test("no more than six runtime dependencies are declared", async () => {
     const pkg = await readPackageJson();
     const runtime = Object.keys(pkg.dependencies ?? {});
@@ -168,11 +158,8 @@ void describe("the dependency budget", () => {
 });
 
 void describe("the suite does not leak tmux servers", () => {
-  // A server booted with TMUX_SOCKET set turns `exit-empty off` on the tmux it starts, so that tmux
-  // survives every process the test kills and lives until something signals it. Two files got this
-  // wrong and 236 abandoned tmux servers, 325MB and 3233 sockets had accumulated before anyone
-  // looked. Source-level because the runner's workers each own their sockets: nothing inside one
-  // worker can count what another leaked.
+  // A booted server turns `exit-empty off` on the tmux it starts, so that tmux outlives every process
+  // the test kills - 236 servers had accumulated. Source-level: workers cannot count each other.
   void test("every test file that names a TMUX_SOCKET also kills that server", async () => {
     const testDir = join(repoRoot, "src");
     const names = await readdir(testDir, { recursive: true });
@@ -216,12 +203,8 @@ void describe("Node runs the TypeScript sources directly", () => {
 });
 
 void describe("erasableSyntaxOnly rejects what Node cannot strip", () => {
-  // The three constructs named in the tsconfig comment. Without the flag they type check happily
-  // and then fail at runtime, whenever the code first executes - which is
-  // exactly the class of error a typecheck step exists to move earlier.
-  //
-  // TS1294 is the diagnostic observed from tsc 5.8.3: "This syntax is not allowed when
-  // 'erasableSyntaxOnly' is enabled."
+  // The three constructs named in the tsconfig comment: without the flag they type check happily and
+  // fail at runtime. TS1294 is the diagnostic observed from tsc 5.8.3.
   const cases: ReadonlyArray<readonly [string, string]> = [
     ["enum", "export enum Colour {\n  Red,\n}\n"],
     [
@@ -307,9 +290,8 @@ void describe("eslint is wired to the type checker", () => {
   });
 
   void test("eslint actually reports a floating promise in a .ts file", () => {
-    // --print-config proves the rule is switched on; only running it proves type information
-    // reaches the rule. A project service that cannot resolve the file degrades to a config that
-    // is on and silent.
+    // `--print-config` proves the rule is on; only running it proves type information reaches the
+    // rule, since a service that cannot resolve the file degrades to on-and-silent.
     const dir = fixture("floating", {
       "floating.ts":
         "const later = async (): Promise<void> => {};\nexport const go = (): void => {\n  later();\n};\n",

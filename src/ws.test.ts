@@ -47,11 +47,8 @@ after(() => {
 type Frame = Record<string, unknown>;
 
 /**
- * A socket with every frame queued from the moment it opens.
- *
- * Registering `once("message")` per read loses anything that arrives between reads - the server
- * sends snapshot and state back to back, so the second was dropped and the test hung forever
- * waiting for a message it had already been sent.
+ * A socket with every frame queued from the moment it opens: `once("message")` per read loses what
+ * arrives between reads, and the server sends snapshot and state back to back.
  */
 interface Client {
   socket: WebSocket;
@@ -62,10 +59,8 @@ interface Client {
 const open = async (
   protocols: string | string[] = TOKEN,
   target = url,
-  // Every socket is sent the pane's width and then the session list the moment it opens - the
-  // baseline a reconnecting phone has no other way back to. Neither is what any of the tests below
-  // are reading, so both are dropped here rather than skipped past in each of them; the tests that
-  // ARE about them keep them.
+  // Every socket gets the pane width and then the session list on open. Neither is what the tests
+  // below read, so both are dropped here rather than skipped past in each of them.
   keepBaseline = false,
 ): Promise<Client> => {
   const socket = new WebSocket(target, protocols, { origin: ORIGIN });
@@ -112,11 +107,8 @@ const open = async (
 };
 
 /**
- * A second server, of the same shape as the one above but with its own `repaint`.
- *
- * The three describes below each need a snapshot build they can make fail, or count, on their own
- * terms - which the shared server cannot offer without changing what every other test in the file
- * sees. Everything except the stream and the build is the same server, so it is written once.
+ * A second server of the same shape but with its own `repaint`: the three describes below each need
+ * a build they can fail or count, which the shared server cannot offer.
  */
 const privateServer = async (
   ownStream: SessionStream,
@@ -146,9 +138,8 @@ const privateServer = async (
 
 void describe("the upgrade is authenticated before a socket exists", () => {
   void test("a valid token opens, and the subprotocol is echoed back", async () => {
-    // The echo is not decoration: without it the browser closes the connection at the socket
-    // layer, before any of our code runs, and it presents as "the socket just will not open"
-    // with nothing logged.
+    // The echo is not decoration: without it the browser closes the connection below any code of
+    // ours, presenting as "the socket will not open" with nothing logged.
     const client = await open();
     assert.equal(client.socket.protocol, TOKEN, "the server must echo the selected subprotocol");
     client.socket.close();
@@ -319,10 +310,8 @@ void describe("refusals", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-// The three tests below are about the cold snapshot as it lands on the wire, and each one needs a
-// server of its own because what it varies is a dep the shared fixture fixes for every other test
-// in this file. One helper for all three: they differ only in which of the three snapshot sources
-// they replace, and a second copy of the listen/open/collect dance is where the two halves drift.
+// Three tests about the cold snapshot on the wire, each needing its own server because it varies a
+// dep the shared fixture fixes. One helper, since they differ only in which source they replace.
 type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "repaint">;
 
 const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapshotTimeoutMs">>) => {
@@ -390,14 +379,12 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
   };
 };
 
-// The frame the client actually receives, for the two shapes of a cold snapshot that a test over
-// `buildSnapshot` alone cannot see: `history` has to be ABSENT from the JSON rather than present
-// and empty, and a repaint that fails has to cost one message rather than the process.
+// The frame the client actually receives, for the two shapes `buildSnapshot` alone cannot show:
+// `history` ABSENT rather than empty, and a failed repaint costing one message rather than the process.
 void describe("the snapshot frame on the wire", () => {
   void test("in alternate-screen mode the frame carries no history key at all", async () => {
-    // `"history" in frame` rather than a value comparison, because an empty string here is a
-    // blank line the client writes above the live screen - and what capture-pane returns on the
-    // alternate screen is worse than blank, it is the TUI's own frame.
+    // `"history" in frame` rather than a value comparison: an empty string is a blank line written
+    // above the live screen, and on the alternate screen it would be the TUI's own frame.
     const tui = await ownServer({
       isAlternateScreen: async () => await Promise.resolve(true),
       repaint: async () => await Promise.resolve({ data: "vim, repainted", seq: 7 }),
@@ -413,10 +400,8 @@ void describe("the snapshot frame on the wire", () => {
   });
 
   void test("a failing repaint costs one message, not the process", async () => {
-    // The same hazard as the failing capture below, on the second tmux command this path now
-    // makes: `Tmux.repaint` throws when no client is attached to the session, and the ws message
-    // handler is a fire-and-forget promise. An unhandled rejection exits Node, on a process
-    // nothing restarts.
+    // `Tmux.repaint` throws with no client attached, and the ws message handler is fire-and-forget:
+    // an unhandled rejection exits Node, on a process nothing restarts.
     const failing = await ownServer({
       repaint: async () => {
         await Promise.resolve();
@@ -432,12 +417,8 @@ void describe("the snapshot frame on the wire", () => {
   });
 });
 
-// The snapshot path reaches capture-pane, and `Tmux` rethrows anything that is not a missing
-// session or an empty server. `socket.on("message")` discarded the promise, so one failing capture
-// was an unhandled rejection - which exits Node, on a process nothing restarts (see
-// src/supervisor-crash.test.ts). A capture big enough to pass execFile's buffer is the ordinary
-// way to trigger it: 2000 lines of `capture-pane -e` is agent-sized output, and a session that
-// wants to can produce it deliberately. One phone's message must not cost every phone its socket.
+// The snapshot path reaches capture-pane and `Tmux` rethrows, so a discarded promise made one
+// failing capture an unhandled rejection. One phone's message must not cost every phone its socket.
 void describe("a failing capture costs one message, not the process", () => {
   void test("the client is told, the socket lives, and the process does not exit", async () => {
     const failing = await ownServer({
@@ -466,14 +447,12 @@ void describe("a failing capture costs one message, not the process", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-// Coalescing snapshots per session means one build's fate is every caller's fate, so both ways a
-// build can end badly - never settling, and failing - have to leave the session usable for the
-// next phone that attaches.
+// Coalescing makes one build's fate every caller's, so both ways a build ends badly - never
+// settling, and failing - must leave the session usable for the next phone.
 void describe("a bad snapshot build is not inherited by the next client", () => {
   void test("a capture that never returns is abandoned, and the next attach builds its own", async () => {
-    // A tmux server that stops answering is a capture-pane that never returns: Tmux.#exec passes
-    // no execFile timeout, and any process on this uid can stop the tmux server. Evicting the map
-    // entry only in `.finally()` pinned it forever, and every later attach joined the dead build.
+    // A tmux that stops answering is a capture-pane that never returns, and evicting only in
+    // `.finally()` pinned the entry forever - every later attach joined the dead build.
     let calls = 0;
     const wedged = await ownServer({
       snapshotTimeoutMs: 150,
@@ -497,10 +476,8 @@ void describe("a bad snapshot build is not inherited by the next client", () => 
   });
 
   void test("a failed snapshot detaches, so a retry gets a listener that forwards", async () => {
-    // The forwarding listener queues until the snapshot is away. When the snapshot failed, the
-    // queue was never released and the listener stayed registered - so the tab saw nothing ever
-    // again, every byte was retained in memory, and a retry found `client.attached` already set
-    // and registered nothing.
+    // The listener queues until the snapshot is away, so a failed snapshot left it registered and
+    // draining into nothing - and a retry found `client.attached` already set.
     let calls = 0;
     const failing = await ownServer({
       captureHistory: async () => {
@@ -538,12 +515,8 @@ void describe("a bad snapshot build is not inherited by the next client", () => 
 
 // ---------------------------------------------------------------------------------------------
 
-// The repaint's bytes come back through the same stream the forwarding listener is on, so a
-// listener that SENDS before the snapshot delivers chunks to a client that has no position yet.
-// The client answers those with `resync` (src/client/stream-position.ts), and for any session past
-// the buffer's capacity that means a SECOND full snapshot - another capture-pane, another
-// refresh-client - on every cold attach, which is the most common path in the product. Observed
-// against the real server before the fix: three chunk frames arrived ahead of the snapshot.
+// The repaint's bytes come back through the same stream the listener is on, so sending before the
+// snapshot gives a positionless client chunks - which it answers with a second full snapshot.
 void describe("a cold attach is told where it is before it is told what changed", () => {
   const ordStream = new SessionStream({ sessionId: "s1" });
   let ordUrl: string;
@@ -599,11 +572,8 @@ void describe("a cold attach is told where it is before it is told what changed"
 
 // ---------------------------------------------------------------------------------------------
 
-// Coalescing shares one snapshot build across every socket asking for the same session. Sharing
-// the SUCCESS is the point. Sharing the FAILURE meant one client's flood - or one capture-pane
-// past its buffer - decided the outcome for whichever client happened to attach beside it, and the
-// attach path treats a failed snapshot as a reason to detach. The victim's socket stays OPEN, so
-// nothing tells it to try again: the shipped client sends `attach` on mount and on reconnect only.
+// Sharing the SUCCESS is the point; sharing the FAILURE let one client's flood detach whoever
+// attached beside it - on a socket that stays OPEN, so nothing tells it to try again.
 void describe("one client's failed snapshot does not detach another", () => {
   const shStream = new SessionStream({ sessionId: "s1" });
   let shUrl: string;
@@ -611,9 +581,8 @@ void describe("one client's failed snapshot does not detach another", () => {
   let attempts = 0;
 
   before(async () => {
-    // The first build fails the way a real one does - capture-pane past its buffer, or a repaint
-    // that collected nothing. Later builds succeed, so a caller that makes its own attempt gets a
-    // snapshot rather than inheriting the first caller's exception.
+    // The first build fails the way a real one does; later ones succeed, so a caller that makes its
+    // own attempt gets a snapshot rather than inheriting the first caller's exception.
     ({ url: shUrl, close: shClose } = await privateServer(shStream, async () => {
       attempts += 1;
       await Promise.resolve();
@@ -668,19 +637,8 @@ void describe("one client's failed snapshot does not detach another", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-// The other side of the same mechanism. The client's ladder jitters (src/client/backoff.ts), but
-// jitter only spreads a burst - it does not stop one. A server stall past two heartbeat intervals
-// expires every client's silence bound at once, every tab re-attaches, and each of those attaches
-// is a cold snapshot once the ring buffer has rolled: a capture-pane, an alternate-screen probe
-// and a refresh-client, per session, arriving at the loop that was already stalled. Coalescing is
-// what keeps N re-attaches from being N of those. Two tabs of the SAME session on one phone are
-// the small version of it and the common one.
-//
-// The joiner-inherits-a-rejection rule is the part worth pinning: because a failed build is not
-// shared, a storm that arrives on a build that FAILS could have become one build per client. It
-// does not, and the reason is exact - every joiner resumes from the same rejected promise, and the
-// first of them to resume installs its own entry before any other can look, so the rest join that
-// one instead.
+// Jitter spreads a burst rather than stopping one, and each re-attach is a cold snapshot - so
+// coalescing keeps N of those from being N builds, including through a FAILED one.
 void describe("a reconnect storm is not a spawn storm", () => {
   const stStream = new SessionStream({ sessionId: "s1" });
   let stUrl: string;
@@ -735,10 +693,8 @@ void describe("a reconnect storm is not a spawn storm", () => {
   void test("a build that fails under a storm is retried once, not once per client", async () => {
     const seen = await storm(8);
     assert.equal(builds, 2, `eight re-attaches cost ${String(builds)} snapshot builds`);
-    // And the retry is not a consolation prize for the one client that started it: every joiner of
-    // the failed build gets the successful one. The eighth is the client whose own build failed -
-    // it is told, and detached, which is the pre-existing behaviour for a snapshot that fails with
-    // nobody else's attempt to fall back on.
+    // The retry is not a consolation prize for whoever started it: every joiner of the failed build
+    // gets the successful one, and only the client whose own build failed is detached.
     assert.equal(
       seen.filter((frames) => frames.some((frame) => frame["t"] === "snapshot")).length,
       7,
@@ -766,11 +722,8 @@ void describe("a reconnect storm is not a spawn storm", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-// What one `attach` may hold, and for how long. The queue that keeps chunks from arriving ahead
-// of the snapshot is released in a `finally`, so its size is whatever the session printed while
-// the build ran - and the build's own bound is fifteen seconds against a tmux server that has
-// stopped answering. A build, a log tail or an agent printing at a few MB/s fills that window
-// with the stream's own Buffers, per attaching socket.
+// What one `attach` may hold, and for how long: the queue's size is whatever the session printed
+// while the build ran, and the build's own bound is fifteen seconds against a wedged tmux.
 void describe("an attach cannot hold the session's whole output while it waits", () => {
   // Assigned before the attach that triggers the repaint below, which is the only thing that
   // reads it.
@@ -815,9 +768,8 @@ void describe("an attach cannot hold the session's whole output while it waits",
   });
 });
 
-// The other bound on the same window: how many OTHER clients' failed builds one attach waits out
-// before it stops joining. Each is up to a whole snapshot timeout, so an unbounded chain of them
-// is an unbounded park - caller k of a storm waits builds 1..k-1 in turn.
+// The other bound on the same window: how many OTHER clients' failed builds one attach waits out.
+// Each is up to a whole timeout, so an unbounded chain is an unbounded park.
 void describe("one attach cannot be parked behind every other attach's failure", () => {
   void test("a storm where every build fails still settles in a bounded number of builds", async () => {
     const stormStream = new SessionStream({ sessionId: "s1" });
@@ -851,9 +803,8 @@ void describe("one attach cannot be parked behind every other attach's failure",
 
     assert.equal(errors.length, 8, "not every client was told its snapshot failed");
     const last = Math.max(...errors);
-    // Three builds is the bound (two inherited failures plus your own): 240 ms of build here.
-    // Chaining one per client would be eight, and the same shape at the real fifteen-second
-    // timeout is two minutes parked while holding a queue.
+    // Three builds is the bound - two inherited failures plus your own. Chaining one per client
+    // would be eight, which at the real timeout is two minutes parked holding a queue.
     assert.ok(
       last < 500,
       `the last client was parked ${String(last)}ms, which is one build per client`,
@@ -861,9 +812,8 @@ void describe("one attach cannot be parked behind every other attach's failure",
   });
 });
 
-// A state frame is the strip's only source of a status change, so who receives one decides
-// whether the strip can be right about a session nobody is looking at. Plan 002: the strip must
-// be able to say "this one needs you" without attaching to every session at once.
+// A state frame is the strip's only source of a status change, so who receives one decides whether
+// it can be right about a session nobody is looking at (plan 002).
 void describe("a state change goes to every open socket, not only the attached ones", () => {
   let own: Server;
   let ownUrl: string;
@@ -950,10 +900,8 @@ void describe("a state change goes to every open socket, not only the attached o
   });
 });
 
-// The other half of "pushed, not polled": a push only reaches the sockets that are open when it
-// is made, and `Hub.announce` suppresses a repeat server-wide. So a phone whose socket dropped -
-// plan 002 says that is the normal case, not the exception - missed every transition that
-// happened while it was away, and nothing ever said them again. The baseline is what closes that.
+// The other half of "pushed, not polled": a push reaches only the sockets open at the time, and the
+// dedupe is server-wide - so a dropped phone missed every transition, permanently.
 void describe("a socket is given the session list the moment it opens", () => {
   let own: Server;
   let ownUrl: string;
@@ -993,10 +941,8 @@ void describe("a socket is given the session list the moment it opens", () => {
   });
 
   void test("a reconnecting socket that attaches nothing is still told which one needs you", async () => {
-    // The failing case, exactly: the tab for s1 was never opened, so the reconnect ladder sends no
-    // `attach` for it and no state frame is produced. Its move to `waiting` was announced while
-    // this socket was down and will never be announced again. Without the baseline this socket
-    // hears nothing at all, and the strip keeps showing whatever it last had.
+    // The tab for s1 was never opened, so the ladder sends no `attach` and no state frame follows -
+    // and its move to `waiting` was announced while this socket was down.
     const client = await open(TOKEN, ownUrl, true);
     const [hello, sessions] = await client.take(2);
     assert.equal(hello?.["t"], "hello");
@@ -1005,19 +951,16 @@ void describe("a socket is given the session list the moment it opens", () => {
   });
 
   void test("every socket is told the width the panes are actually wrapped to", async () => {
-    // The client has a PANE_COLS of its own, and it is compiled into a bundle rebuilt and
-    // restarted separately from this process - so on the phone a client built at 50 rendered 50
-    // columns into a pane tmux was still holding at 40, and the difference read as padding down
-    // the right-hand edge. The width is this server's fact, so this server states it.
+    // The client's own PANE_COLS is compiled into a bundle rebuilt separately from this process, so
+    // the skew read as padding on the phone. The width is this server's fact, so it states it.
     const client = await open(TOKEN, ownUrl, true);
     assert.deepEqual(await client.next(), { t: "hello", cols: PANE_COLS });
     client.socket.close();
   });
 
   void test("the width does not depend on the session list, which is allowed to fail", async () => {
-    // `sessions` is built from tmux and can reject; its failure is caught and logged. Folding the
-    // width into that frame would have made one failing capture-pane cost the client its width
-    // too, which is a blank-looking pane produced by an unrelated fault.
+    // `sessions` is built from tmux and can reject, so folding the width into that frame would make
+    // one failing capture cost the client its width - a blank pane from an unrelated fault.
     const broken = createServer();
     const brokenHandle = attachWebSocketServer(broken, {
       token: TOKEN,

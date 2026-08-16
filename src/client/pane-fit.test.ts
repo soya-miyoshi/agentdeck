@@ -4,12 +4,8 @@ import { describe, test } from "node:test";
 import { PANE_COLS } from "../protocol.ts";
 import { cellRatio, fontSizeFor, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./pane-fit.ts";
 
-// A simulated terminal, so the property under test is "the columns fill the pane" rather than any
-// particular arithmetic. `advance` is the font's cell width per pixel of font size; 0.6 is about
-// what a monospace face gives, and the tests do not depend on the value.
-//
-// The real PANE_COLS, not a number of this file's own: the width the deck actually ships at is the
-// one worth holding these properties at, and it has already moved once.
+// A simulated terminal, so the property is "the columns fill the pane" rather than any arithmetic.
+// The real PANE_COLS rather than a number of this file's own, because it has already moved once.
 const RESERVE = 14;
 const COLUMNS = PANE_COLS;
 
@@ -22,14 +18,8 @@ const leftover = (width: number, fontSize: number, advance: number): number =>
 
 void describe("sizing the font so the deck's columns fill the pane", () => {
   void test("the dead margin is under one probe-size cell on every phone width and font", () => {
-    // Every width a phone in portrait or landscape plausibly hands the pane, against faces from
-    // narrow to wide. The old code floored the font and left tens of pixels on several of these.
-    //
-    // The residual is not zero and cannot be: the only measurement available is a WHOLE column
-    // count, so the cell width read back is high by up to one column's share of the pane. Taking
-    // the high estimate is deliberate - it makes the font too small rather than too large, and too
-    // large clips the last column. The bound is therefore about one cell AT THE PROBE SIZE,
-    // which is why the probe is the smallest font the deck will use.
+    // Every width a phone plausibly hands the pane. The residual cannot be zero - the only measurement
+    // is a WHOLE column count - and the high estimate is deliberate: too large clips the last column.
     for (const width of [320, 360, 375, 390, 393, 402, 430, 744, 820]) {
       for (const advance of [0.5, 0.55, 0.6, 0.62, 0.667]) {
         const probe = MIN_FONT_SIZE;
@@ -49,9 +39,8 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
   });
 
   void test("a pane too wide for legible columns keeps its margin rather than shouting", () => {
-    // A desktop-sized window. Filling it with PANE_COLS would need text sized for a room, so the
-    // clamp holds and the rest of the pane stays empty. Recorded because it looks exactly like the
-    // bug above and is not it: the deck is a fixed column count by decision.
+    // A desktop window, where filling PANE_COLS would need text sized for a room, so the clamp holds.
+    // Recorded because it looks exactly like the bug above and is not it.
     const advance = 0.6;
     const ratio = cellRatio(1400, RESERVE, proposeCols(1400, MIN_FONT_SIZE, advance), 6, COLUMNS);
     assert.ok(ratio !== undefined);
@@ -79,9 +68,8 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
   });
 
   void test("the reserve the addon takes off the width is added back, not left in the ratio", () => {
-    // The addon subtracts 14px for an overview ruler this deck does not draw, and the reserve
-    // cannot be configured to zero - `overviewRuler?.width || 14` reads 0 as absent. Ignoring it
-    // makes the ratio too large and the font too small by that fraction, forever.
+    // The addon reserves 14px for a ruler this deck does not draw, and `|| 14` means zero cannot turn
+    // it off. Ignoring it makes the ratio too large and the font too small, forever.
     const advance = 0.6;
     const cols = proposeCols(393, MIN_FONT_SIZE, advance);
     const right = cellRatio(393, RESERVE, cols, MIN_FONT_SIZE, COLUMNS);
@@ -111,10 +99,8 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
   });
 
   void test("the font is not rounded to a whole pixel, which is what left the margin", () => {
-    // Over a spread of widths, not one: what flooring costs is the size's fractional part times
-    // the column count, so at SOME widths it costs almost nothing and the bug hides. The defect is
-    // the worst case, and a test pinned to a single width is a test that a later change to
-    // PANE_COLS can silently turn into a tautology - which is exactly what it did at 50.
+    // A spread of widths rather than one: flooring costs the fractional part times the column count,
+    // so at SOME widths it costs nothing and a single-width test becomes a tautology.
     const advance = 0.6;
     let worst = 0;
     let fractional = false;

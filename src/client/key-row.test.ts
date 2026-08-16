@@ -41,9 +41,8 @@ void describe("the key row's bytes", () => {
     assert.equal(keyBytes("down", true), "\u001bOB");
     assert.equal(keyBytes("right", true), "\u001bOC");
     assert.equal(keyBytes("left", true), "\u001bOD");
-    // The two forms are never the same string, which is the whole reason the mode has to be asked
-    // for rather than assumed - a row that ignored it would be wrong for half the applications and
-    // right for the other half, and both look like "the arrow key did nothing".
+    // The two forms are never the same string, which is why the mode is asked for: ignoring it is
+    // wrong for half the applications, and both halves look like "the arrow did nothing".
     for (const key of ["up", "down", "left", "right"] as const) {
       assert.notEqual(keyBytes(key, true), keyBytes(key, false));
       // Same final byte in both forms, only the introducer moves.
@@ -99,16 +98,8 @@ void describe("the key row's bytes", () => {
   });
 });
 
-// The row and the page are Vue single-file components, and what they do to a terminal is proven in
-// end-to-end.test.ts, where App.vue's key handling is restated over a real pty. What is checked
-// here is the wiring that restatement cannot see: that a cap exists for every key, that the caps
-// are text, that the page reads the terminal's cursor-key mode instead of choosing one, and that
-// the row's bytes go through `Connection.input` rather than around it. Each of those is a way for
-// the bytes above to be exactly right and the phone still to have no way of sending them.
-//
-// Source text rather than a mounted component: mounting needs a DOM, and a DOM is a dependency,
-// and the budget is spent. What is asserted is therefore shape, and it is paired with the
-// behavioural tests over the real pty rather than offered in place of them.
+// The wiring the end-to-end restatement cannot see: a cap per key, caps as text, and the mode read
+// rather than chosen. Source text, because a DOM is a dependency - shape, paired with the pty tests.
 
 void describe("the row as it is wired into the page", () => {
   const keyRow = source("KeyRow.vue");
@@ -140,9 +131,8 @@ void describe("the row as it is wired into the page", () => {
   });
 
   void test("the caps are text labels, never a glyph", () => {
-    // The repository rule, on the one surface where the instinct is a picture. An arrow drawn as a
-    // character is a different height in every font on every phone and several are simply absent
-    // from what iOS falls back to, which leaves a blank cap on the row that answers the prompt.
+    // The no-emoji rule where the instinct is a picture: an arrow character is a different height in
+    // every font and several are absent from iOS's fallback, leaving a blank cap.
     assert.doesNotMatch(keyRow, /\p{Extended_Pictographic}/u, "an emoji on a key cap");
     // Arrows, triangles, and the return symbol, by code point so this file contains none of them.
     const glyphs = /[←-⇿▲▼◀▶⏎↵⬀-⯿]/u;
@@ -159,15 +149,13 @@ void describe("the row as it is wired into the page", () => {
     // m4/pwa's two phone properties, at the source. `src/pwa.test.ts` holds the same two against
     // the built CSS; this says which element they belong to, which is what the built CSS cannot.
     assert.match(keyRow, /min-height:\s*var\(--touch-target\)/);
-    // Width is NOT the touch target and must not become it again: eight caps at 44px need 388px
-    // plus gaps, more than a phone has, and the row scrolled Ctrl off the right-hand edge. The
-    // caps shrink to share whatever width there is. Reported from a real device: Ctrl cut off.
+    // Width is NOT the touch target: eight caps at 44px need more than a phone has, and the row
+    // scrolled Ctrl off the edge. Reported from a real device.
     assert.doesNotMatch(keyRow, /min-width:\s*var\(--touch-target\)/);
     assert.match(keyRow, /flex:\s*1\s+1\s+0/, "the caps do not shrink to fit the row");
     assert.match(keyRow, /padding:[^;]*var\(--safe-bottom\)/);
-    // The row owns the bottom edge now, so the pane area must NOT inset the bottom as well: that
-    // leaves a band of pane background between the caps and the home indicator, and it is the
-    // exact regression a later "put the inset back where it was" makes.
+    // The row owns the bottom edge, so the pane must NOT inset it too - that leaves a band of pane
+    // background between the caps and the home indicator.
     const panes = /\.panes\s*\{([^}]*)\}/.exec(app)?.[1] ?? "";
     assert.notEqual(panes, "", "App.vue has no .panes rule");
     assert.doesNotMatch(panes, /--safe-bottom/, "the pane area insets the bottom edge as well");
@@ -180,11 +168,8 @@ void describe("the row as it is wired into the page", () => {
   });
 
   void test("a cap does not steal focus from the terminal, and still fires on a phone", () => {
-    // This asserted `@mousedown.prevent` and `@touchstart.prevent`, which is the mechanism that
-    // BROKE it: preventing a touch event suppresses the synthetic click iOS would have sent, so
-    // the `@click` behind it never ran and every cap was dead on a real device. It asserts the two
-    // properties now - focus is kept, and the emit happens on an event that actually fires -
-    // rather than the spelling that was supposed to deliver them.
+    // This pinned `@touchstart.prevent`, which is what BROKE it: preventing the touch suppresses the
+    // synthetic click, so every cap was dead on a device. It asserts the properties now.
     assert.match(keyRow, /\.prevent/, "the soft keyboard will close under the thumb");
     assert.doesNotMatch(
       keyRow,
@@ -195,9 +180,8 @@ void describe("the row as it is wired into the page", () => {
   });
 
   void test("the arrows' form is read off the terminal, not chosen by the page", () => {
-    // The DECCKM half of the done-when. A page that passed a literal here would be right for
-    // whichever half of the applications it guessed at and wrong for the other, and both failures
-    // look identical from the phone: the arrow key did nothing.
+    // A page that passed a literal here is right for whichever half of the applications it guessed
+    // and wrong for the other, and both look identical from the phone.
     assert.match(app, /keyBytes\(\s*key\s*,[^;]*applicationCursorKeys\(\)/);
     assert.doesNotMatch(app, /keyBytes\([^;]*,\s*(true|false)\s*\)\s*;/);
     // The handle's answer is xterm's own mode, tracked as the application sets and clears it,
@@ -228,11 +212,8 @@ void describe("the row as it is wired into the page", () => {
   });
 
   void test("the terminal's own replies do not spend the latch", () => {
-    // xterm raises `onData` for what the TERMINAL owes the application as well as for keystrokes:
-    // the DSR/DA/DECRQM answers a TUI in the pane asks for. Those reach `send` by the same route a
-    // typed character does, and a `send` that cleared the latch unconditionally let an agent's own
-    // output disarm Ctrl - so the operator's following `c` arrived as the letter `c` and no SIGINT
-    // was sent, silently, with the cap un-highlighted as if the interrupt had been delivered.
+    // xterm raises `onData` for the terminal's own replies too, by the same route a keystroke takes -
+    // so an unconditional clear let an agent's output disarm Ctrl and lose the interrupt silently.
     const send = /const send = \(data: string\): void => \{([\s\S]*?)\n\};/.exec(app)?.[1] ?? "";
     assert.notEqual(send, "", "App.vue has no send()");
     assert.doesNotMatch(
@@ -240,10 +221,8 @@ void describe("the row as it is wired into the page", () => {
       /^\s*ctrlLatched\.value = false;\s*$/m,
       "send() clears the latch unconditionally, so a terminal reply spends it",
     );
-    // The rule itself, imported from the module rather than read out of the page's source text and
-    // executed: running repository text in the test process makes whatever that text says a thing
-    // the host runs at every `pnpm test`, and App.vue is not a file the host is meant to execute.
-    // What the operator meant: Ctrl and then `c`.
+    // Imported from the module rather than read out of the page's source and executed: running
+    // repository text in the test process makes it something the host runs at every `pnpm test`.
     assert.equal(spendable("c"), true);
     // What the agent's TUI writes back through the same emit. A cursor-position report, the two
     // device-attribute answers, and a mode report - none may disarm the one control the phone has.
@@ -271,10 +250,8 @@ void describe("the row as it is wired into the page", () => {
   });
 
   void test("the row is not a side channel: its bytes go through Connection.input", () => {
-    // `Connection.input` chunks and paces, because `ws` enforces its 64 KiB frame limit before the
-    // message event ever fires (see end-to-end.test.ts). A row that wrote to a socket itself would
-    // be a second, unpaced path to the same pty, and it would be discovered as a tab that goes
-    // blank when somebody pastes.
+    // `Connection.input` chunks and paces, because `ws` enforces its frame limit before the message
+    // event fires. A row writing to a socket itself is a second, unpaced path to the same pty.
     const send = /const send = \(data: string\): void => \{([\s\S]*?)\n\};/.exec(app)?.[1] ?? "";
     assert.match(send, /connection\.value\?\.input\(/);
     // The component knows nothing about transports at all: it emits a key name, and the page turns

@@ -1,9 +1,5 @@
-// The bytes a submit puts on the wire, stated as codes rather than names - "send" is CR at a pty
-// and LF in a text field, and the box this comes from is a text field.
-//
-// The parts that cannot be executed without a browser - that the pane takes no keystrokes, and that
-// the box sits where a thumb can reach it - are asserted against the components' source, the same
-// way key-row.test.ts asserts the row's layout.
+// The bytes a submit puts on the wire, as codes rather than names: "send" is CR at a pty and LF in a
+// text field, and this box is a text field. The browser-only halves are asserted against source.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -69,10 +65,8 @@ void describe("the composer's bytes", () => {
 
 void describe("where input comes from", () => {
   void test("the pane takes no keystrokes, and still answers the agent's own queries", () => {
-    // `disableStdin` is the obvious way to do this and the wrong one: it gates xterm's whole
-    // triggerDataEvent, so the terminal's replies - DSR, DA - never reach the pty either, and a TUI
-    // that asks where the cursor is waits forever for an answer nobody sent.
-    // The option, not the word: the pane's comment names it to say why it is not used.
+    // `disableStdin` is the obvious way and the wrong one: it gates the whole `triggerDataEvent`, so a
+    // TUI asking where the cursor is waits forever. The OPTION, not the word - the comment names it.
     assert.doesNotMatch(pane, /disableStdin\s*:/, "the pane's stdin is disabled wholesale");
     assert.match(pane, /textarea\.readOnly\s*=\s*true/, "iOS will open the keyboard over the pane");
     assert.match(pane, /attachCustomKeyEventHandler\(\(\)\s*=>\s*false\)/);

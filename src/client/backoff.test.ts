@@ -22,11 +22,8 @@ void describe("backoff timing", () => {
   });
 
   void test("spreads, so clients woken by one stalled server do not return together", () => {
-    // Every client's silence deadline is re-armed by a heartbeat off ONE server timer, so a stall
-    // past two intervals expires all of them at the same instant. Without spread they walk the
-    // ladder in lockstep and re-attach every tab together, and each of those attaches is a
-    // capture-pane plus a refresh-client once the ring buffer has rolled - a burst aimed at the
-    // loop that was already stalled.
+    // Every silence deadline is armed off ONE server timer, so a stall expires all of them at once -
+    // and without spread every tab re-attaches together, at the loop that was already stalled.
     const spread = new Set([0, 0.25, 0.5, 0.75, 1].map((r) => backoffDelay(3, () => r)));
     assert.ok(spread.size > 1, "the delay is identical regardless of the draw");
     for (const delay of spread) {

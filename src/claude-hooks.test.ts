@@ -13,9 +13,8 @@ import {
   mergeHookSettings,
 } from "./claude-hooks.ts";
 
-// Everything mapped here comes out of fixtures/claude-hooks.jsonl, which was captured from
-// claude 2.1.221 driving real turns - not from documentation and not from memory. A test that
-// asserts against a payload someone imagined proves only that two guesses agree.
+// Everything mapped here comes from fixtures captured off claude 2.1.221 driving real turns: a test
+// against a payload someone imagined proves only that two guesses agree.
 const fixtures = readFileSync(join(import.meta.dirname, "fixtures/claude-hooks.jsonl"), "utf8")
   .split("\n")
   .filter((line) => line.trim() !== "")
@@ -54,9 +53,8 @@ void describe("mapping observed claude hook events", () => {
 
 void describe("the denylist applies at the layer it was learned at", () => {
   void test("an unrecognised notification_type is ACTIONABLE", () => {
-    // A subtype Claude Code has not shipped yet. A swallowed "needs you" is the feature not
-    // working, with no way for a person to discover the stuck session; a spurious one is an
-    // annoyance. The failure modes are not equal, so this raises waiting.
+    // A subtype Claude Code has not shipped yet. A swallowed "needs you" is the feature not working;
+    // a spurious one is an annoyance. The failure modes are not equal.
     const observed = byEvent("Notification");
     const future = { ...observed, notification_type: "some_subtype_from_a_later_release" };
     assert.equal(mapHookEvent(future).state, "waiting");
@@ -69,9 +67,8 @@ void describe("the denylist applies at the layer it was learned at", () => {
   });
 
   void test("an unrecognised EVENT NAME changes no state and says why", () => {
-    // The opposite rule, and the reason this file exists. Generalising the denylist upward means
-    // the next event Claude Code ships lights the strip as "needs you" - wrong, not merely
-    // uninformative.
+    // The opposite rule: generalising the denylist upward means the next event Claude Code ships
+    // lights the strip as "needs you", which is wrong rather than merely uninformative.
     const decision = mapHookEvent({ hook_event_name: "PreCompact", trigger: "auto" });
     assert.equal(decision.state, undefined);
     assert.match(String(decision.reason), /PreCompact/);
@@ -86,18 +83,16 @@ void describe("the denylist applies at the layer it was learned at", () => {
   });
 
   void test("an informational notification_type does not raise attention", () => {
-    // The denylist ships empty because 2.1.221 emitted no informational subtype. The mechanism
-    // that will hold one is still tested, so the day a payload is captured it is a one-line edit
-    // rather than a design question.
+    // The denylist ships empty because 2.1.221 emitted no informational subtype, and the mechanism
+    // is tested anyway - so a captured payload is a one-line edit rather than a design question.
     const payload = { ...byEvent("Notification"), notification_type: "observed_as_informational" };
     const denied = new Set(["observed_as_informational"]);
     assert.equal(mapHookEvent(payload, denied).state, undefined);
   });
 
   void test("a subagent finishing mid-turn does NOT flag the tab", () => {
-    // MulmoTerminal's bug, at the layer this version of Claude Code puts it: a subagent
-    // completing is something ending, not somebody being needed. The parent turn is still
-    // running, and flagging here would beep and push once per subagent.
+    // A subagent completing is something ending rather than somebody being needed, and the parent
+    // turn is still running - so flagging here beeps and pushes once per subagent.
     const payload = byEvent("SubagentStop");
     assert.equal(payload["agent_type"], "Explore");
     assert.equal(mapHookEvent(payload).state, undefined);
@@ -121,10 +116,8 @@ void describe("the settings fragment", () => {
 
   void test("never expands the secret into an argument, where ps would show it", () => {
     const command = hookCommand(7777);
-    // The shell expands "$AGENTDECK_SECRET" before exec, so any occurrence outside single quotes
-    // would put the literal secret in argv - readable by every process of this user via
-    // `ps -Ao args=`, dozens of times per turn. The value must be read from the environment by
-    // the process itself instead.
+    // The shell expands "$AGENTDECK_SECRET" before exec, so any occurrence outside single quotes puts
+    // the literal secret in a public argv, dozens of times per turn.
     assert.doesNotMatch(command, /\$AGENTDECK_SECRET/);
     assert.doesNotMatch(command, /\$\{AGENTDECK_SECRET/);
 
@@ -150,9 +143,8 @@ void describe("the settings fragment", () => {
 
   void test("runs the interpreter by absolute path, so a minimal PATH still posts", () => {
     const command = hookCommand(7777);
-    // A bare `node` resolves against the session's PATH, which is the server's own. Under launchd
-    // that is /usr/bin:/bin:/usr/sbin:/sbin, where no Homebrew/mise/nvm node exists - every hook
-    // would die with `command not found` and `exit 0` would hide it.
+    // A bare `node` resolves against the session's PATH, and under launchd that has no Homebrew or
+    // mise node on it - so every hook dies with `command not found` and `exit 0` hides it.
     assert.doesNotMatch(command, /(?:^|[\s;])node -e/);
     assert.ok(
       command.includes(`'${process.execPath}' -e`),
@@ -177,11 +169,8 @@ void describe("the settings fragment", () => {
   });
 
   void test("a stranger's hook whose command contains the marker is not ours to delete", () => {
-    // The marker used to be `/api/hooks/$AGENTDECK_SESSION_ID`. It became the generic
-    // `/api/hooks/` when the command grew a node script and the interpolation moved inside it,
-    // which turned `isOurHook` into a substring test matching any hook posting to any local
-    // service with that path. installHookSettings re-runs at every boot and deletes what it
-    // thinks is ours, so a stranger's guard hook would disappear silently.
+    // The marker became generic when the interpolation moved into a node script, which made
+    // `isOurHook` a substring test - and the merge DELETES what it recognises, at every boot.
     const dir = mkdtempSync(join(tmpdir(), "agentdeck-hooks-"));
     const path = join(dir, "settings.json");
     const stranger = "curl -s 127.0.0.1:9000/api/hooks/mine";

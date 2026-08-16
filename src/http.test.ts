@@ -90,10 +90,8 @@ const call = async (
 };
 
 void describe("a request target the URL parser refuses", () => {
-  // `fetch` normalises `//` away before a byte leaves the client, so the request has to be written
-  // onto the socket by hand. The parse of `req.url` is synchronous and outside every catch in the
-  // handler: unguarded, `//` throws `ERR_INVALID_URL` and, with nothing supervising the process,
-  // ends the deck. The proof is that an answer comes back and the next request still works.
+  // `fetch` normalises `//` away, so the request is written onto the socket by hand. The parse is
+  // synchronous and outside every catch: unguarded, it throws and ends the deck.
   const raw = async (target: string): Promise<string> => {
     const socket = connect(Number(new URL(base).port), "127.0.0.1");
     const chunks: Buffer[] = [];
@@ -167,9 +165,8 @@ void describe("authentication", () => {
   });
 
   void test("POST /api/probe answers ok, needs the token, and is refused for a foreign Origin", async () => {
-    // The route the client's admission check calls. It is a POST so that a browser attaches
-    // `Origin` to it - a same-origin GET carries none, which made the 403 below unreachable from
-    // the only client that ships.
+    // The route the client's admission check calls, a POST so a browser attaches `Origin`: a
+    // same-origin GET carries none, which made the 403 below unreachable from the shipped client.
     const unauth = await call("/api/probe", { method: "POST", auth: false });
     assert.equal(unauth.status, 401);
 
@@ -311,10 +308,8 @@ void describe("a hook that authenticates routes its event into the session's sta
   let hookBase: string;
   let hookRegistry: Registry;
   let stream: SessionStream;
-  // Every state this route announced onward, in order. A hook exists to arrive AT the transition
-  // (plan 002), so a route that only wrote the state down and left the strip to ask for it later
-  // is the poll this item refuses - and that failure is invisible in the response body, which is
-  // identical either way.
+  // Every state this route announced onward, in order: a hook exists to arrive AT the transition, and
+  // a route that only wrote it down is the poll this refuses - invisible in the response body.
   const declared: { id: string; state: string }[] = [];
 
   before(async () => {
@@ -417,11 +412,8 @@ void describe("a hook that authenticates routes its event into the session's sta
   });
 
   void test("a loop is bounded, and told why, rather than fanning out per POST", async () => {
-    // The strip is pushed, so every accepted hook POST costs a frame to every open socket. This is
-    // the one route not behind the user's token - the per-session secret is readable by any
-    // same-uid process - and the announce dedupe is defeated by construction, by alternating two
-    // events that map to different states. So the bound is on the route rather than on the
-    // caller's manners.
+    // Every accepted POST costs a frame to every socket, on the one route not behind the user's token -
+    // and alternating two events defeats the dedupe, so the bound is on the route.
     const [session] = await hookRegistry.list();
     assert.ok(session);
     const statuses: number[] = [];
@@ -446,10 +438,8 @@ void describe("a hook that authenticates routes its event into the session's sta
   });
 });
 
-// The push is a broadcast to every open socket, so a POST that can move a tab without proving it
-// is the session it claims to be is a way to make somebody's phone say the wrong session needs
-// them. The real Registry is used here rather than the open one above, because the secret check is
-// the thing under test.
+// The push is a broadcast, so a POST that moves a tab without proving which session it is makes
+// somebody's phone name the wrong one. The real Registry, because the secret check is under test.
 void describe("a hook that does not authenticate moves nothing and tells nobody", () => {
   void test("a wrong secret is 401 and announces no state", async () => {
     const { profiles } = parseProfiles({ claude: { command: "/bin/sh" } });
@@ -491,10 +481,8 @@ void describe("a hook that does not authenticate moves nothing and tells nobody"
 
 void describe("an unexpected failure says nothing about itself", () => {
   void test("the 500 body carries a reference, not the error text", async () => {
-    // Errors are sentences the client renders verbatim, and the ones that reach here are not
-    // sentences anybody wrote: `execFile` alone puts its whole argv - the per-session secret and
-    // every profile-passed API key among it - into one. A fixed sentence plus an id, with the
-    // real text on the server log.
+    // Errors are rendered verbatim, and the ones reaching here are not sentences anybody wrote:
+    // `execFile` puts its whole argv into one. A fixed sentence and an id instead.
     class ExplodingRegistry extends Registry {
       override async list(): Promise<never> {
         return await Promise.reject(

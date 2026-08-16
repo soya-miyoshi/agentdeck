@@ -6,11 +6,8 @@ import { after, before, describe, test } from "node:test";
 
 import { hookCommand, MAX_FIELD_CHARS } from "./claude-hooks.ts";
 
-// The hook COMMAND, run through a real shell against a real socket, because everything
-// interesting about it happens outside this process. The agent sends a payload carrying the turn's
-// text whether or not anything reads it, and the size of that text is what makes the transport
-// worth testing rather than reading: an untrimmed payload is refused by the route, and the STATUS
-// frame for that turn is lost with it.
+// The hook COMMAND through a real shell against a real socket, because everything interesting happens
+// outside this process: an untrimmed payload is refused, and the turn's STATUS frame goes with it.
 
 let server: Server;
 let port = 0;
@@ -24,9 +21,8 @@ before(async () => {
     req.on("end", () => {
       const raw = Buffer.concat(parts);
       receivedBytes = raw.length;
-      // Decoded from the WHOLE body, never per chunk: a per-chunk decode turns a character split
-      // by a read boundary into U+FFFD, and a test harness that does it cannot tell whether the
-      // thing it is testing did.
+      // Decoded from the WHOLE body: a per-chunk decode turns a character split by a read boundary
+      // into U+FFFD, and a harness that does it cannot tell whether the subject did.
       try {
         received = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
       } catch {
@@ -87,9 +83,8 @@ void describe("a turn's text through the hook command", () => {
   });
 
   void test("a cut answer arrives long enough for the store to know it was cut", async () => {
-    // The property, not the mechanism: what matters is that the log can tell a truncated answer
-    // from a whole one. Cutting to exactly the store's bound would make the two indistinguishable
-    // and the log would call a truncated answer complete.
+    // The property rather than the mechanism: cutting to exactly the bound makes a truncated answer
+    // indistinguishable from a whole one.
     await post({
       hook_event_name: "Stop",
       prompt_id: "p",
@@ -102,9 +97,8 @@ void describe("a turn's text through the hook command", () => {
   });
 
   void test("a large multi-byte answer arrives with every character intact", async () => {
-    // 90KB of Japanese: several read boundaries, any of which could split a three-byte character
-    // if the payload were decoded chunk by chunk. The characters are all identical, so anything
-    // that is not that character is damage.
+    // 90KB of Japanese: several read boundaries, any of which splits a three-byte character under a
+    // per-chunk decode. The characters are identical, so anything else is damage.
     const answer = "折".repeat(30_000);
     await post({ hook_event_name: "Stop", prompt_id: "p", last_assistant_message: answer });
     const points = Array.from(answerOf());

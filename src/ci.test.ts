@@ -1,14 +1,5 @@
-// CI is a file that this repository never executes, so the only assertions worth making about it
-// are the ones a green check cannot make for you. Three properties are load-bearing (plan 003, M0;
-// plan 005): the workflow runs on pull requests and runs the same three scripts a developer
-// does; the pnpm version comes from `packageManager` via corepack rather than from a pin in the
-// workflow that can drift; and the runner's `pnpm install` is the one that is SAFE, the host's
-// being a review gate, so nothing may quietly present the host-side install as routine.
-//
-// The done-when sentence - "a deliberately broken type fails it" - is executed rather than
-// asserted about: the repository's own sources are compiled under the repository's own tsconfig
-// with one added file carrying the error a pull request would carry, and the clean tree is
-// compiled again afterwards as the control.
+// CI is a file this repository never executes, so the only assertions worth making are the ones a
+// green check cannot make: the same scripts, pnpm from corepack, and the RUNNER's install.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,11 +24,8 @@ interface PackageJson {
 const readPackageJson = async (): Promise<PackageJson> =>
   JSON.parse(await readFile(`${repoRoot}package.json`, "utf8")) as PackageJson;
 
-// Enough of a YAML reader for the one shape this file has: a flat list of steps, each a `- uses:`
-// or a `- run:`. Order matters (corepack after setup-node), so the steps are returned in order
-// rather than as a set. Comment lines are dropped first, because every claim in this workflow is
-// also written in prose directly above the step it describes and a regex over the raw text would
-// happily match the prose instead of the step.
+// Enough of a YAML reader for one flat list of steps, in ORDER because corepack must follow
+// setup-node. Comments are dropped first, or a regex matches the prose above the step.
 interface Step {
   readonly kind: "uses" | "run";
   readonly value: string;
@@ -92,12 +80,8 @@ void describe("the M0 CI acceptance criterion", () => {
   });
 
   void test("a deliberately broken type fails the typecheck the workflow runs", async () => {
-    // The done-when sentence, executed: the repository's real sources, compiled under the
-    // repository's real tsconfig, with one file added that carries the kind of error a pull
-    // request would carry. The broken file is written outside src/ and reached through a
-    // generated tsconfig that extends the project's own - writing it into src/ would be closer to
-    // what CI sees, but this suite runs alongside toolchain.test.ts, which typechecks the tree at
-    // the same moment and would fail on the fixture.
+    // The real sources under the real tsconfig, with one file carrying the error a pull request
+    // would. Outside src/, because toolchain.test.ts typechecks the tree at the same moment.
     const pkg = await readPackageJson();
     const workflowScripts = stepsOf(await readWorkflow())
       .filter((step) => step.kind === "run")
@@ -138,9 +122,8 @@ void describe("the M0 CI acceptance criterion", () => {
   });
 
   void test("every script the workflow runs exists in package.json", async () => {
-    // A workflow step naming a script that was renamed fails CI loudly; one naming a script that
-    // never existed under a `continue-on-error` or in a job nothing depends on does not. Checking
-    // the names against package.json costs nothing and does not depend on which of those it is.
+    // A step naming a renamed script fails CI loudly; one naming a script that never existed under
+    // `continue-on-error` does not. Checking the names costs nothing either way.
     const pkg = await readPackageJson();
     const scripts = stepsOf(await readWorkflow())
       .filter((step) => step.kind === "run")
@@ -174,9 +157,8 @@ void describe("CI cannot drift from the pnpm mise.toml pins", () => {
   });
 
   void test("corepack runs after setup-node, where the shims land on the right Node", async () => {
-    // Ordering, not presence: corepack enable before setup-node installs its shims into the
-    // runner's preinstalled Node, and setup-node then puts a different Node ahead of it on PATH.
-    // The workflow still goes green, on whatever pnpm that other Node ships.
+    // Ordering rather than presence: corepack before setup-node puts its shims on the wrong Node,
+    // and the workflow still goes green on whatever pnpm the other one ships.
     const steps = stepsOf(await readWorkflow());
     const setupNode = steps.findIndex(
       (step) => step.kind === "uses" && step.value.startsWith("actions/setup-node@"),
@@ -224,10 +206,8 @@ void describe("CI builds nothing, because nothing consumes it", () => {
   });
 
   void test("the documented install is the host one, and it is the same one CI runs", async () => {
-    // There is nowhere else to install now: `pnpm install` runs on the Mac and executes this
-    // repo's own agent-writable package.json and lockfile under a pnpm 9 that does not gate
-    // lifecycle scripts. That is a review gate rather than a boundary, and it only works if the
-    // documents name the command a person actually types.
+    // `pnpm install` runs on the Mac and executes this repo's own agent-writable manifest under a
+    // pnpm that does not gate lifecycle scripts - a review gate, which needs the real command named.
     const documents = {
       "mise.toml": await readFile(`${repoRoot}mise.toml`, "utf8"),
       "README.md": await readFile(`${repoRoot}README.md`, "utf8"),

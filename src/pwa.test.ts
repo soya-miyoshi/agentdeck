@@ -1,13 +1,5 @@
-// m4/pwa's done-when, against the REAL build output served by the REAL static handler.
-//
-// Nothing here is checked against the sources in `src/client`: a manifest that is correct in the
-// repository and not copied into `dist/client`, or served with a content type the browser will
-// not accept, is not installable, and that is exactly the failure this file exists to catch. So
-// it requires `pnpm build` to have run and reads what is on disk in the build directory, through
-// `withClient` on a real socket.
-//
-// What is NOT demonstrated here, and cannot be from this machine: the home-screen install itself.
-// See the sentence at the bottom of this file and the README section it points at.
+// The REAL build output through the REAL static handler, never the sources: a manifest correct in the
+// repository and not copied into the build is not installable. NOT demonstrated: the install.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,11 +25,8 @@ const api = (_req: IncomingMessage, res: ServerResponse): void => {
 };
 
 void before(async () => {
-  // The build is what is under test, so an absent one is built rather than skipped over. Gating
-  // these suites on `existsSync(index.html)` instead would turn the one item whose whole
-  // deliverable is build OUTPUT into a green tick for nothing on any machine that had not run
-  // `pnpm build` first - which is every fresh clone and every CI job that runs `pnpm test` alone.
-  // `de-containerise.test.ts` forbids that repository-wide; `serve-client.test.ts` does this.
+  // The build is what is under test, so an absent one is BUILT rather than skipped: gating on
+  // `existsSync` turns the one item whose deliverable is build output into a green tick.
   try {
     readFileSync(join(clientDir, "index.html"));
   } catch {
@@ -143,10 +132,8 @@ void describe("the manifest, as the server actually serves it", () => {
   });
 
   void test("the CSP the server sends does not forbid the worker or the manifest", async () => {
-    // `src/static.ts` sets `default-src 'self'`, which is what `worker-src` and `manifest-src`
-    // fall back to, so both are allowed today. This asserts that a later tightening of that
-    // header cannot silently un-install the app: a `worker-src`/`manifest-src` added without
-    // `'self'` breaks registration in the browser and nothing on this machine would notice.
+    // Both fall back to `default-src 'self'` today, so this asserts a later tightening cannot
+    // silently un-install the app - nothing on this machine would notice.
     const csp = (await fetch(`${base}/`)).headers.get("content-security-policy") ?? "";
     assert.match(csp, /default-src 'self'/);
     for (const directive of ["worker-src", "manifest-src", "child-src"]) {
@@ -174,8 +161,7 @@ void describe("the service worker, and what it provably cannot do", () => {
     // A worker served as anything but a JavaScript type is rejected by `register` outright.
     assert.match(res.headers.get("content-type") ?? "", /javascript/);
     // A worker's maximum scope is its own directory, so being at the root IS the scope claim -
-    // moved under `/assets/` it could never control `/`, and no header would fix that here
-    // because `/assets/` is also served `immutable`.
+    // under `/assets/` it could never control `/`, and that path is served `immutable` besides.
     const bundle = await asset(".js");
     assert.match(bundle, /register\(\s*["`']\/sw\.mjs["`']/);
     assert.match(bundle, /scope:\s*["`']\/["`']/);
@@ -193,14 +179,11 @@ void describe("the service worker, and what it provably cannot do", () => {
 
   void test("it cannot intercept /api or /ws, or anything else, because it answers nothing", async () => {
     const worker = await served("/sw.mjs");
-    // The comments in that file argue for all of this at length, and the argument is prose. What
-    // is asserted is the CODE, so strip them first rather than let the word "cache" in a sentence
-    // decide whether the worker caches.
+    // The argument in that file is prose and what is asserted is the CODE, so the comments are
+    // stripped rather than letting the word "cache" in a sentence decide anything.
     const source = worker.replace(/\/\/.*$/gm, "");
-    // This is the whole safety argument and it is a property of the FILE, not of a route list:
-    // a worker with no `respondWith` cannot substitute a response for any request, so there is no
-    // path on which it could serve a cached `/api/sessions`, a cached socket handshake, or a
-    // stale `index.html`. A route allowlist would have to be got right; this cannot be got wrong.
+    // The whole safety argument, as a property of the FILE: a worker with no `respondWith` cannot
+    // substitute a response for anything. An allowlist would have to be got right.
     assert.doesNotMatch(source, /respondWith/);
     assert.doesNotMatch(source, /\bcaches\b|CacheStorage|cache\.put|cache\.match/);
     // And it takes over immediately rather than sitting a version behind until every tab closes.
@@ -226,10 +209,8 @@ void describe("the service worker, and what it provably cannot do", () => {
   });
 
   void test("deleting it from the build 404s, which is what evicts it from the phone", async () => {
-    // The kill switch for shipped worker code is `rm public/sw.mjs`, rebuild, restart. It only
-    // works if the server then 404s: a browser keeps a registered worker running when the update
-    // check for its script URL answers 200 with a non-JavaScript body, so the history fallback
-    // handing back `index.html` here would make the registration unrecallable from the server.
+    // The kill switch is deleting the file and rebuilding, and it only works if the server then
+    // 404s: a 200 of HTML reads as a failed update, and the worker keeps running.
     const root = mkdtempSync(join(tmpdir(), "agentdeck-nosw-"));
     writeFileSync(join(root, "index.html"), "<!doctype html><title>deck</title>");
     const bare = createServer(withClient(api, root));
@@ -276,7 +257,5 @@ void describe("the phone layout, in the built CSS", () => {
   });
 });
 
-// NOT DEMONSTRATED HERE, and not claimed: the home-screen install. Everything above is checkable
-// from the Mac; "it installs to the home screen and launches without browser chrome" needs a
-// phone, and the only other tailnet device has been offline for days. The steps a person with a
-// phone has to take are written down in the README under "Installing to the home screen".
+// NOT DEMONSTRATED, and not claimed: the home-screen install. Everything above is checkable from
+// the Mac; launching without browser chrome needs a phone, and the README has the steps.

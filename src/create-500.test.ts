@@ -1,28 +1,5 @@
-// m0/create-500: POST /api/sessions answered 500 on a real server run and left the agent running.
-//
-// THE ROOT CAUSE, stated plainly, because the item's own sketch guessed at concurrency and chained
-// invocations and it was neither: tmux sanitises the output of commands it prints to a client it
-// does not believe is UTF-8, replacing every non-printable byte with `_`. A client is UTF-8 to
-// tmux only if its own LC_ALL/LC_CTYPE/LANG says so. `Tmux.list()` separates the fields of
-// `list-sessions -F` with U+001F, and `baseEnv` built the client's environment from a name list
-// that copied LANG/LC_ALL only when the launching process had them - so a server started under
-// `env -i` (the reproduction, and what launchd will hand it at m4) ran every tmux command as a
-// non-UTF-8 client. `list-sessions` came back as `id_0__1786113059_/path`, `line.split(SEP)`
-// yielded ONE field, every entry's id was the whole line, `#meta.get(entry.id)` missed, and
-// `Registry.list()` dropped the session it had just created. `create` then threw "was created but
-// tmux does not list it" over a session that was alive and working.
-//
-// Measured on tmux 3.7b with `od -c`, which is why the fix is a locale and not a lenient parser:
-//   no locale        f o o _ 0
-//   LANG=C           f o o _ 0
-//   LC_CTYPE=UTF-8   f o o 037 0
-//   LC_ALL=C.UTF-8   f o o 037 0
-// `capture-pane -p` was checked the same way and is unaffected - it does not go through that
-// path - so this is the command-output path only.
-//
-// Everything here drives the REAL tmux binary. The first test drives it through the real HTTP
-// endpoint of a real server process, started with NO locale variable at all, which is the run that
-// was broken; a fake tmux cannot fail this way, which is why no unit test caught it.
+// `POST /api/sessions` answered 500 on a real run and left the agent running: tmux rewrites U+001F to
+// `_` for a non-UTF-8 client, so `list()` dropped the session just created. Only the REAL binary does.
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
@@ -174,9 +151,8 @@ void describe("POST /api/sessions against the real tmux, from a server with no l
 
 void describe("a create that fails for any other reason leaves no orphan", () => {
   void test("the session tmux made is killed again when the call cannot finish", async () => {
-    // The real binary, on the real socket, doing a real create - with the ONE call after the
-    // create made to fail. That is what "for any other reason" means here: not the parse bug,
-    // which is fixed at its cause, but whatever comes next.
+    // The real binary doing a real create, with the ONE call after it made to fail: not the parse
+    // bug, which is fixed at its cause, but whatever comes next.
     const orphanSocket = `${socket}-orphan`;
     let creates = 0;
     const tmux = new Tmux({

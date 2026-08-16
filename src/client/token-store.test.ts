@@ -65,14 +65,8 @@ void describe("holding the token across a backgrounding", () => {
   });
 
   void test("a fresh page against the same storage finds it, whitespace and all", () => {
-    // What "survives backgrounding the app" is, from here: the installed PWA has its own storage
-    // partition (m4/pwa), and a resume is a fresh page against that same partition. So the load
-    // has to work against a store this module did not write in this run, including a token that
-    // was stored before `accept` started trimming - the header it ends up in cannot carry a
-    // newline, and the failure would be a socket that never opens with nothing logged.
-    //
-    // NOT DEMONSTRATED here, and it needs a phone: that iOS still holds the partition after it
-    // has evicted and resumed the installed app. No test on this machine can make that claim.
+    // A resume is a fresh page against the same partition, so the load must work against a store this
+    // run did not write. NOT DEMONSTRATED: that iOS holds that partition across an eviction.
     const survived = memory("abc123\n");
     assert.equal(loadToken(survived), "abc123");
   });
@@ -89,12 +83,8 @@ void describe("holding the token across a backgrounding", () => {
 });
 
 void describe("the rejected-token path lands on the paste field", () => {
-  // M2 already decided what a `rejected` verdict does: it stops the reconnect ladder, sets the
-  // status to `rejected` and calls `unauthorized()`, and `src/client/connection.test.ts` holds
-  // that. What no test held is the last hop - that App.vue's `unauthorized` handler is the one
-  // that clears the stored token, rather than leaving a token that the server has already refused
-  // in `localStorage` for the next reload to retry with. That hop lives in an SFC, which has no
-  // module boundary a unit test can reach, so it is asserted on the source.
+  // What a `rejected` verdict does is held elsewhere; the last hop is not - that the handler CLEARS
+  // the stored token rather than leaving a refused one for the next reload. It lives in an SFC.
   void test("App.vue routes unauthorized to signOut, and signOut clears the stored token", () => {
     const source = readFileSync(join(import.meta.dirname, "App.vue"), "utf8");
     assert.match(source, /unauthorized: \(\) => \{\s*signOut\(/);
@@ -118,9 +108,8 @@ void describe("the rejected-token path lands on the paste field", () => {
   });
 
   void test("the 401 on the REST side lands in the same place as the socket verdict", () => {
-    // Two doors, one answer. An `UnauthorizedError` from the session list means the same thing a
-    // `rejected` verdict does, and if only the socket path cleared the token a reload would retry
-    // forever against a token the server has already refused.
+    // Two doors, one answer: an `UnauthorizedError` from the session list means what a `rejected`
+    // verdict does, and clearing on only one path retries a refused token forever.
     const source = readFileSync(join(import.meta.dirname, "App.vue"), "utf8");
     assert.match(source, /error instanceof UnauthorizedError\)\s*\{\s*signOut\(/);
   });

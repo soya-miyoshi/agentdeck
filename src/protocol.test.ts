@@ -102,9 +102,8 @@ void describe("pane rows are the minimum over attached clients", () => {
   });
 
   void test("two clients get the smaller row count", () => {
-    // The width is not negotiated at all - it is PANE_COLS - because tmux freezes each width it
-    // has had into the scrollback, so a width that follows the viewport can only ever be right
-    // for the newest stretch of history.
+    // The width is not negotiated at all, because tmux freezes each width it has had into the
+    // scrollback - so one that follows the viewport is right only for the newest stretch.
     assert.equal(paneRows([{ rows: 20 }, { rows: 60 }]), 20);
   });
 

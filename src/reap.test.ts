@@ -1,20 +1,5 @@
-// The reaper, executed rather than asserted about: each case builds the real shape on the real
-// process table - a double-forked orphan, a tmux server holding nothing, a tree with a listener in
-// it - runs one pass of scripts/reap.mjs, and then looks at what is still alive.
-//
-// Nothing here asserts about the script's source. A reaper that reads correctly and signals the
-// wrong pid is the whole failure mode, and only running it can tell the two apart.
-//
-// Every pass is scoped twice so a test run cannot reap the machine it runs on: AGENTDECK_ROOTS is a
-// temp directory, which is what the process half is bounded by, and AGENTDECK_REAP_SOCKET_PREFIX is
-// a per-case namespace, which is what the tmux half is bounded by. Both are per CASE rather than per
-// file, so one case's `--kill` cannot destroy another's fixture and the order they run in is free.
-//
-// Fixtures are built once, before any case runs. `ps` reports elapsed time in whole seconds, so
-// everything is zero seconds old for its first second and no age bound above zero can match it - the
-// suite would pass by finding nothing. That wait is unavoidable but it is ONE second for the file,
-// not one per case: this suite holds a worker for as long as it runs, and audit.md's
-// `test-concurrency` entry records what holding workers does to the wall-clock-bound suites.
+// Each case builds the real shape on the real process table, because a reaper that reads correctly and
+// signals the wrong pid is the whole failure mode. Scoped twice per CASE, so no `--kill` escapes.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -39,11 +24,8 @@ const temp = (name: string): string => {
 };
 
 /**
- * Whether a pid is still running, counting a zombie as not.
- *
- * `kill(pid, 0)` succeeds against a zombie, and the pane cases create them on purpose: the child is
- * killed under a parent left deliberately alive, and a `/bin/sleep` parent never calls `wait`. A
- * plain signal test therefore reported a reaped process as a survivor and failed a passing case.
+ * Whether a pid is still running, counting a zombie as not: `kill(pid, 0)` succeeds against one, and
+ * the pane cases create them on purpose - so a plain signal test called a reaped process a survivor.
  */
 const alive = (pid: number): boolean => {
   try {
@@ -61,17 +43,12 @@ const isOrphan = (pid: number): boolean => {
 };
 
 /**
- * A process with ppid 1 and no controlling terminal, which is the shape a leftover actually has.
- *
- * Double-forked on purpose: a child of this runner has a living parent, and every condition the
- * reaper checks would correctly refuse to touch it - so a case that spawned normally would pass
- * without exercising anything.
+ * A process with ppid 1 and no controlling terminal, which is the shape a leftover has. Double-forked
+ * on purpose: a child of this runner has a living parent, so the reaper would rightly spare it.
  */
 const orphan = (cwd: string, command: string): number => {
-  // Two things are load-bearing here, both found by the pid not matching what the reaper reported.
-  // The redirection: a backgrounded child inherits this pipe, so without it `execFileSync` waits
-  // for a `sleep 100000` to close stdout and never returns. And no brace group around the command,
-  // so `exec` replaces the backgrounded subshell itself and `$!` is the pid that actually survives.
+  // Two load-bearing details: the redirection, or `execFileSync` waits on an inherited pipe forever;
+  // and no brace group, so `exec` replaces the subshell and `$!` is the surviving pid.
   const printed = execFileSync(
     "/bin/sh",
     ["-c", `cd ${cwd} && ${command} >/dev/null 2>&1 & echo $!`],
@@ -95,9 +72,8 @@ const tmuxServer = (socket: string, withSession: boolean): string => {
       stdio: "ignore",
     });
   } else {
-    // Chained into ONE command, the way tmux.ts does it and for the same reason: `exit-empty` is on
-    // by default, so a server started with no sessions exits before a second tmux invocation can
-    // reach it. Two commands here failed outright, which is the race that comment describes.
+    // Chained into ONE command, as tmux.ts does and for the same reason: with `exit-empty` on, a
+    // server holding no sessions exits before a second invocation reaches it.
     execFileSync(
       "tmux",
       ["-L", socket, "start-server", ";", "set-option", "-g", "exit-empty", "off"],
@@ -187,12 +163,8 @@ const pane = { pid: 0, child: 0 };
 const keep = { pid: 0, plain: 0, mcp: 0 };
 
 /**
- * A pane holding one ordinary leftover and one whose command line says "mcp".
- *
- * The marker is a real argv entry, because what the reaper matches on is the command line `ps`
- * prints - a fixture that only pretended to be an MCP server in a comment would prove nothing about
- * the pattern that does the sparing. NOT a copy of `/bin/sleep` renamed: macOS SIGKILLs a copied
- * system binary for its now-invalid signature, which cost a run to work out (exit 137, no child).
+ * A pane holding one ordinary leftover and one whose argv says "mcp" - a real argv entry, since that
+ * is what the reaper matches. NOT a renamed `/bin/sleep`: macOS kills a copied system binary.
  */
 const keepSession = (socket: string): void => {
   sockets.push(socket);
@@ -239,9 +211,8 @@ const paneSession = (socket: string): void => {
   sockets.push(socket);
   execFileSync(
     "tmux",
-    // `exec` after backgrounding, not `wait`: with `wait` the shell returns as soon as its child is
-    // killed and the pane exits on its own, so the case failed claiming the reaper had killed the
-    // pane when the report right above it showed it had not. A real agent outlives its MCP server.
+    // `exec` after backgrounding rather than `wait`: with `wait` the shell returns when its child is
+    // killed and the pane exits itself, which reads as the reaper having killed the pane.
     [
       "-L",
       socket,
@@ -294,9 +265,8 @@ before(() => {
   tmuxServer(socketNames.live, false);
   paneSession(socketNames.pane);
   keepSession(socketNames.keep);
-  // AFTER the fixture runs, not beside its declaration: pushed early these are still 0, and
-  // `process.kill(0, ...)` signals this runner's whole process group. That SIGKILLed the suite
-  // after every case had passed, so the run died with no summary and nothing marked failed.
+  // AFTER the fixture runs: pushed early these are still 0, and `process.kill(0, ...)` signals this
+  // runner's whole process group - which killed the suite with every case passed and no summary.
   strays.push(keep.pid, keep.plain, keep.mcp);
 
   // The listeners have to exist before any pass, or neither listener case proves anything.
@@ -366,11 +336,8 @@ void describe("what --kill reaps", () => {
     assert.ok(!alive(pids.listenReaped), `a listening tree was spared by default\n${pass.output}`);
   });
 
-  // The class that takes processes nobody abandoned: what an agent started inside a session that is
-  // still running. The pane process is the agent itself and has to come through it alive.
-  // The operator's split: the TIMED pass leaves MCP servers alone, because Claude Code does not
-  // reconnect a stdio one and taking it removes a tool rather than interrupting it. Closing a
-  // session is the other path and takes them - that is asserted in tmux.test.ts, not here.
+  // The class that takes processes nobody abandoned - what a LIVE agent started - with the agent
+  // itself coming through alive. The timed pass spares MCP servers; closing a session does not.
   void test("an ordinary leftover in a live pane, but NOT the one that looks like an MCP server", async () => {
     assert.ok(keep.plain > 1 && keep.mcp > 1, "the keep fixture did not produce both children");
     const pass = reap({
@@ -413,10 +380,8 @@ void describe("what --kill must never touch", () => {
     );
   });
 
-  // Measured on a real machine: `pnpm dev`, 17 hours old, ppid 1 because its terminal had closed,
-  // with the listeners two levels below it. Every other condition called it garbage. The exemption
-  // that spares it is OFF by default now - the operator decided a dev server left running is
-  // exactly what they want collected - so this asks for it explicitly.
+  // Measured on a real machine: a 17-hour `pnpm dev`, ppid 1 because its terminal closed, listeners
+  // two levels down. The exemption that spares it is off by default, so this asks for it.
   void test("an orphan whose tree holds a listening socket, when asked to spare them", async () => {
     assert.ok(listens(pids.listening), "the fixture never listened, so this case proves nothing");
     const pass = reap({ kill: true, roots: roots.listening, spareListeners: true });

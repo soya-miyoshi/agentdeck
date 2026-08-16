@@ -1,14 +1,5 @@
-// What one authenticated request can tell the client about why it cannot get in.
-//
-// The interesting case is the 403. A browser sends `Origin` by itself, so a server started with
-// AGENTDECK_ORIGIN set to an address the page was not opened from answers 403 to every `/api` call
-// AND to the socket upgrade - and the upgrade's status never reaches the client, so this probe is
-// the only place the difference is visible. Folded into "not a 401, so the token is good", it
-// became "must be the network" and the ladder ran forever.
-//
-// Node's fetch does not send `Origin`, so the two halves are asserted separately: the server
-// really does answer 403 with this body when an origin is expected and a different one arrives,
-// and `verifyToken` really does turn that response into its own verdict.
+// The interesting case is the 403: an upgrade's status never reaches the client, so this probe is the
+// only place it is visible. Node sends no `Origin`, so the two halves are asserted separately.
 
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -89,11 +80,8 @@ void describe("the server's answer to a mismatched Origin", () => {
 
 void describe("the probe asks a question a browser stamps with Origin", () => {
   void test("it is not a GET, so the server's origin check can see it", async () => {
-    // The defect this pins: a browser MUST send `Origin` on the socket upgrade and MUST NOT send
-    // it on a same-origin GET, and the page and the API are same-origin. A GET probe is therefore
-    // answered 200 by the very server whose upgrade check returned 403, `forbidden` is unreachable
-    // and the ladder runs forever. Fetch appends `Origin` to any non-GET/HEAD request, so the
-    // method is the fix and a mocked status can never catch a regression of it.
+    // A browser MUST send `Origin` on an upgrade and MUST NOT on a same-origin GET, so a GET probe is
+    // answered 200 by the server that just 403'd. The METHOD is the fix, which a mock cannot pin.
     const seen: { url: string; method: string }[] = [];
     globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -125,26 +113,22 @@ void describe("verifyToken tells the four answers apart", () => {
   });
 
   void test("a 401 from something on the way is not a reason to destroy the token", async () => {
-    // `rejected` reaches App.vue's signOut(), which clears the stored token - and a phone cannot
-    // regenerate it: recovery means reading ~/.agentdeck/token on the Mac. A proxy auth challenge
-    // or a captive portal must not be able to do that, so the terminal verdict requires the
-    // sentence this server writes.
+    // `rejected` clears the stored token, and a phone cannot regenerate it - so a captive portal must
+    // not be able to trigger it, and the verdict requires the sentence THIS server writes.
     answerWith(401, { error: "Proxy Authentication Required" });
     assert.equal(await verifyToken(token), "unreachable");
   });
 
   void test("a 403 from something on the way keeps the ladder running", async () => {
-    // `forbidden` stops the ladder permanently and blames AGENTDECK_ORIGIN. `POST /api/probe`
-    // traverses tailscale serve and whatever is on the phone's path, so a Tailscale ACL change or
-    // a proxy refusing an unknown POST target would otherwise kill the tab and misname the cause.
+    // `forbidden` stops the ladder and blames AGENTDECK_ORIGIN, and the probe traverses whatever is
+    // on the phone's path - so a proxy refusing an unknown POST would kill the tab and misname it.
     answerWith(403, { error: "Forbidden" });
     assert.equal(await verifyToken(token), "unreachable");
   });
 
   void test("an unreachable server keeps the token, and does not claim to have reached it", async () => {
-    // A tunnel has not rejected anything. Reading it as a bad token would throw away a working
-    // one every time the phone lost signal - and reading it as `ok` would let the client tell the
-    // user the server is answering when nothing has answered at all.
+    // A tunnel has rejected nothing: reading it as a bad token throws away a working one on every
+    // lost signal, and reading it as `ok` claims the server answered when nothing did.
     globalThis.fetch = async () => await Promise.reject(new TypeError("fetch failed"));
     assert.equal(await verifyToken(token), "unreachable");
   });

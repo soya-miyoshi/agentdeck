@@ -1,20 +1,5 @@
-// m2/client-minimal's done-when, executed rather than asserted about: an agent driven from the
-// browser end to end.
-//
-// Nothing serves the built SPA yet - that is m2/serve-client, a separate open item - so the page
-// is not what is driven here. What is driven is every client module BELOW the page, unmodified and
-// in the same wiring App.vue gives them: `browserSocket` opening a real WebSocket against a real
-// server process, `Connection` multiplexing over it, `stream-position` deciding what each frame
-// means, and the render callback App.vue passes in. The only pieces left out are the two that need
-// a DOM - the Vue components and xterm's renderer - and the seam they sit behind, TerminalHandle,
-// is five verbs wide, so a stand-in for it here writes what xterm would have painted.
-//
-// The server end is real all the way down: a spawned `src/server.ts`, the real tmux binary, a real
-// pty, a real `/bin/sh` reading from it. Keystrokes go in as `input` frames and the shell's output
-// comes back as `snapshot` and `chunk` frames. A test that stubbed either end would prove the two
-// halves agree with the stub.
-//
-// The manual recipe for a human with a browser is in README.md, under "Driving it from a browser".
+// An agent driven end to end: every client module below the page, in App.vue's own wiring, against
+// a spawned server, the real tmux, a real pty and a real shell. Only the two DOM pieces are left out.
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
@@ -53,11 +38,8 @@ const socket = `agentdeck-e2e-${String(process.pid)}`;
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
 const home = temp("agentdeck-e2e-home-");
-// One working tree per test rather than one for the file. A session id is a pure function of
-// (absolute path, agent id) - plan 002 - so two tests naming the same directory and the same agent
-// would be handed the SAME tmux session by `new-session -A`, and the second would inherit whatever
-// the first left in the pane. That is a shared-state flake waiting for a slow machine, and it
-// would fail as "the shell did not answer" rather than as what it is.
+// One working tree per test: a session id is a pure function of (path, agent), so two tests naming
+// the same pair share a tmux session and the second inherits the first's pane.
 const work = temp("agentdeck-e2e-work-");
 const pasteWork = temp("agentdeck-e2e-paste-");
 const dropWork = temp("agentdeck-e2e-drop-");
@@ -81,15 +63,8 @@ const stripWork = [
 const conf = temp("agentdeck-e2e-conf-");
 
 const profiles = join(conf, "agents.json");
-// A plain shell, which is the profile-less agent the status work is proven against too. The point
-// of this test is the transport and the client, and a shell is the agent whose replies a test can
-// state exactly.
-// `hooked` is the same shell with a hook waiting mechanism declared, which is what makes
-// `detectsWaiting` true for it and `waiting` a state the strip is allowed to show. The agent
-// binary is deliberately still /bin/sh: what is being driven is the hook path - a POST to
-// /api/hooks/:id carrying the session's own secret - and claude is not needed to send one. The
-// POST itself is sent by the REAL hook command from src/claude-hooks.ts, run inside the session,
-// the way claude runs it.
+// A plain shell, whose replies a test can state exactly. `hooked` is the same shell with a waiting
+// mechanism declared: what is driven is the hook path, and claude is not needed to send a POST.
 writeFileSync(
   profiles,
   JSON.stringify({
@@ -179,9 +154,8 @@ before(async () => {
   // The token is generated on first run and kept, so a restart below is the same token.
   token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
 
-  // `browserSocket` names two browser globals and nothing else: `WebSocket`, which node has, and
-  // `window.location.href`, which is how it learns where to connect. Supplying the second is what
-  // lets the real module be the one under test rather than a copy of it written for node.
+  // `browserSocket` names two browser globals: `WebSocket`, which node has, and `location.href`.
+  // Supplying the second is what makes the real module the one under test.
   Reflect.set(globalThis, "window", { location: { href: `http://127.0.0.1:${String(port)}/` } });
 });
 
@@ -259,10 +233,8 @@ interface Driven {
 }
 
 /**
- * A session created over the real HTTP API, and a client attached to it over the real socket.
- *
- * The render callback is App.vue's, restated: a repaint clears and writes history first, because a
- * snapshot supersedes everything before it.
+ * A session created over the real HTTP API, and a client attached over the real socket. The render
+ * callback is App.vue's, restated: a repaint clears and writes history first.
  */
 const drive = async (cwd: string): Promise<Driven> => {
   const created = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
@@ -290,13 +262,8 @@ const drive = async (cwd: string): Promise<Driven> => {
         live = browserSocket(value, handlers);
         return live;
       },
-      // api.ts's `verifyToken` restated against an absolute URL: node's fetch has no page to take
-      // a base from. The four verdicts are the ones that module produces, including the 403 that
-      // used to read as "not a 401, so the token is good, so it must be the network". The catch
-      // matters as much as the statuses: the restart test below probes while the server is down,
-      // and a probe that REJECTS rather than answering would abandon `#onClosed` half-way and
-      // leave the ladder with no retry scheduled at all - a permanently blank tab, which is the
-      // thing that test exists to catch.
+      // `verifyToken` restated against an absolute URL, since node's fetch has no page for a base.
+      // The catch matters as much as the statuses: a probe that REJECTS strands `#onClosed`.
       verifyToken: async () => {
         try {
           const response = await fetch(`http://127.0.0.1:${String(port)}/api/probe`, {
@@ -345,11 +312,8 @@ const drive = async (cwd: string): Promise<Driven> => {
 
 void describe("an agent driven from the browser, end to end", () => {
   void test("the real server states the width its pty holds the pane at", async () => {
-    // The whole point of the frame, against the real thing rather than a fake: the client is not
-    // allowed to render at its own compiled constant, because that constant belongs to a bundle
-    // built and restarted separately from the process that owns the pty. When they disagreed the
-    // phone showed a terminal drawn 50 columns wide into a pane wrapped at 40, and the ten
-    // columns of difference looked like a padding bug in the CSS.
+    // The client may not render at its own compiled constant: that belongs to a bundle built
+    // separately from the process owning the pty, and the skew reads as a CSS padding bug.
     const driven = await drive(work);
     try {
       assert.deepEqual(driven.statedCols, [PANE_COLS]);
@@ -378,11 +342,8 @@ void describe("an agent driven from the browser, end to end", () => {
   });
 
   void test("an ordinary large paste arrives whole and does not close the socket", async () => {
-    // The defect this closes: `ws` enforces its 64 KiB maxPayload BEFORE the message event, so an
-    // over-size `input` frame cannot be answered with an error frame - the socket closes with
-    // 1009, the client cannot tell that from a phone in a lift, and it runs the ladder and
-    // re-attaches every tab with a cold capture-pane each. The paste is gone with no explanation,
-    // so the user pastes it again and it repeats.
+    // `ws` enforces maxPayload BEFORE the message event, so an over-size frame closes the socket
+    // with 1009 - indistinguishable from a phone in a lift, and the paste is gone unexplained.
     const driven = await drive(pasteWork);
     try {
       const out = join(pasteWork, "pasted.txt");
@@ -417,19 +378,8 @@ void describe("an agent driven from the browser, end to end", () => {
   });
 });
 
-// ------------------------------------------------------------------------------------------
-// m3/tab-strip: three sessions, a status per tab, and the status arriving as a PUSHED frame.
-//
-// The strip is the one part of this product whose whole argument is a timing claim, so it is
-// driven rather than asserted about: three real tmux sessions, a real socket, the real `toTabs`
-// the page renders from, and a real hook POST sent by the real command in src/claude-hooks.ts,
-// running inside the session with the session's own secret - which is the only way a `waiting`
-// exists at all (src/http.ts authenticates that route with the secret, never the user's token).
-//
-// The client below never attaches to any of the three. That is deliberate: plan 002 says the
-// strip must be able to say "this one needs you" without attaching to every session at once, so
-// a state frame that only reached attached clients would be a strip that is right only about the
-// tab already being looked at.
+// Three sessions, a status per tab, and the status arriving as a PUSHED frame. The client below
+// never attaches to any of them: the strip must say "this one needs you" without attaching.
 
 interface Strip {
   connection: Connection;
@@ -447,9 +397,8 @@ interface Strip {
 let strip: Strip | undefined;
 
 const buildStrip = async (): Promise<Strip> => {
-  // Every fetch this process makes, recorded. This is what makes "nothing polls" checkable rather
-  // than claimed: a strip that re-fetched GET /api/sessions on a timer would show up here as
-  // requests nobody in the test asked for.
+  // Every fetch this process makes, recorded: what makes "nothing polls" checkable rather than
+  // claimed, since a timer would show up here as requests nobody asked for.
   const http: string[] = [];
   const realFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = async (input, init) => {
@@ -474,10 +423,8 @@ const buildStrip = async (): Promise<Strip> => {
     created.push(body.session);
   }
 
-  // The hook command as the agent gets it: the same string src/claude-hooks.ts writes into the
-  // agent's settings file, run by a shell with the session's AGENTDECK_SESSION_ID and
-  // AGENTDECK_SECRET in its environment, with the payload on stdin. Nothing about the transport
-  // is simulated - if this file's node -e form stopped working, this test would stop passing.
+  // The hook command as the agent gets it - the same string written into the settings file, run
+  // with the session's own environment. Nothing about the transport is simulated.
   const hookScript = join(conf, "hook.sh");
   writeFileSync(hookScript, `${hookCommand(port)}\n`);
 
@@ -550,10 +497,8 @@ void describe("the tab strip, against three real sessions", () => {
   before(async () => {
     strip = await buildStrip();
     const live = strip;
-    // Quiet panes for the rest of this: no echo of what is typed, and an empty prompt. Output is
-    // what a declared `waiting` is cleared by (src/stream.ts) - the agent writing means the agent
-    // is doing something - so a shell that printed `$ ` after every command would be contradicting
-    // the hook a millisecond after it landed, for reasons that have nothing to do with an agent.
+    // Quiet panes: output is what clears a declared `waiting`, so a shell echoing a prompt would
+    // contradict the hook a millisecond after it landed.
     for (const session of live.sessions) live.connection.input(session.id, "stty -echo; PS1=''\r");
     await new Promise((resolve) => setTimeout(resolve, 750));
     // All three working, each said by its own hook POST. The transition measured below is out of
@@ -614,9 +559,8 @@ void describe("the tab strip, against three real sessions", () => {
       () => stateOf(live.tabs(), third.id) === "waiting",
       10_000,
     );
-    // Three seconds of a client that has a live socket and a status that just changed. A poll on
-    // any interval a person would tolerate - the 2s Firestore poll this project exists not to be,
-    // or anything under it - lands inside this window and fails here.
+    // Three seconds of a live socket and a status that just changed: a poll on any interval a
+    // person would tolerate lands inside this window and fails here.
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     assert.ok(live.pushed() > pushedBefore, "the status changed without a frame arriving");
@@ -652,9 +596,8 @@ void describe("the reconnection ladder, against the real transport", () => {
       await waitFor("the socket to come back", () => driven.connection.status === "open");
       await waitFor("the rest of the output to arrive", () => marker(40), 30_000);
 
-      // The whole run is on screen, in order, with nothing missing across the gap. A hole is the
-      // failure this is written for: the bytes written while the socket was gone are exactly the
-      // ones a client that resumed from the wrong place would skip.
+      // The whole run on screen, in order, with nothing missing across the gap: the bytes written
+      // while the socket was gone are exactly the ones a wrong resume would skip.
       let previous = -1;
       for (let n = 1; n <= 40; n++) {
         const found = at(n);
@@ -671,16 +614,8 @@ void describe("the reconnection ladder, against the real transport", () => {
   });
 
   void test("the server process is restarted under an open client", async () => {
-    // THE EPOCH CASE, and the one this item exists for: not a dropped socket but a server that
-    // went away and came back. The tmux session survives with the same id, the client still holds
-    // a (epoch, seq) from a counter that no longer exists, and every signal except the pane looks
-    // correct.
-    //
-    // This used to measure a gap rather than a behaviour: `#meta` was memory only and
-    // `Registry.list()` was gated on it, so after a restart the surviving session was not listed at
-    // all, the re-attach was answered "no session", and nothing the client could do repainted the
-    // tab. `m2/session-metadata-survives-restart` closed that by adopting survivors from what tmux
-    // reports, so the assertion is now the done-when itself: the tab repaints by itself.
+    // THE EPOCH CASE: a server that went away and came back. The session survives with the same id
+    // while the client holds a seq from a counter that no longer exists, and every signal looks fine.
     const driven = await drive(restartWork);
     try {
       driven.connection.input(driven.session.id, "echo before-the-restart\r");
@@ -708,9 +643,8 @@ void describe("the reconnection ladder, against the real transport", () => {
       await waitFor("the ladder to reconnect", () => driven.opens() > opensBefore, 30_000);
       await waitFor("the socket to come back", () => driven.connection.status === "open", 30_000);
 
-      // The done-when: the tab repaints by itself. The client's stored seq is in the millions and
-      // in a counter that no longer exists, so the server cannot answer it with chunks - it sends
-      // an unconditional snapshot in a new epoch, and the pane comes back.
+      // The done-when: the tab repaints by itself. The stored seq is in a counter that no longer
+      // exists, so the server answers with an unconditional snapshot in a new epoch.
       await waitFor(
         "the tab to repaint by itself after the restart",
         () => driven.repaints() > repaintsBefore,
@@ -724,11 +658,8 @@ void describe("the reconnection ladder, against the real transport", () => {
       // And the pane holds what it held before the server died - the agent never stopped.
       assert.match(driven.screen(), /before-the-restart/);
 
-      // Recreating the session is what a person has to do today, and it is `new-session -A`, so it
-      // reattaches to the SAME live process and hands the registry back its metadata. Once it has,
-      // the epoch half of the protocol does its job: the client's stored seq is in the millions
-      // and in a space that no longer exists, and the server answers with an unconditional
-      // snapshot in a new epoch rather than chunks the client would discard as already seen.
+      // Recreating is `new-session -A`, so it reattaches to the SAME live process and hands the
+      // registry its metadata back. The epoch half then does its job.
       const recreated = await fetch(`http://127.0.0.1:${String(port)}/api/sessions`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -737,9 +668,8 @@ void describe("the reconnection ladder, against the real transport", () => {
       const body = (await recreated.json()) as { session?: Session };
       assert.equal(body.session?.id, driven.session.id, "the id is not stable across a restart");
 
-      // Re-attached until it takes: the create returns as soon as tmux has the session, and the
-      // hub picks the pane up on its next sync, so the first attach after a recreate can still be
-      // answered "no session". A tab does this by itself - the ladder re-attaches on every open.
+      // Re-attached until it takes: the create returns as soon as tmux has the session, so the
+      // first attach after a recreate can still be answered "no session".
       const deadline = Date.now() + 30_000;
       while (driven.repaints() === repaintsBefore) {
         assert.ok(Date.now() < deadline, `the tab never repainted: ${driven.errors.join(" | ")}`);
@@ -768,13 +698,8 @@ void describe("the reconnection ladder, against the real transport", () => {
 
 void describe("a session whose waiting detection died, for real", () => {
   void test("survives a restart unmarked, and is marked only once its hooks are actually refused", async () => {
-    // Not a fixture and not a flag set by hand. The three sessions above outlived the SIGKILL in
-    // the restart test. They used to come back MUTED - the server had adopted them from tmux with
-    // no way to recover the random secret they were started with - and that is the bug this file
-    // now pins the fix for: the secret is derived, so adoption recomputes it and the tabs come back
-    // whole. What still has to be marked is a session whose hooks are genuinely refused, which is
-    // produced below rather than assumed, because a tab that looks healthy and quietly never asks
-    // for anybody is the failure the mark exists to prevent.
+    // The three sessions above outlived the SIGKILL and used to come back MUTED. The secret is
+    // derived now, so adoption recomputes it - and a genuinely deaf one is produced below, not assumed.
     const base = `http://127.0.0.1:${String(port)}`;
     const headers = { authorization: `Bearer ${token}` };
     // A session of the SAME agent started by the server that is running now, so the comparison is
@@ -808,9 +733,8 @@ void describe("a session whose waiting detection died, for real", () => {
     assert.ok(healthy, "the fresh session is not listed");
     assert.equal(healthy.waitingDetectionLost, false);
 
-    // Now make one genuinely deaf, the way the only population derivation cannot help becomes deaf:
-    // a hook arriving with a secret that does not match. Without this the loop above would pass
-    // just as well if the mark had been deleted from the code entirely.
+    // One genuinely deaf, the only way derivation cannot help: a hook with a secret that does not
+    // match. Without this the loop above passes with the mark deleted entirely.
     const victim = survivors[0];
     assert.ok(victim, "no survivor to refuse a hook for");
     const refused = await fetch(`${base}/api/hooks/${encodeURIComponent(victim.id)}`, {
@@ -857,19 +781,8 @@ void describe("the sessions this test started", () => {
   });
 });
 
-// ------------------------------------------------------------------------------------------
-// m4/key-row: the keys a soft keyboard does not have, answering a prompt that BLOCKS on them.
-//
-// The bytes below come from src/client/key-row.ts - the module the caps call - and go out through
-// the same `Connection.input` xterm's keystrokes use, so nothing here is a second path to the pty.
-// What App.vue adds on top is the latch, and it is restated in `keyboard` rather than imitated:
-// press Ctrl, and the next thing sent is transformed and the latch spent.
-//
-// NOT DEMONSTRATED HERE, and not claimed: a thumb on a phone. The only other tailnet device has
-// been offline for days, so "answered from the phone" is unproven; the steps for a person holding
-// one are in README.md under "Answering a prompt from the phone". What IS proven is everything
-// between the cap and the process: a real server, real tmux, a real pty, a real shell, and a
-// prompt that cannot proceed until the right byte arrives.
+// The keys a soft keyboard does not have, answering a prompt that BLOCKS on them, through the same
+// `Connection.input` as everything else. NOT demonstrated: a thumb on a phone.
 
 interface Keyboard {
   press: (key: KeyName) => void;
@@ -905,10 +818,8 @@ void describe("the key row, against a real shell that is blocked on a keypress",
     const keys = keyboard(driven);
     try {
       const marker = join(keyWork, "answered.txt");
-      // A prompt that BLOCKS. `read` does not return until a line arrives, and a line arrives only
-      // when the pty's line discipline sees CR - which is the byte Enter sends and the byte an iOS
-      // soft keyboard's own return key would send too. The point is the rest of the row: the answer
-      // is typed, then committed by a key the phone does not have to produce.
+      // A prompt that BLOCKS: `read` returns only when the line discipline sees CR. The answer is
+      // typed, then committed by a key the phone does not otherwise have.
       driven.connection.input(
         driven.session.id,
         `printf 'Allow edit to src/tmux.ts? [y/n] '; read reply; printf '%s' "$reply" > ${marker}\r`,
@@ -940,9 +851,8 @@ void describe("the key row, against a real shell that is blocked on a keypress",
     const driven = await drive(ctrlWork);
     const keys = keyboard(driven);
     try {
-      // `&&`, not `;`: an interrupted `sleep` exits non-zero, so the second half is the thing that
-      // does NOT happen. With `;` the shell would run it anyway and the check below would be a
-      // check on nothing.
+      // `&&`, not `;`: an interrupted `sleep` exits non-zero, so the second half is what does NOT
+      // happen. With `;` the shell runs it anyway and the check below checks nothing.
       const finished = join(ctrlWork, "the-sleep-finished");
       driven.connection.input(driven.session.id, `sleep 300 && touch ${finished}\r`);
       await new Promise((resolve) => setTimeout(resolve, 750));
@@ -988,8 +898,7 @@ void describe("the key row, against a real shell that is blocked on a keypress",
 
   void test("Esc and the arrows arrive as the bytes they claim to be", async () => {
     // `cat -v` prints control bytes rather than acting on them, so what the pty received is
-    // readable on the pane. This is the assertion that the row is sending sequences and not key
-    // names: an arrow that arrived as anything else shows up here as anything else.
+    // readable on the pane - which is how "sequences, not key names" is checkable at all.
     const driven = await drive(arrowWork);
     const normal = keyboard(driven, false);
     const application = keyboard(driven, true);
@@ -1009,21 +918,8 @@ void describe("the key row, against a real shell that is blocked on a keypress",
         /\^\[\^\[\[A\^\[\[B\^\[\[C\^\[\[D/.test(driven.screen()),
       );
 
-      // The same four caps with DECCKM set, which is what a full-screen TUI leaves the terminal in.
-      // The form is the terminal's answer rather than the row's opinion: in the browser it comes
-      // from xterm's `modes.applicationCursorKeysMode`, and here it is the flag passed to
-      // `keyboard`.
-      //
-      // MEASURED, and worth writing down because it decides how much this test can claim: tmux
-      // PARSES its client's input as keys and re-encodes them for the pane, so `ESC O A` arrives at
-      // a pane that has not set DECCKM as `ESC [ A`. Both forms are therefore recognised as Up here
-      // and neither reaches `cat` verbatim - so what this proves is that the row sends a real arrow
-      // key in either mode, not that the byte on the wire is the byte in the pane. The mode still
-      // has to be read rather than assumed: an application form invented for a terminal that never
-      // set DECCKM is a guess that happens to survive tmux, and the client also talks to xterm's
-      // own parser, which does not normalise anything.
-      // A different ORDER from the batch above, so the pattern below cannot be matched by a repaint
-      // of the first line - which a reconnect or a tmux redraw will happily put on the pane twice.
+      // The same caps with DECCKM set. MEASURED: tmux re-encodes its client's keys, so this proves a
+      // real arrow in either mode rather than the byte reaching the pane. A different ORDER, too.
       application.press("down");
       application.press("up");
       application.press("left");
@@ -1049,17 +945,8 @@ void describe("the key row, against a real shell that is blocked on a keypress",
   });
 });
 
-// ------------------------------------------------------------------------------------------
-// The input box: what a submit actually does to a shell.
-//
-// The bytes come from src/client/composer.ts - the module the box calls - and go out through the
-// same `Connection.input` everything else uses. What App.vue adds is the latch, restated here the
-// way `keyboard` restates it above.
-//
-// NOT DEMONSTRATED HERE, and not claimed: a thumb on a phone, an iOS paste into the box, or a
-// Japanese IME composing in it. Those are exactly the three reasons the box exists and none of them
-// has a headless equivalent - what is proven below is only that the bytes a submit produces do to a
-// real pty what the box promises.
+// The input box: what a submit actually does to a shell. NOT demonstrated - a thumb, an iOS paste,
+// an IME composing - which are the three reasons the box exists and have no headless equivalent.
 
 void describe("the input box, against a real shell", () => {
   void test("Send runs the line; Insert leaves it for the person to commit", async () => {

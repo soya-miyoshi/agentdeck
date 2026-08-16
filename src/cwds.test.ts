@@ -41,11 +41,8 @@ void describe("the cwd allowlist", () => {
   });
 
   void test("the refusal prices the restart at what it actually costs now", () => {
-    // This used to demand the opposite wording. The restart cost every running session its
-    // `waiting` alerts, because the hook secret was random and could not be handed to a process
-    // already running, and the refusal had to say so or someone would restart casually and stop
-    // being told they were needed. The secret is derived now and survives, so a refusal still
-    // carrying that warning would OVERSTATE the price - which misleads exactly as much.
+    // This used to demand the opposite wording, when a restart cost every session its `waiting`
+    // alerts. The secret survives now, so carrying that warning would OVERSTATE the price.
     const message = list.refusal("/workspace/newly-cloned");
     assert.doesNotMatch(message, /waiting detection stays dead/);
     assert.doesNotMatch(message, /secret does not survive/);
@@ -64,9 +61,8 @@ void describe("the cwd allowlist", () => {
 });
 
 void describe("the prose states the exclusion by name, not by provenance", () => {
-  // `Registry.#adopt` lists any session whose `#{session_path}` is allowlisted AND whose name is
-  // `sessionId(that path, a configured agent)`. Provenance stopped being the criterion there, so a
-  // document that still says a hand-started session cannot be a tab reads the risk as covered.
+  // Adoption lists any session whose path is allowlisted and whose NAME matches, so provenance
+  // stopped being the criterion - and a document that still says otherwise reads as covered.
   const claims = [
     /agentdeck only knows a session's directory for the\s+sessions it started/,
     /start by hand[^.]*does \*\*not\*\* appear as a tab/,
@@ -92,10 +88,8 @@ void describe("the prose states the exclusion by name, not by provenance", () =>
 
 void describe("the allowlist is a boundary, not only a check on POST /api/sessions", () => {
   void test("a session whose directory is unknown is never allowed", () => {
-    // What a session started by hand on the tmux socket reports, and what one that outlived the
-    // process that created it reports. `resolve("")` is the SERVER's working directory, so
-    // without this an agentdeck started inside an allowlisted repository would adopt every
-    // unknown session on the socket - the exact case the boundary exists for.
+    // What a hand-started session reports, and `resolve("")` is the SERVER's working directory - so
+    // without this a deck started inside an allowlisted repo adopts every unknown session.
     assert.equal(list.allows(""), false);
   });
 });

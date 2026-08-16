@@ -2661,3 +2661,42 @@ print the QR when stdout is not a terminal, which is the sentence SECURITY.md no
 clone` to a session on their phone using only the README, and nobody has tried. The setup path was
 not run end to end from a clean machine either - no `mise install` on a Mac without the toolchain, no
 `tailscale serve` from these instructions, no phone.
+
+## Comments cut to the two lines CLAUDE.md asks for
+
+836 comment blocks ran past the one-or-two-line budget - about 5,000 lines, more than a fifth of
+everything in `src/`. Every one of them is now two lines or fewer: what the thing does, and the one
+non-obvious constraint. Counted by content lines, so a JSJoc's `/**` and `*/` do not buy a third.
+
+*Nothing was deleted that is not written down somewhere it belongs.* What these carried was the long
+form of arguments that already live in `audit.md` and `plans/`: why the pane width never moves, why
+`-J` is not passed to `capture-pane`, what the container bought and what its removal costs, the
+whole reconnect-ladder case analysis. The two-line version keeps the claim and the reason it is not
+obvious; the derivation is one `git log` or one grep away, in the file whose job it is.
+
+*Two stale claims went with the trim rather than being reformatted*, which is the argument for doing
+this at all. `Registry`'s adoption log told the operator "its hook secret is gone, so it will not
+report waiting" - while the code derives that secret and `src/supervisor-crash.test.ts` asserts it
+survives. `#adopt`'s docstring said the same in a section headed "TWO THINGS ARE NOT RECOVERED".
+Both had been wrong since the secret became derived; both were long enough that nobody read to the
+end of them. Now they say what the code does.
+
+*What was NOT done.* `scripts/` is stop-and-ask (CLAUDE.md), so `reap.mjs`, `watchdog.mjs`,
+`healthcheck.mjs`, `tailscale-serve.mjs` and `restart-survival.mjs` are untouched - about 200 lines
+over budget, in the files most likely to be read by someone at 3am. Worth a separate pass with the
+operator's say-so. `Makefile`, `mise.toml` and `.env.example` are the same case.
+
+*One process hazard found the hard way.* `pnpm format` is `prettier --write .`, which reformatted
+`pnpm-lock.yaml` (1773 lines), five plans, `TODO.md`, `.claude/skills/iterate/SKILL.md` and five
+`.vue` files - none of which `pnpm lint` checks, since its glob is `**/*.{ts,mjs,json}`. Reverted,
+and every later pass used `npx prettier --write <paths>`. A `pnpm format` in this repository touches
+a host-executed file the review is supposed to gate.
+
+*Verified:* 964/972, the same 8 CI-workflow failures as before this work. typecheck and lint clean.
+And run rather than inferred from green: a real server on a scratch HOME answered `/api/health` 200,
+refused `/api/sessions` 401 with no token and answered it 200 with one, created a real tmux session
+through `POST /api/sessions` (201), and listed it back with the right cwd, agent and state.
+
+**Not demonstrated: that the shorter comments are still enough.** The test is somebody arriving at
+one of these files cold and getting what they need from two lines. That has not happened yet, and
+the only honest way to find out is the next time one of them is wrong.

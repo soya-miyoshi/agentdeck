@@ -1,9 +1,5 @@
-// m4/launchd-watchdog, executed rather than asserted about: each test runs one pass of
-// scripts/watchdog.mjs as launchd would, against a real server and a real tmux socket.
-//
-// launchd itself is NOT covered - the LaunchAgent is deliberately not installed on this machine,
-// so the timer, RunAtLoad and reboot recovery are undemonstrated. Why each decision below is the
-// decision it is, and what this cannot see, are in audit.md's m4/launchd-watchdog entry.
+// One pass of scripts/watchdog.mjs as launchd would run it, against a real server and tmux socket.
+// launchd itself is NOT covered: the timer, RunAtLoad and reboot recovery are undemonstrated.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -135,9 +131,8 @@ const pass = (
   overrides: Record<string, string | undefined> = {},
 ): SpawnSyncReturns<string> => {
   const env: Record<string, string> = {
-    // Stubs first so `osascript` is the recorder; the rest of PATH is real, because the node the
-    // watchdog spawns is. `tailscale` is NOT on PATH for the watchdog - it names an absolute path,
-    // so the stub is injected by that variable instead.
+    // Stubs first so `osascript` is the recorder, and the rest of PATH real because the node the
+    // watchdog spawns is. `tailscale` is absolute, so its stub comes in by variable.
     PATH: `${stubs}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
     AGENTDECK_TAILSCALE: join(stubs, "tailscale"),
     HOME: home,
@@ -228,12 +223,9 @@ const listeningPids = (port: string): number[] => {
 
 const listenerPid = (port: string): number | null => listeningPids(port)[0] ?? null;
 
-/** A stand-in for the server, as a CHILD PROCESS: the watchdog stops what `lsof` reports on the
- *  port, so an in-process listener would have it SIGTERM the test runner. */
-// Written to <stubRepo>/src/server.ts and run from there, not `node -e`: the watchdog identifies
-// the server by argv before believing or killing it, so a stub has to be shaped like one to be
-// seen. Tests that stand one up pass `asStubRepo` so the watchdog is looking at the same repo;
-// tests where the watchdog must start the REAL server leave it alone.
+/** A stand-in for the server as a CHILD PROCESS, since the watchdog stops what `lsof` reports and an
+ *  in-process listener would have it SIGTERM the runner. Shaped like a real one, or it is not seen. */
+
 /** What the tests give the watchdog for its probe timeout, and what the wedged case waits out. */
 const PROBE_TIMEOUT_MS = 1_200;
 
@@ -303,9 +295,8 @@ after(() => {
 
 void describe("a killed node process is recovered, and the tmux sessions are not", () => {
   void test("nothing listening: the watchdog starts the server on the first pass", async () => {
-    // `refused` skips the consecutive-failure streak entirely. There is no socket to drop and no
-    // snapshot to lose when nothing is running, so patience buys nothing and costs a minute of
-    // being unreachable.
+    // `refused` skips the streak entirely: with nothing running there is no socket to drop, so
+    // patience buys nothing and costs a minute of being unreachable.
     const first = pass(serverPort);
     assert.equal(first.status, 0, first.stderr);
     assert.match(first.stdout, /nothing is listening/);
@@ -364,9 +355,8 @@ void describe("a killed node process is recovered, and the tmux sessions are not
       [sessionId],
     );
 
-    // The wording is "Started", not "Restarted", and that is the honest sentence: after a
-    // SIGKILL nothing is listening, so there was nothing to stop. It still has to say the
-    // sessions were kept, because that is the fact the person reading it needs.
+    // "Started", not "Restarted": after a SIGKILL nothing was listening, so nothing was stopped.
+    // It still has to say the sessions were kept, which is the fact the reader needs.
     const seen = await notifiedEventually(/Started the agentdeck server/);
     assert.match(seen, /nothing was listening/);
     assert.match(seen, /KEPT and have been adopted/);
@@ -374,10 +364,8 @@ void describe("a killed node process is recovered, and the tmux sessions are not
 });
 
 void describe("a slow-but-alive server is not restarted", () => {
-  // The clause a naive check gets wrong: 200 with `ok: true` after six seconds, which every
-  // simpler check on this machine calls dead (audit.md). Requests go to a file because the stub
-  // is a child process.
-  // Slower than SLOW_MS, faster than the probe timeout: slow, not silent.
+  // The clause a naive check gets wrong: 200 after six seconds, which simpler checks call dead.
+  // Slower than SLOW_MS and faster than the probe timeout, so: slow, not silent.
   const DELAY_MS = 500;
   let slow: ReturnType<typeof spawn>;
   let port = "";
@@ -425,9 +413,8 @@ void describe("a slow-but-alive server is not restarted", () => {
 });
 
 void describe("a wedged server needs three consecutive failures, then is restarted", () => {
-  // Accepted and never answered: the failure the timeout exists for, and the state a wedged tmux
-  // with no execFile timeout on it (audit.md) puts the server into. A single miss is not enough,
-  // because a single miss is what a load spike looks like from outside.
+  // Accepted and never answered - what a wedged tmux does to the server. A single miss is not
+  // enough, because a single miss is what a load spike looks like from outside.
   let wedged: ReturnType<typeof spawn>;
   let port = "";
 
@@ -474,10 +461,8 @@ void describe("a wedged server needs three consecutive failures, then is restart
   });
 
   void test("the recovery leaves ONE server on the port, not a second beside the old one", async () => {
-    // The restart path stops what lsof reports before it spawns, so a recovery replaces the
-    // listener rather than adding to it: two servers on one port is the state nothing detects.
-    // Health is not the question here - what the watchdog restarted is the same wedged stub, by
-    // construction - so this waits for the port to be held again rather than answered.
+    // The restart path stops what lsof reports before spawning, so a recovery replaces the listener
+    // rather than adding to it. This waits for the port to be HELD, not answered.
     for (let i = 0; i < 40 && listeningPids(port).length === 0; i++) await sleep(100);
     const holding = listeningPids(port);
     assert.equal(holding.length, 1, `${String(holding.length)} processes hold the port`);
@@ -489,9 +474,8 @@ void describe("it stops and notifies rather than crash-looping", () => {
   let port = "";
 
   before(async () => {
-    // A port with nothing on it and nothing that can be started on it usefully: the state file
-    // is seeded with two recoveries already spent, which is where a genuine crash-loop arrives
-    // after two failed restarts.
+    // A port with nothing on it and nothing useful to start: the state file is seeded with two
+    // recoveries spent, which is where a genuine crash-loop arrives.
     port = await freePort();
     freshTranscript("gave-up");
     seedState({ failures: 2, restarts: 2 });
@@ -566,9 +550,8 @@ void describe("a planted future alert stamp does not buy the latch permanent sil
 });
 
 void describe("tailscale serve: not configured is not an outage", () => {
-  // "Never configured" is an unbuilt milestone, "was configured and is gone" is the reboot case
-  // (plan 006); a stub `tailscale` drives both, because the real one can only produce the first.
-  // The healthy stub keeps any pass here from having a reason to start a real server.
+  // "Never configured" and "was configured and is gone" are different cases, and a stub drives
+  // both because the real `tailscale` can only produce the first.
   let port = "";
   let healthy: ReturnType<typeof spawn>;
 
@@ -648,17 +631,14 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
   });
 
   void test("no KeepAlive: launchd must not relaunch the passes that exit non-zero on purpose", () => {
-    // Giving up and refusing to start a misconfigured server both `exit(1)`. Under KeepAlive
-    // launchd relaunches each of them every ThrottleInterval, which reinstates the crash-loop the
-    // give-up exists to prevent, one layer below where it can see it.
+    // Giving up and refusing a misconfigured server both `exit(1)`, and under KeepAlive launchd
+    // relaunches each - reinstating the crash-loop the give-up exists to prevent.
     assert.doesNotMatch(readFileSync(plist, "utf8"), /<key>KeepAlive<\/key>/);
   });
 
   void test("PATH puts the system directories ahead of every user-writable one", () => {
-    // `osascript` is resolved on this PATH. The mise node directory and /opt/homebrew/bin are
-    // writable by this user, which is who an agent in a session runs as, so ahead of /usr/bin
-    // either is a file an agent drops and a timer executes as the operator. `tailscale` is not
-    // covered by this order - it has no system copy - which is why the script names it absolutely.
+    // `osascript` is resolved on this PATH, and the mise and homebrew directories are writable by
+    // the uid an agent runs as - so ahead of /usr/bin either is a file a timer executes.
     const text = readFileSync(plist, "utf8");
     const path = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
     assert.ok(path, "the plist declares no PATH, so launchd gives the job its own minimal one");
@@ -667,11 +647,8 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
   });
 
   void test("nothing in this repository installs it: the copy and the load are a person's", () => {
-    // The hard constraint on this item, asserted about the REPOSITORY rather than about this Mac.
-    // It used to probe ~/Library/LaunchAgents and `launchctl list`, which made it a test of the
-    // machine it ran on: it went red the moment the operator did what the README tells them to do,
-    // and it would have stayed green on a machine where an agent installed the job under a
-    // different label. What must stay true is that no automated trigger here performs the install.
+    // Asserted about the REPOSITORY rather than this Mac: probing `launchctl list` made it a test of
+    // the machine, red the moment the operator followed the docs. Nothing here may install.
     const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
     assert.doesNotMatch(pkg, /launchctl/, "a package script would run the install unattended");
     assert.doesNotMatch(pkg, /LaunchAgents/);
@@ -709,9 +686,8 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
 });
 
 void describe("an answer that is not a healthy one", () => {
-  // The fourth outcome: answered, but the server saying itself that it cannot do its job. It
-  // takes the same streak as a wedge (audit.md). Two passes only - a third would restart and
-  // leave a real detached server on the stub's port.
+  // The fourth outcome: answered, with the server saying it cannot do its job. Two passes only -
+  // a third would restart and leave a real detached server on the stub's port.
   let stub: ReturnType<typeof spawn>;
   let port = "";
   let mode = "";
@@ -756,9 +732,8 @@ void describe("an answer that is not a healthy one", () => {
   });
 
   void test("200 with `ok: false` is unhealthy too: the status line alone is not the verdict", () => {
-    // The one a check written as `curl -f` gets wrong. The server answers 200 and says in the body
-    // that it is not well - which is what it does when the tmux round trip inside /api/health
-    // fails - and a watchdog that reads only the status code calls that healthy forever.
+    // What `curl -f` gets wrong: the server answers 200 and says in the BODY that it is not well,
+    // which is what a failing tmux round trip inside /api/health produces.
     writeFileSync(mode, "notok");
     seedState();
     const outcome = pass(port, asStubRepo);
@@ -817,9 +792,8 @@ void describe("a planted negative streak cannot disable recovery", () => {
 });
 
 void describe("the watchdog survives its own surroundings", () => {
-  // Three ways this script can be handed a broken world, all of which have to end in it still
-  // supervising. A watchdog that refuses to run because of its own bookkeeping is a watchdog that
-  // is off exactly when nobody is looking.
+  // Three broken worlds, all of which must end with it still supervising: a watchdog that refuses
+  // to run over its own bookkeeping is off exactly when nobody is looking.
   let stub: ReturnType<typeof spawn>;
   let port = "";
 
@@ -838,9 +812,8 @@ void describe("the watchdog survives its own surroundings", () => {
   });
 
   void test("a corrupt state file is a first run, not a refusal to supervise", () => {
-    // Truncated by a crash mid-write, or edited by hand. Starting from zero is the honest
-    // recovery; exiting non-zero and touching nothing leaves the machine unsupervised over a
-    // scratch file.
+    // Truncated mid-write or edited by hand. Starting from zero is the honest recovery: exiting
+    // over a scratch file leaves the machine unsupervised.
     writeFileSync(statePath, "{ this is not json");
     const outcome = pass(port, asStubRepo);
     assert.equal(outcome.status, 0, outcome.stderr);
@@ -857,9 +830,8 @@ void describe("the watchdog survives its own surroundings", () => {
   });
 
   void test("clearing the state file after a give-up resumes supervision, as the log says it does", () => {
-    // The give-up branch tells the operator, in the only channel it has left, that clearing the
-    // state file is how they resume. That sentence is an instruction to a person at 3am and is
-    // worth being true.
+    // The give-up branch tells the operator that clearing the state file is how they resume - an
+    // instruction to a person at 3am, and worth being true.
     seedState({ failures: 3, restarts: 2, gaveUp: true });
     const stuck = pass(port, asStubRepo);
     assert.equal(stuck.status, 1);
@@ -879,9 +851,8 @@ void describe("the watchdog survives its own surroundings", () => {
   });
 
   void test("a notifier that fails does not stop the pass that was trying to tell somebody", () => {
-    // `osascript` can fail for reasons that have nothing to do with the server - no GUI session,
-    // a TCC prompt nobody answered. Supervision must not be conditional on being able to talk
-    // about it, and the failure must be logged rather than swallowed.
+    // `osascript` can fail for reasons unrelated to the server, and supervision must not be
+    // conditional on being able to talk about it - logged rather than swallowed.
     putStub("osascript", `#!/bin/sh\necho "notifier unavailable" >&2\nexit 3\n`);
     putStub("tailscale", `#!/bin/sh\necho "no serve config"\nexit 0\n`);
     // `serveConfigured: true` with a stub that now says there is none: the regression branch, the
@@ -930,9 +901,8 @@ void describe("what the watchdog is forbidden to do", () => {
   });
 
   void test("the probe timeout is well above the server's own health budget", () => {
-    // The slow-but-alive clause in numbers rather than in prose: 15s is five times the 3s the
-    // server gives its own tmux round trip, so "silent" means silent, not busy.
-    // The production DEFAULTS, which is what the plist runs with.
+    // The slow-but-alive clause in numbers: 15s is five times what the server gives its own tmux
+    // round trip, so "silent" means silent rather than busy. These are the plist's defaults.
     assert.match(source, /PROBE_TIMEOUT_MS", 15_000\)/);
     assert.match(source, /const FAIL_THRESHOLD = 3;/);
     assert.match(source, /const MAX_RESTARTS = 2;/);
@@ -946,9 +916,8 @@ void describe("what the watchdog is forbidden to do", () => {
 });
 
 void describe("the environment the recovered server gets is the plist's, and it has to be enough", () => {
-  // The server's environment IS the plist's, so what the plist omits the recovered server does
-  // not have - an empty allowlist, no agents, or the Origin check off. Refusing is the only
-  // honest answer and it has to be audible (audit.md).
+  // The server's environment IS the plist's, so what the plist omits the recovered server lacks -
+  // an empty allowlist, no agents, or the Origin check off. Refusing has to be audible.
   let port = "";
 
   before(async () => {
@@ -977,11 +946,8 @@ void describe("the environment the recovered server gets is the plist's, and it 
   });
 
   void test("either variable alone satisfies it: roots without mounts is not the thing missing", () => {
-    // The pair is one source of startable directories, not two independent requirements. Asserted
-    // because the refusal used to name AGENTDECK_MOUNTS specifically, which made a roots-only
-    // plist - the one `make start` now produces - a server the watchdog would never recover.
-    // Profiles are dropped as well so this pass still refuses and starts nothing: what is under
-    // test is WHICH name the refusal reaches for, not whether it can boot a server.
+    // The pair is one source of directories, not two requirements: naming MOUNTS specifically made
+    // a roots-only plist unrecoverable. Profiles are dropped too, so this pass starts nothing.
     seedState();
     const outcome = pass(port, {
       AGENTDECK_MOUNTS: undefined,
@@ -1078,9 +1044,8 @@ void describe("the server the watchdog starts logs somewhere", () => {
 });
 
 void describe("a remembered pid is not a licence to kill", () => {
-  // `stopServer` is SIGTERM and then SIGKILL, so the pid it is handed had better be the server.
-  // The server crashing is this script's premise and macOS recycles pids, so a pid that is merely
-  // alive is not evidence: the next thing to hold it is another process of this user.
+  // `stopServer` is SIGTERM then SIGKILL, so the pid had better be the server. Crashing is this
+  // script's premise and macOS recycles pids, so merely alive is not evidence.
   let port = "";
   let innocent: ReturnType<typeof spawn>;
 
@@ -1113,9 +1078,8 @@ void describe("a remembered pid is not a licence to kill", () => {
   });
 
   void test("a pid of -1 in the state file is not believed, because kill(-1) is everything", () => {
-    // A truncated or hand-edited state file: `kill(-1)` is every process this user owns. The port
-    // has a healthy listener, so this asserts on what the pass believes rather than by letting an
-    // unfixed script signal the runner's group.
+    // A truncated state file, where `kill(-1)` is every process this user owns. Asserted on what the
+    // pass believes, rather than by letting an unfixed script signal the runner's group.
     const held = listenerPid(port);
     assert.notEqual(held, null);
     seedState({ pid: -1 });
@@ -1128,9 +1092,8 @@ void describe("a remembered pid is not a licence to kill", () => {
 });
 
 void describe("installing the LaunchAgent changes what `scripts/` is, and that is written down", () => {
-  // Every place that calls `scripts/` host-executed states the trigger as something a PERSON
-  // does, which is what makes the prescribed diff review a control. A loaded LaunchAgent makes it
-  // a 60-second timer, and that has to be said where the claim is made.
+  // Everywhere `scripts/` is called host-executed states the trigger as something a PERSON does,
+  // which is what makes the review a control. A loaded LaunchAgent makes it a 60-second timer.
   const mentionsTimer = (text: string): boolean =>
     /60 seconds|60-second/.test(text) && /unattended|no human action|timer/i.test(text);
 
@@ -1163,9 +1126,8 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
   });
 
   void test("and every place that prescribes the copy says it is not write protection", () => {
-    // Both files launchd executes - the copy and the mise node in ProgramArguments[0] - stay
-    // writable by this uid, and the copy is outside what `git diff` can review. Claiming otherwise
-    // is the residual being asserted closed.
+    // Both files launchd executes stay writable by this uid, and the copy is outside what `git
+    // diff` reviews. Claiming otherwise asserts the residual closed.
     const honest = (text: string): boolean =>
       /buys\s+review\s+scope,\s+not\s+write\s+protection/i.test(text) && /interpreter/.test(text);
     for (const [what, text] of [
@@ -1178,9 +1140,8 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
   });
 });
 
-// The spawned server is detached from this process on purpose - it has to outlive the pass that
-// started it - so this file is the only thing that will clean it up. Belt and braces alongside
-// `after`: a crashed test run must not leave a server or a tmux socket behind.
+// The spawned server is detached on purpose - it must outlive the pass that started it - so this
+// file is the only thing that cleans it up, alongside `after`.
 process.on("exit", () => {
   for (const port of usedPorts) killListener(port);
 });
@@ -1201,10 +1162,8 @@ void describe("exposure is watched, not just availability", () => {
   });
 
   void test("Funnel on is an alert every pass, because it is the public internet", () => {
-    // The install script refuses to run under Funnel, but that check happens once. This is the
-    // only thing that looks again, and it had no notion of Funnel at all - so a same-uid process
-    // running `tailscale funnel <port> on` after a green install put a terminal server on the
-    // public internet while every automated check stayed green.
+    // The install script's Funnel refusal happens once, and this is the only thing that looks
+    // again: a `tailscale funnel` after a green install stayed green while going public.
     stubTailscale(`https://host.tail0.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:${port}`, 0);
     seedState({ serveConfigured: true });
     const outcome = pass(port, asStubRepo);
@@ -1224,11 +1183,8 @@ void describe("exposure is watched, not just availability", () => {
 });
 
 void describe("the server an operator started is recognised, not called a squatter", () => {
-  // `make start`, `make restart` and `pnpm start` all produce
-  // `node --env-file-if-exists=.env src/server.ts` - node and script BOTH relative. Matching only
-  // the watchdog's own absolute spawn made every server a person ever started unrecognisable: it
-  // was reported as a squatter, alerted about, and never supervised. Measured against the live
-  // deck, whose pid the watchdog would have refused to touch, before this test existed.
+  // Every `make` target produces a RELATIVE node and script, so matching only the watchdog's own
+  // absolute spawn made every human-started server a squatter it refused to supervise.
   let ours: ReturnType<typeof spawn>;
   let stranger: ReturnType<typeof spawn>;
   let port = "";

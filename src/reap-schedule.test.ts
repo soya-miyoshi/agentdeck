@@ -1,8 +1,5 @@
-// The deck reaping on an interval while it runs. The scheduling half is driven directly; the last
-// case boots the REAL server against a temp root holding a real orphan and waits for it to be gone,
-// because the thing most likely to break silently is the contract between server.ts and
-// scripts/reap.mjs - a renamed JSON field, a missing variable in the spawned environment - and
-// nothing that stubs the spawn can see any of it.
+// The scheduling half is driven directly; the last case boots the REAL server against a real orphan,
+// because what breaks silently is the contract with the script and no stub can see it.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -220,9 +217,8 @@ void describe("the deck reaping while it runs", () => {
     // the boot output has to be able to see that it is on.
     assert.match(server.out(), /collecting abandoned processes/i, server.out());
 
-    // Waited for the LOG rather than for the pid: the process dies a moment before the reaper exits
-    // and the server parses its report, so watching only the pid raced the line into existence and
-    // failed on a pass that had in fact worked.
+    // Waited for the LOG rather than the pid: the process dies before the reaper exits and the server
+    // parses its report, so watching the pid raced the line into existence.
     for (let i = 0; i < 150 && !/reaped .*orphan tree/i.test(server.out()); i += 1)
       await sleep(100);
     assert.match(server.out(), /reaped .*orphan tree/i, server.out());

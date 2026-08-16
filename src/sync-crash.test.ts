@@ -1,19 +1,5 @@
-// A failed poll must be a stale session list for one tick, never an exited process.
-//
-// Two ways the 2s sync tick used to kill the whole server, both reproduced here against a real
-// spawned `node src/server.ts` rather than an in-process handler, because the event under test is
-// the process staying alive:
-//
-//   - a tmux session whose `#{session_path}` contains a newline. `#{session_path}` is last in the
-//     `list-sessions -F` format, so such a session splits into a parseable record plus a
-//     separator-less remainder, and `Tmux.list()` refused the ENTIRE list on it. Anything running
-//     as this user can create one - including any agent agentdeck starts - so one `mkdir` took
-//     every session's stream and every tab with it.
-//   - any other tmux failure on the timer (`lost server`, EMFILE spawning the client). `void
-//     hub.sync()` discarded the rejection, so it surfaced as ERR_UNHANDLED_REJECTION and exited.
-//
-// Nothing supervises this process (m0/supervisor-crash-test), so either one costs every attached
-// phone its socket until a human with shell access restarts it by hand.
+// A failed poll must be a stale session list for one tick, never an exited process. Two ways the sync
+// tick used to kill the server - a path holding a newline, and an uncaught rejection on the timer.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -47,9 +33,8 @@ const rogue = join(work, "ro\ngue");
 
 const realTmux = execFileSync("/bin/sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim();
 
-// A tmux on PATH that is the real one, except that while the marker file exists every
-// `list-sessions` fails the way a server killed out from under an in-flight client does. `lost
-// server` is deliberately not one of the phrases `isEmptyTmux` forgives.
+// The real tmux, except that while a marker file exists every `list-sessions` fails the way a server
+// killed under an in-flight client does - a phrase `isEmptyTmux` deliberately does not forgive.
 const marker = join(conf, "break-list-sessions");
 const shimDir = join(conf, "bin");
 execFileSync("/bin/mkdir", ["-p", shimDir]);

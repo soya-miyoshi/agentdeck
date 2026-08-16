@@ -34,10 +34,8 @@ void describe("planning an attach", () => {
 
 void describe("the epoch branch, which is the one that fails silently", () => {
   void test("a stale epoch is a snapshot even when the seq looks comfortably covered", () => {
-    // The server restarted while the phone was asleep. The session is alive with the same id, the
-    // client holds a seq the new buffer would happily call covered, and sending chunks would mean
-    // the client discards every one as already seen - a tab that paints nothing, forever, while
-    // every other signal looks correct.
+    // The server restarted while the phone slept: the session is alive with the same id and the seq
+    // would be called covered, so the client discards every chunk as already seen.
     const buffer = filled("e2", "fresh output after the restart");
     const plan = planAttach(buffer, "e1", 3);
     assert.deepEqual(plan, { kind: "snapshot", reason: "epoch-changed" });
@@ -49,9 +47,8 @@ void describe("the epoch branch, which is the one that fails silently", () => {
   });
 
   void test("the epoch is checked before coverage, so the two are never mixed", () => {
-    // Reasons are distinguishable on purpose: buffer-rolled is a long gap, epoch-changed is a
-    // restart, and telling them apart is how "reconnect is uneventful" gets verified rather than
-    // assumed.
+    // Reasons are distinguishable on purpose - a long gap and a restart - which is how "reconnect is
+    // uneventful" gets verified rather than assumed.
     const rolled = planAttach(filled("e1", "abcdefghij", 4), "e1", 0);
     const restarted = planAttach(filled("e2", "abcdefghij", 4), "e1", 0);
     assert.notEqual(
@@ -67,10 +64,8 @@ void describe("the epoch branch, which is the one that fails silently", () => {
 });
 
 void describe("building a cold snapshot", () => {
-  // A repaint IS the stream: tmux writes it into the PTY the server is already reading, so it
-  // lands in the ring buffer like any other output and the seq it carries is the buffer's head
-  // afterwards. The fake does exactly that, because a fake that returned bytes without moving the
-  // counter would make the one property this frame rests on untestable.
+  // A repaint IS the stream: tmux writes it into the PTY already being read, so its seq is the
+  // buffer's head afterwards. A fake that returned bytes without moving the counter proves nothing.
   const repainting = (buffer: RingBuffer, text: string) => async () => {
     const seq = buffer.append(Buffer.from(text, "utf8"));
     return await Promise.resolve({ data: text, seq });
@@ -91,10 +86,8 @@ void describe("building a cold snapshot", () => {
   });
 
   void test("data is the repaint, not whatever the ring buffer happens to hold", async () => {
-    // The defect this item exists for. A session that has been sitting at a prompt for an hour
-    // has a live screen that is nowhere in the buffer - the buffer holds the output from when it
-    // was last busy, or a fragment of it, or nothing. Sending that paints a stale screen and then
-    // renders every subsequent chunk against it.
+    // A session sitting at a prompt for an hour has a live screen nowhere in the buffer, so sending
+    // the buffer paints a stale screen and renders every later chunk against it.
     const buffer = filled("e1", "a fragment of an hour-old build log");
     const snapshot = await buildSnapshot({
       buffer,
@@ -107,9 +100,8 @@ void describe("building a cold snapshot", () => {
   });
 
   void test("in alternate-screen mode history is absent, not captured", async () => {
-    // `capture-pane` there does not return nothing - it returns the alternate screen's contents,
-    // which is the TUI's current frame and not history at all. So the capture must not happen,
-    // rather than happen and be discarded.
+    // `capture-pane` there returns the alternate screen's contents - the TUI's current frame, not
+    // history - so the capture must not happen rather than happen and be discarded.
     const buffer = filled("e1", "");
     let captured = false;
     const snapshot = await buildSnapshot({

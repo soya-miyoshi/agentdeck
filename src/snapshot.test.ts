@@ -1,16 +1,5 @@
-// m2/snapshot, against a real tmux server.
-//
-// The done-when sentence is about a machine, not about a fake: "a client attaching to a
-// long-running session sees scrollback and then a CORRECT LIVE SCREEN - demonstrated against a
-// real tmux session that has been idle since before the attach". The unit tests in
-// `src/attach.test.ts` and `src/hub.test.ts` pin the assembly and the seq arithmetic over fakes,
-// and a fake cannot answer the question this file asks, because everything at issue is tmux's own
-// behaviour: what `refresh-client -R` writes into a PTY, which lines `capture-pane` calls history,
-// what `#{alternate_on}` returns on this build, and what bytes any of it prints to a client with
-// no locale.
-//
-// The whole production chain runs here - Registry.create, Hub.sync's real SessionPty, and
-// buildSnapshot over the real sources the server wires in src/server.ts.
+// A client attaching to a session idle since before the attach sees scrollback and then a CORRECT LIVE
+// SCREEN. Everything at issue is tmux's own behaviour, so the whole production chain runs here.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,10 +22,8 @@ const work = realpathSync(mkdtempSync(join(tmpdir(), "agentdeck-snapshot-")));
 // Three panes, because the three cases cannot share one: a session id is a pure function of
 // (cwd, agent), and each of these has to be its own pane with its own history.
 const SCRIPTS = {
-  // Idle SINCE BEFORE THE ATTACH: everything this pane will ever print is printed in the first
-  // moments, and it then sits at the equivalent of a prompt. The 200 lines are more than the
-  // pane has rows, so most of them have scrolled off by the time anyone attaches - which is
-  // exactly the session whose live screen is nowhere in a byte stream nobody was reading yet.
+  // Idle SINCE BEFORE THE ATTACH: it prints everything in the first moments and then sits, so most
+  // lines have scrolled off and the live screen is nowhere in a stream nobody was reading.
   idle: `i=1; while [ $i -le 200 ]; do echo scrollback-line-$i; i=$((i+1)); done; printf 'LIVE-SCREEN-MARKER'; exec sleep 100000`,
   // Busy AFTER the attach, so the ring buffer really does hold hundreds of lines that have since
   // scrolled off the screen. That is the case the old `data` got wrong twice over.
@@ -124,16 +111,13 @@ void describe("a cold snapshot of a real session idle since before the attach", 
 
     const snapshot = await coldSnapshot(session.id, stream);
 
-    // Stated because it matters when reading this file: on THIS pane the old `data` would also
-    // have looked right, because the only thing in the ring buffer is the paint tmux sends on
-    // attach. It is the next test that tells the two sources apart - a pane that has produced
-    // output since the attach, which is every pane after its first second.
+    // On THIS pane the old `data` would also have looked right, since the buffer holds only the
+    // attach paint. The next test is what tells the two sources apart.
     assert.ok(snapshot.history, "a session with 200 lines of output has scrollback");
     assert.match(snapshot.history, /scrollback-line-1$/m, "the earliest line is missing");
     assert.match(snapshot.history, /scrollback-line-100$/m);
-    // Observed on tmux 3.7b rather than assumed: `-E -1` ends at the last line that has ALREADY
-    // scrolled off, so history and the live screen do not overlap. The two halves of the frame
-    // divide the pane between them instead of the client drawing the same lines twice.
+    // Observed rather than assumed: `-E -1` ends at the last line that has ALREADY scrolled off, so
+    // the two halves of the frame divide the pane instead of overlapping.
     assert.doesNotMatch(
       snapshot.history,
       /LIVE-SCREEN-MARKER/,
@@ -155,11 +139,8 @@ void describe("a cold snapshot of a real session idle since before the attach", 
 
 void describe("data is the live screen, not what the ring buffer happens to hold", () => {
   void test("scrollback that is already in history is not repeated in data", async () => {
-    // THE DEFECT THIS ITEM EXISTS FOR, in the shape a real pane produces it: 400 lines arrive
-    // while we are attached, so the ring buffer holds all of them, and 360-odd of them have
-    // scrolled off the screen. `data` as the buffer's contents sends those lines a SECOND time,
-    // under a frame the client is told supersedes everything before it - after `history` has
-    // already been written. A repaint sends the screen, which is what `data` is specified to be.
+    // The defect in the shape a real pane produces it: 400 lines arrive while attached, so `data` as
+    // the buffer's contents sends the scrolled-off ones a SECOND time, after `history`.
     const { session } = await registry.create(work, "burst");
     await hub.sync();
     const stream = streamOf(session.id);
@@ -197,12 +178,8 @@ void describe("alternate screen, which capture-pane cannot be trusted in", () =>
       "#{alternate_on} did not report a pane that has written \\033[?1049h",
     );
 
-    // What the capture WOULD have returned, so the absence below is measured against the wrong
-    // answer it prevents rather than against nothing. Observed on tmux 3.7b, not assumed: while
-    // the pane is on the alternate screen the capture answers out of the ALTERNATE screen's
-    // history, which is a blank line - not the pane's real scrollback, which is still there and
-    // comes back the moment the TUI exits. Non-empty, so the "absent rather than empty" rule
-    // would NOT have dropped it on its own; asking `#{alternate_on}` first is what does.
+    // What the capture WOULD have returned, so the absence below is measured against the wrong answer
+    // it prevents. Non-empty, so "absent rather than empty" would not have dropped it on its own.
     const wouldHaveCaptured = await hub.captureHistory(session.id, 2000);
     assert.notEqual(wouldHaveCaptured, "", "then the empty check alone would have covered this");
     assert.doesNotMatch(
@@ -218,10 +195,8 @@ void describe("alternate screen, which capture-pane cannot be trusted in", () =>
   });
 
   void test("#{alternate_on} prints clean ASCII to a client with no locale at all", async () => {
-    // The m0/create-500 hazard, checked rather than assumed for the one tmux command this item
-    // added that PRINTS to a client: tmux replaces every byte it thinks a non-UTF-8 client cannot
-    // take with `_`, and a server started by launchd has no LANG, LC_ALL or LC_CTYPE. Raw bytes,
-    // the `od -c` of it, on a client whose environment is PATH and nothing else.
+    // The locale hazard, checked for the one command this item added that PRINTS to a client: raw
+    // bytes, on a client whose environment is PATH and nothing else.
     const { session } = await registry.create(work, "tui");
     const ask = (target: string): Buffer =>
       execFileSync(
@@ -237,10 +212,8 @@ void describe("alternate screen, which capture-pane cannot be trusted in", () =>
       `tmux printed ${raw.toString("hex")}, so the format was sanitised on its way out`,
     );
 
-    // And why the target is the WINDOW one. `alternate_on` is a pane property: given a session
-    // target the same command prints an empty line and no error, which `isAlternateScreen` would
-    // read as "not on the alternate screen" and answer by capturing a TUI's frame as scrollback.
-    // A wrong target here is a wrong snapshot, silently.
+    // Why the target is the WINDOW one: `alternate_on` is a pane property, and a session target
+    // prints an empty line with no error - read as "not on the alternate screen", silently.
     assert.deepEqual([...ask(`=${session.id}`)], [...Buffer.from("\n", "utf8")]);
   });
 });

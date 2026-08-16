@@ -101,14 +101,8 @@ void describe("listing sessions", () => {
   });
 
   void test("mangled output fails the whole list rather than being read as sessions", async () => {
-    // m0/create-500. A client tmux does not believe is UTF-8 gets `_` in place of every byte tmux
-    // considers non-printable, including the U+001F this format is built on. Reading such a line
-    // leniently gave every session the whole line as its id, which `Registry.list()` then dropped
-    // for having no metadata - a create that had worked, reported as a 500, agent still running.
-    // Refusing is the point: half a list is worse than an error, because nothing downstream can
-    // tell it from a machine with fewer sessions on it. The mangled line is the one the real tmux
-    // returned on the reported run, byte for byte. The mangling rewrites EVERY U+001F, so the
-    // signature is that no line at all carries a separator.
+    // A non-UTF-8 client gets `_` for every U+001F, so reading leniently gave every session the
+    // whole line as its id. Half a list is worse than an error: nothing downstream can tell them apart.
     const { tmux } = fake({
       "list-sessions": "a-claude-1_0__1700000000_/a\nrepo-sh-df464c46_0__1786113059_/x\n",
     });
@@ -116,11 +110,8 @@ void describe("listing sessions", () => {
   });
 
   void test("a newline in one session's path costs that session, not the whole list", async () => {
-    // `#{session_path}` is last in the format and a path may legally contain a newline, so a
-    // session created in `/tmp/ro\ngue` splits into a parseable record plus a separator-less
-    // remainder. Anything running as this user can create one; if that remainder failed `list()`
-    // every 2s tick, one rogue session would take every other session's stream and every tab
-    // with it, with no supervisor to restart the process. It must cost at most itself.
+    // A path may contain a newline, so one session splits into a record plus a separator-less
+    // remainder. Anything running as this user can make one, so it must cost at most itself.
     const { tmux } = fake({
       "list-sessions": `${line("a-claude-1", "0", "")}${SEP}/tmp/ro\ngue\n${line("b-claude-2", "0", "")}${SEP}/tmp/ok\n`,
     });
@@ -132,10 +123,8 @@ void describe("listing sessions", () => {
   });
 
   void test("a session name containing the separator is still parsed, not called mangled", async () => {
-    // The refusal above must fire on the mangling and nothing else. Session names are attacker-
-    // adjacent - anything running as this user can create one - but a name can only ADD
-    // separators to the line, never remove them, so it cannot reach the refusal. It also cannot
-    // impersonate one of ours: the id it parses to is not the id `Registry` has metadata for.
+    // The refusal must fire on the mangling and nothing else: a crafted name can only ADD
+    // separators, never remove them, and the id it parses to is not one the registry knows.
     const { tmux } = fake({ "list-sessions": `${line(`odd${SEP}name`, "0", "")}\n` });
     const [session] = await tmux.list();
     assert.equal(session?.id, "odd");
@@ -210,11 +199,8 @@ void describe("create or attach", () => {
   });
 
   void test("no value is ever an argument, because argv is public", async () => {
-    // macOS will not show another process's environment to `ps`, and it shows every process's
-    // ARGV to everything this user runs - verified on this Mac, `ps -Ao args=` printed a sibling's
-    // full argv. With `-e NAME=VALUE`, an agent sampling `ps` in a loop caught the tmux client
-    // created for the NEXT session and read the operator's API key out of it. So the values ride
-    // the client's own environment and `update-environment` names which of them tmux copies in.
+    // macOS hides another process's environment from `ps` and shows its ARGV, so `-e NAME=VALUE`
+    // hands an agent sampling `ps` the next session's key. The values ride the client's environment.
     const { tmux, calls, envs } = fake({ "list-sessions": "" });
     await tmux.createOrAttach("s", "/w", "claude", [], {
       AGENTDECK_SECRET: "s3cretvalue",
@@ -245,11 +231,8 @@ void describe("create or attach", () => {
   });
 
   void test("and takes every one of them back out of the session environment", async () => {
-    // The copy reaches the pane by putting the variable in the SESSION environment, where tmux
-    // keeps it: `tmux -L <socket> show-environment -t <session>` would otherwise print the
-    // per-session hook secret, and every API key a profile passed through, to any process running
-    // as this user. tmux builds the pane's environment when new-session forks it, so unsetting in
-    // the same chained invocation takes the value from the reader and not from the agent.
+    // The copy lands in the SESSION environment, which `show-environment -t` prints to anything
+    // running as this user - and the pane is forked before it, so the unset takes it from readers only.
     const { tmux, calls } = fake({ "list-sessions": "" });
     await tmux.createOrAttach("s", "/w", "claude", [], {
       AGENTDECK_SECRET: "abc",
@@ -281,11 +264,8 @@ void describe("create or attach", () => {
   });
 
   void test("a failed create does not put the secret or an API key in the error", async () => {
-    // node puts the whole argv into the rejection message of a failed execFile, and this argv
-    // carries `-e AGENTDECK_SECRET=... -e ANTHROPIC_API_KEY=...`. That message reached the client
-    // verbatim through the generic 500, so the phone rendered the operator's key. Any non-zero
-    // exit does it: a socket tmux refuses to connect to, a fork failure, a chained set-option
-    // that fails.
+    // node puts the whole argv into a failed execFile's message, and that message reached the
+    // client verbatim through the generic 500. Any non-zero exit does it.
     const { tmux } = fake({
       "list-sessions": "",
       "new-session": Object.assign(
@@ -327,17 +307,12 @@ void describe("create or attach", () => {
 
 void describe("ensuring a server exists", () => {
   void test("starts one and turns exit-empty off", async () => {
-    // exit-empty defaults to ON, so a server holding no sessions terminates - which is every
-    // server at boot. `start-server` reports success either way, so this is invisible until
-    // something tries to use the server that is already gone.
+    // exit-empty defaults ON, so a server holding no sessions terminates - which is every server at
+    // boot. `start-server` reports success either way, so it is invisible until something uses it.
     const { tmux, calls } = fake();
     await tmux.ensureServer();
-    // One invocation, not two: as separate calls the empty server exits between them and
-    // set-option fails with "no server running". Observed, not theorised. What matters is that
-    // these three share a single invocation, which the deepEqual below is what actually proves -
-    // this used to assert `calls.length === 1` as a proxy for it, which also forbade the
-    // later `show-environment` sweep of a pre-existing server's globals. The race is between
-    // start-server and set-option and nothing else, so the guarantee is unchanged.
+    // One invocation, not two: as separate calls the empty server exits between them. The deepEqual
+    // below proves that directly - `calls.length === 1` was a proxy that also forbade the sweep.
     assert.deepEqual(commandsOf(calls[0] ?? []), [
       ["start-server"],
       ["set-option", "-g", "exit-empty", "off"],
@@ -346,9 +321,8 @@ void describe("ensuring a server exists", () => {
       // `ensureServer`. Chained with the rest for the same reason they are: one invocation.
       ["set-option", "-g", "prefix", "none"],
       ["set-option", "-g", "prefix2", "none"],
-      // tmux.conf reaches a server this call STARTS. These three have to hold on one someone else
-      // started too - which is the ordinary case, since attaching by hand starts one - so they are
-      // set as globals here as well.
+      // tmux.conf reaches a server this call STARTS, and these three must hold on one someone else
+      // started too - the ordinary case, since attaching by hand starts one.
       ["set-option", "-g", "status", "off"],
       ["set-option", "-g", "mouse", "off"],
       ["set-option", "-g", "history-limit", "10000"],
@@ -356,11 +330,8 @@ void describe("ensuring a server exists", () => {
   });
 
   void test("empties update-environment, which is the client half of a built environment", async () => {
-    // The default copies SSH_AUTH_SOCK, DISPLAY and friends out of whichever tmux CLIENT creates
-    // or attaches to a session and into that session's environment - so a clean server global
-    // environment on its own still hands a pane the forwarded ssh-agent the moment anything
-    // attaches. Observed on tmux 3.7b: with the default, `show-environment -t` listed
-    // SSH_AUTH_SOCK; emptied, it listed only what -e put there.
+    // The default copies SSH_AUTH_SOCK out of whichever CLIENT attaches and into the session, so a
+    // clean server environment alone still hands a pane the forwarded agent.
     const { tmux, calls } = fake();
     await tmux.ensureServer();
     assert.ok(
@@ -373,10 +344,8 @@ void describe("ensuring a server exists", () => {
 
 void describe("the environment a tmux server is started with", () => {
   void test("is built from named variables, not inherited from the launching shell", () => {
-    // The tmux SERVER is a child of whichever invocation starts it, and every pane inherits the
-    // server's global environment. Inheriting meant an agent session saw SSH_AUTH_SOCK - the
-    // forwarded ssh-agent, and with it `git push --force` to every repository that key reaches -
-    // and any other variable the shell that ran `pnpm start` happened to carry.
+    // The tmux SERVER is a child of whichever invocation starts it and every pane inherits its
+    // global environment - which meant an agent session saw the forwarded ssh-agent.
     const built = baseEnv({
       PATH: "/usr/bin",
       HOME: "/Users/x",
@@ -394,9 +363,8 @@ void describe("the environment a tmux server is started with", () => {
   });
 
   void test("nothing on the list is a credential", () => {
-    // The list is small enough to read, and this is what reading it is for: every name on it is
-    // something a terminal needs to be a terminal. An API key reaches a session by being named
-    // in that agent's profile `env`, where it is written down (plan 004).
+    // Every name on the list is something a terminal needs to be a terminal. An API key reaches a
+    // session by being named in that agent's profile `env`, where it is written down.
     for (const name of BASE_ENV_NAMES) {
       assert.doesNotMatch(name, /KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL/i, name);
     }
@@ -414,13 +382,8 @@ void describe("the environment a tmux server is started with", () => {
   });
 
   void test("a non-UTF-8 locale is fixed in the variable that actually wins", () => {
-    // POSIX precedence, not "any of the three mentions UTF-8". Both of these environments used to
-    // yield a non-UTF-8 tmux client - and therefore `_` where the field separator should be, and
-    // therefore a `Tmux.list()` that throws for every session on the socket.
-    //
-    // (a) LC_ALL=C alone: defaulting LC_CTYPE is inert, because LC_ALL outranks it. The only fix
-    //     is to stop passing that LC_ALL on, which baseEnv is free to do - it builds the
-    //     environment from scratch rather than mutating the shell's.
+    // POSIX precedence, not "any of the three mentions UTF-8": both environments below used to
+    // yield a non-UTF-8 client, and so a `list()` that throws for every session on the socket.
     const allC = baseEnv({ PATH: "/usr/bin", LC_ALL: "C" });
     assert.equal(allC["LC_ALL"], undefined);
     assert.equal(allC["LC_CTYPE"], "UTF-8");
@@ -476,9 +439,8 @@ void describe("capture and repaint", () => {
     assert.ok(call, "capture-pane was never called");
     assert.ok(call.includes("-e"));
     assert.ok(call.includes("-p"));
-    // NOT -J. The pane and the client are both a fixed 40, so there is nothing to re-wrap, and
-    // -J welds a full-width line to the next logical one - which is the second line's text
-    // appearing at the right-hand end of the first.
+    // NOT -J: pane and client are both fixed, so there is nothing to re-wrap, and -J welds a
+    // full-width line to the next one.
     assert.ok(!call.includes("-J"), "-J joins lines the pane never joined");
     assert.deepEqual(call.slice(call.indexOf("-S"), call.indexOf("-S") + 2), ["-S", "-2000"]);
   });
@@ -490,9 +452,8 @@ void describe("capture and repaint", () => {
   });
 
   void test("repaint targets the client tty, because refresh-client takes nothing else", async () => {
-    // `refresh-client -t` is a CLIENT target. Handing it a session name is not a narrower target,
-    // it is a different namespace, and tmux answers "can't find client" - so the repaint that the
-    // snapshot's `data` is made of would never happen.
+    // `refresh-client -t` is a CLIENT target, so a session name is a different namespace entirely -
+    // tmux answers "can't find client" and the snapshot's repaint never happens.
     const { tmux, calls } = fake({ "list-clients": "/dev/ttys010\n", "refresh-client": "" });
     await tmux.repaint("s");
     assert.deepEqual(calls[0]?.slice(-4), ["-t", "=s", "-F", "#{client_tty}"]);
@@ -500,9 +461,8 @@ void describe("capture and repaint", () => {
   });
 
   void test("every attached client is refreshed, not the concatenated list as one target", async () => {
-    // Anyone can attach a second client after this server did - the operator, or the agent. Then
-    // list-clients prints two lines, and refresh-client -t "tty1\ntty2" exits 1 with "can't find
-    // client", so no snapshot is ever sent for that session while the second client stays.
+    // Anyone can attach a second client, and then `list-clients` prints two lines - one
+    // `refresh-client -t` over both exits 1, so no snapshot is sent while that client stays.
     const { tmux, calls } = fake({
       "list-clients": "/dev/ttys010\n/dev/ttys012\n",
       "refresh-client": "",
@@ -557,15 +517,10 @@ void describe("error classification", () => {
   });
 });
 
-// -----------------------------------------------------------------------------------------
-// Against a real tmux server
-// -----------------------------------------------------------------------------------------
+// --- Against a real tmux server ---
 
-// The two findings this section closes were both verified by hand before they were fixed, and a
-// fake tmux cannot re-verify either: what leaked was tmux's own behaviour - what a pane inherits
-// from the server, and what `show-environment` will hand to any process running as this user. So
-// this drives the real binary on a socket of its own, with a marker variable in the environment
-// of the process that starts the server, exactly as the done-when sentence describes.
+// A fake tmux cannot verify either finding here: what leaked was tmux's own behaviour. This drives
+// the real binary on its own socket, with a marker variable in the starting process's environment.
 void describe("what a real tmux server hands a real pane", () => {
   const socket = `agentdeck-test-${String(process.pid)}`;
   const tmux = new Tmux({ socket });
@@ -581,9 +536,8 @@ void describe("what a real tmux server hands a real pane", () => {
   });
 
   void test("the pane has the secret, and show-environment does not", async () => {
-    // The launching process carries both a marker variable and a fake SSH_AUTH_SOCK. Neither is
-    // on BASE_ENV_NAMES and neither is in any profile, so neither may reach the pane - while
-    // AGENTDECK_SECRET, which was passed explicitly, must.
+    // The launching process carries a marker and a fake SSH_AUTH_SOCK, neither on BASE_ENV_NAMES
+    // nor in a profile, so neither may reach the pane - while the explicit secret must.
     process.env["SEKRIT_MARKER"] = "the-launching-shell";
     process.env["SSH_AUTH_SOCK"] = "/tmp/agentdeck-test-agent.sock";
     try {
@@ -622,16 +576,8 @@ void describe("what a real tmux server hands a real pane", () => {
   });
 
   void test("the client carrying the secrets never starts the tmux server", async () => {
-    // Whichever client starts a tmux server donates its whole environment to that server's GLOBAL
-    // environment, and the create chain runs with AGENTDECK_SECRET and every profile key in its
-    // environment by design. The per-session unsets at the end of that chain clear the SESSION
-    // environment and do nothing about the global one. ensureServer was called once at boot,
-    // which was enough only while the tmux server could not outlive the node process - a server
-    // that dies with its last session and is restarted by a create gets no such setting.
-    //
-    // Verified by hand on tmux 3.7b before it was fixed: with no server on the socket, that exact
-    // chain left `show-environment -g` printing the secret and the API key, and a pane forked
-    // afterwards saw both.
+    // Whichever client starts the server donates its whole environment to the GLOBAL one, which the
+    // per-session unsets do not touch - and a create can be the call that starts it.
     const fresh = `${socket}-nosrv`;
     const freshTmux = new Tmux({ socket: fresh });
     try {
@@ -657,14 +603,8 @@ void describe("what a real tmux server hands a real pane", () => {
   });
 
   void test("the prefix is not a command channel on our socket", async () => {
-    // Everything the phone types reaches a tmux CLIENT's stdin, because `src/pty.ts` attaches
-    // rather than owning the pane directly - so tmux parses those bytes as KEYS first. With the
-    // default C-b, `Ctrl` `b` `:` is the tmux command prompt and `run-shell` executes on the host,
-    // outside the cwd allowlist, outside AGENTDECK_PROFILES, without POST /api/sessions.
-    //
-    // Verified against a real attach client before the fix: the marker file appeared. This asserts
-    // the option that closes it, on a server this class actually started, rather than trusting the
-    // argument list - the unit test above proves we SENT it, this proves tmux TOOK it.
+    // Everything typed reaches a tmux CLIENT's stdin and is parsed as KEYS first, so the default
+    // C-b makes `run-shell` host execution. The unit test proves we sent it; this proves tmux took it.
     const guarded = `${socket}-prefix`;
     const guardedTmux = new Tmux({ socket: guarded });
     try {
@@ -687,16 +627,8 @@ void describe("what a real tmux server hands a real pane", () => {
   });
 
   void test("a server we did not start does not hand its environment to our panes", async () => {
-    // The case the first version of this branch documented as unreachable and left open: with a
-    // live server already on the socket, `start-server` is a no-op, so building the CLIENT's
-    // environment bounds nothing - the pane inherits the server's global environment instead.
-    // The trigger is prescribed by our own refusal text and the README, both of which tell the
-    // operator to `tmux -L agentdeck attach`, and attaching starts a server.
-    //
-    // Emptying `update-environment` makes this strictly worse, which is why it could not stay a
-    // residual: tmux's default list NAMES SSH_AUTH_SOCK, so the default was overwriting it from
-    // our clean client. Verified by hand on tmux 3.7b - with the list emptied and a dirty
-    // pre-existing server, the pane saw both the marker and the forwarded agent.
+    // With a live server already on the socket `start-server` is a no-op, so the CLIENT environment
+    // bounds nothing - and emptying `update-environment` makes it worse, not better.
     const dirty = `${socket}-dirty`;
     const dirtyOut = join(tmpdir(), `agentdeck-dirty-env-${String(process.pid)}`);
     const dirtyTmux = new Tmux({ socket: dirty });
@@ -751,11 +683,8 @@ void describe("what a real tmux server hands a real pane", () => {
   });
 
   void test("a login shell in the pane puts the operator's dotfiles back", async () => {
-    // The claim "built, not inherited" is about what a pane INHERITS. `HOME` has to be on the
-    // list, so a login shell reads the dotfiles it points at and re-exports whatever they export -
-    // and `export SSH_AUTH_SOCK=...` in `~/.zprofile` is what 1Password and `ssh-agent` both
-    // document. This is why `agents.example.json` no longer passes `-l`, and why the README says
-    // the residue out loud instead of claiming the variable cannot come back.
+    // "Built, not inherited" is about what a pane INHERITS: `HOME` must be on the list, so a login
+    // shell re-exports whatever the dotfiles export - which is the documented 1Password setup.
     const home = mkdtempSync(join(tmpdir(), `agentdeck-home-${String(process.pid)}-`));
     const login = `${out}-login`;
     const plain = `${out}-plain`;
@@ -814,9 +743,8 @@ void describe("what a session's shell puts back, which the name list does not bo
   const readDoc = async (name: string) => await readFile(new URL(name, repoRoot), "utf8");
 
   void test("the shipped shell profile does not start a login shell", async () => {
-    // `-l` sources `/etc/zprofile`, `~/.zprofile`, `~/.zshrc` and `~/.zlogin`, and the setup
-    // 1Password documents puts `SSH_AUTH_SOCK` in one of them - which hands the session the
-    // forwarded ssh-agent the README says it does not have.
+    // `-l` sources the zsh profile files, and the setup 1Password documents puts `SSH_AUTH_SOCK`
+    // in one of them - handing the session the forwarded agent SECURITY.md says it does not have.
     const example = JSON.parse(await readDoc("agents.example.json")) as Record<
       string,
       { args?: string[] }
@@ -854,9 +782,8 @@ void describe("captured scrollback is turned into bytes a terminal can be writte
   });
 
   void test("what a client wraps is decided by the text, not by the padding", () => {
-    // The defect the phone showed: at 40 columns a padded line is exactly a row, so the next line
-    // starts in the middle of it - spaces and breaks mid-line in scrollback while the live stream
-    // was fine.
+    // What the phone showed: a padded line is exactly a row, so the next starts in the middle of
+    // it - breaks mid-line in scrollback while the live stream was fine.
     const captured = forTerminal(`> ask${" ".repeat(35)}\nanswer${" ".repeat(34)}`);
     for (const line of captured.split("\r\n")) {
       assert.ok(line.length <= 40, `"${line}" is still padded out to the pane width`);
@@ -889,10 +816,8 @@ void describe("captured scrollback is turned into bytes a terminal can be writte
   });
 });
 
-// Closing a session ends what it was RUNNING, not just the pane. The reproduction this exists for:
-// three pythons started in a pane, the pane killed - the two plain background ones died with it and
-// the `nohup` one was still running days later. That is the leftover an operator sees as "python is
-// still eating CPU after the task finished", and pressing Close on the phone has to end it.
+// Closing a session ends what it was RUNNING, not just the pane: of three pythons started in one,
+// the `nohup` one was still there days after the pane was killed.
 void describe("closing a session takes its processes with it", () => {
   const socket = `agentdeck-close-${String(process.pid)}`;
   const tmux = new Tmux({ socket });
@@ -958,9 +883,8 @@ void describe("closing a session takes its processes with it", () => {
   });
 
   void test("a session whose name is a PREFIX of another is not touched", async () => {
-    // `=` is an exact target for kill-session but NOT for list-panes - measured on tmux 3.7b,
-    // `list-panes -s -t =alp` returns alpha's pane. Since that list feeds a kill, resolving by
-    // prefix would end a different agent's processes.
+    // `=` is exact for kill-session but NOT for list-panes, and that list feeds a kill - so
+    // resolving by prefix would end a different agent's processes.
     await tmux.ensureServer();
     await tmux.createOrAttach("alpha", tmpdir(), "/bin/sleep", ["100000"], {
       AGENTDECK_SESSION_ID: "alpha",

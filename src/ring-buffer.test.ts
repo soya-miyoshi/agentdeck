@@ -56,9 +56,8 @@ void describe("ring buffer: the coverage test is two-sided", () => {
   });
 
   void test("a client AHEAD of headSeq is not covered, which is the assertion that matters", () => {
-    // Redundant once epochs are correct - which is exactly why it is here. If it ever fires,
-    // epochs are broken, and the alternative is sending chunks a client discards as already seen
-    // while its tab stays blank forever and every other signal looks healthy.
+    // Redundant once epochs are correct, which is exactly why it is here: if it fires, the
+    // alternative is chunks a client discards while its tab stays blank forever.
     const ring = new RingBuffer("e1");
     ring.append(buf("abc"));
     assert.equal(ring.covers("e1", 9_999), false);
@@ -87,9 +86,8 @@ void describe("ring buffer: epoch gates the arithmetic", () => {
   });
 
   void test("the restart case: same id, client far ahead, fresh counter", () => {
-    // The client attaches after a server restart holding a seq in the millions. The session is
-    // still alive with the same id, so nothing else looks wrong. Without the epoch this returns
-    // true and the tab never paints again.
+    // The client attaches after a restart holding a seq in the millions, and the session is alive with
+    // the same id - so without the epoch this returns true and the tab never paints again.
     const afterRestart = new RingBuffer("e2");
     afterRestart.append(buf("fresh output"));
     assert.equal(afterRestart.covers("e1", 4_000_000), false);

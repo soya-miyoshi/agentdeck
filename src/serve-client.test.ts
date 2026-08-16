@@ -1,17 +1,5 @@
-// m2/serve-client's done-when, executed against the real thing rather than against a fixture.
-//
-// `src/static.test.ts` drives `withClient` over a temp directory shaped like a build. This file
-// drives the SERVER: a spawned `src/server.ts`, its own `CLIENT_DIR`, the real Vite output in
-// `dist/client`, and requests written onto the socket by hand. That difference is the point -
-// nothing in the unit test would notice if `server.ts` stopped wiring the static handler in, or
-// pointed it at a directory that does not exist, and both of those present as "the phone loads
-// nothing" rather than as a failing assertion.
-//
-// The secret this file tries to steal is the server's own bearer token. It is real: the file at
-// `$HOME/.agentdeck/token` starts sessions in every allowed repository, and there is no boundary
-// between an agent and the home directory on this machine. Every refusal below is checked by
-// reading that file and asserting the bytes never appear in a response, so a test that passes
-// because the answer was a 403 for some unrelated reason still fails if the token comes back.
+// The SERVER rather than `withClient`: a spawned process and the real Vite output, since nothing in
+// the unit test notices the handler being unwired. Every refusal is checked against the real token.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -82,12 +70,8 @@ const dechunk = (raw: string): string => {
 };
 
 /**
- * A request written onto the socket by hand.
- *
- * `fetch` cannot be used for the traversals: the WHATWG URL parser resolves `..` and `%2e%2e`
- * away before a byte leaves the client, so the attack never arrives and the test proves nothing.
- * A phone's browser does the same - but `curl --path-as-is`, any script, and anything that is not
- * a browser do not, and this server is reachable from a tailnet.
+ * A request written onto the socket by hand: the WHATWG parser resolves `..` away before a byte
+ * leaves `fetch`, so the attack never arrives - but a script on the tailnet is not a browser.
  */
 const request = async (
   path: string,
@@ -183,9 +167,8 @@ before(async () => {
   token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
   assert.ok(token.length > 0, "the server did not write a token to steal");
 
-  // A symlink planted inside the REAL build output, pointing at the REAL token file. Nothing in
-  // the request path that reaches it looks suspicious - no dots, no encoding, one ordinary name -
-  // so a handler that inspects the string and never the resolved file serves the token here.
+  // A symlink planted inside the REAL build output, pointing at the REAL token: nothing in the
+  // request path looks suspicious, so a handler that inspects the string serves the token.
   plantedLink = join(clientDir, `planted-${String(process.pid)}`);
   symlinkSync(join(home, ".agentdeck", "token"), plantedLink);
 });
@@ -247,9 +230,8 @@ void describe("the server serves the built client", () => {
     const page = await (await fetch(`${base}/`)).text();
     const script = /<script[^>]+src="([^"]+)"/.exec(page)?.[1] ?? "";
     const bundle = await (await fetch(new URL(script, `${base}/`))).text();
-    // TokenGate's own strings, from the built bundle rather than from the source: the gate is
-    // what App renders before a token exists, so a build that shipped without it - or a page
-    // handed a token by the server and skipping the gate - loses these.
+    // TokenGate's own strings from the BUILT bundle: the gate is what App renders before a token
+    // exists, so a build that shipped without it loses these.
     assert.match(bundle, /Paste the token the server printed on first run/);
     assert.match(bundle, /placeholder/);
     assert.ok(!bundle.includes(token), "the bundle carried the token it is supposed to ask for");
@@ -342,20 +324,8 @@ void describe("the API and the socket route are untouched by any of this", () =>
 
 // ---------------------------------------------------------------------------------------------
 
-// `src/client/public/` is copied verbatim into `dist/client` by Vite's `publicDir`, and that copy
-// DEREFERENCES symlinks: `copyDir` is statSync + copyFileSync, both of which follow. So a symlink
-// planted in the source directory lands in the publish root as a REAL FILE holding the target's
-// bytes, and `dist/client` is served to any device that can reach the port with no bearer token.
-//
-// Measured on this machine before this test existed: a symlink at
-// `src/client/public/icons/planted.png` pointing at a file outside the repo produced a regular
-// file in `dist/client/icons/planted.png` containing that file's contents.
-//
-// Three controls miss it, which is why the check has to live here. `static.ts` resolves and checks
-// containment against the real root - by serve time it is a real file inside the root, not a
-// symlink. The purpose-built "symlink planted inside the REAL build output" test only catches
-// symlinks that survive AS symlinks. And the boot guard checks where the token and profiles files
-// are configured to be, never what is inside the publish root.
+// Vite's `publicDir` copy DEREFERENCES symlinks, so one planted in the source lands in the
+// unauthenticated publish root as a real file. Three controls miss it, which is why this is here.
 void describe("nothing in the published source directory may point outside it", () => {
   const publicDir = fileURLToPath(new URL("client/public", import.meta.url));
 

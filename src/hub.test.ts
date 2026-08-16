@@ -95,9 +95,8 @@ const build = (onRefresh: () => void = () => undefined) => {
     tmux,
     registry,
     socket: "test",
-    // A repaint ends at the quiet after it, because tmux puts no marker in the stream. Short
-    // here so the test costs milliseconds rather than the second the server allows for a pane
-    // that is drawing on its own at the same time.
+    // A repaint ends at the quiet after it, because tmux puts no marker in the stream. Short here,
+    // so the test costs milliseconds rather than the second the server allows.
     repaintQuietMs: 10,
     repaintMaxMs: 100,
     onState: (id, state, exitCode) =>
@@ -114,10 +113,8 @@ const build = (onRefresh: () => void = () => undefined) => {
 
 void describe("the allowlist bounds the session set, not only what can be created", () => {
   void test("a session on the socket that agentdeck did not start is never attached", async () => {
-    // The socket is /tmp/tmux-<uid>/agentdeck and every process running as this user can write
-    // it, so `tmux -L agentdeck new-session -d -c / -- /bin/sh` is otherwise a tab the phone can
-    // type into within one sync. agentdeck knows a session's directory only for the sessions it
-    // started, so an unknown one is outside the allowlist by definition.
+    // Every process running as this user can write the socket, so a hand-made session is otherwise
+    // a tab the phone types into within one sync.
     const { hub, registry, tmux, created } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     await tmux.createOrAttach("stranger", "/", "/bin/sh", [], {});
@@ -209,10 +206,8 @@ void describe("reconciling against tmux", () => {
   });
 
   void test("tmux is still the truth for every session inside the boundary", async () => {
-    // The hub keeps no set of its own: it attaches to what tmux reports, filtered to the
-    // allowlist, so a session it was never told about individually still appears. What changed on
-    // 2026-08-07 is only the filter - a session whose directory nobody allowed is not adopted,
-    // which is the case the test above covers.
+    // The hub keeps no set of its own - it attaches to what tmux reports, filtered to the allowlist -
+    // so a session it was never told about individually still appears.
     const { hub, registry, created } = build();
     await registry.create("/workspace/a", "claude");
     await registry.create("/workspace/b", "claude");
@@ -290,10 +285,8 @@ void describe("routing to the right session", () => {
 });
 
 void describe("the repaint is read back off the stream, not out of the buffer", () => {
-  // A repaint has to reach the stream of a session that already exists, and the fake tmux needs
-  // the callback before there is a stream to write to - so the pane is a box the callback reads
-  // through, filled once the hub has attached. Held here rather than repeated in each test: it is
-  // scaffolding, not the thing any of them is about.
+  // The fake tmux needs its callback before there is a stream to write to, so the pane is a box the
+  // callback reads through, filled once the hub has attached.
   const attached = async (
     onRefresh: (pane: SessionStream) => void,
   ): Promise<{ hub: Hub; id: string; stream: SessionStream }> => {
@@ -310,9 +303,8 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
   };
 
   void test("returns the bytes tmux repainted and the seq they end at", async () => {
-    // The defect this replaces: `data` used to be the ring buffer's contents, so a session that
-    // had been sitting at a prompt since before the attach painted whatever output happened to be
-    // recent - a fragment of an old build log, or nothing at all - rather than the live screen.
+    // `data` used to be the ring buffer's contents, so a session sitting at a prompt painted
+    // whatever output happened to be recent rather than the live screen.
     const { hub, id, stream } = await attached((pane) => {
       pane.write(Buffer.from("[H[2Jprompt$ ", "utf8"));
     });
@@ -355,11 +347,8 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
   });
 
   void test("a pane that floods is cut at the ring buffer's capacity, not at the clock", async () => {
-    // Without a byte budget the only stop for a pane that never goes quiet is the 1000ms cap, and
-    // a pane writing flat out delivers tens of megabytes inside it - which the snapshot then
-    // copies four times over (parts, concat, string, JSON escape) on a process nothing restarts.
-    // A compromised agent needs no credential for that, only its own stdout and the next routine
-    // reconnect. The bytes dropped here are not lost: they arrive as chunks past the seq below.
+    // Without a byte budget a pane writing flat out delivers tens of megabytes inside the cap, which
+    // the snapshot then copies four times. The bytes are not lost - they arrive as later chunks.
     const { hub, id, stream } = await attached((pane) => {
       const block = Buffer.alloc(64 * 1024, 0x78);
       for (let i = 0; i < 40; i += 1) pane.write(block);
@@ -376,9 +365,8 @@ void describe("the repaint is read back off the stream, not out of the buffer", 
   });
 
   void test("a repaint that collected nothing fails rather than returning a blank screen", async () => {
-    // A snapshot is authoritative: the client clears the terminal and writes what it is given. So
-    // `{data:""}` paints a live session blank, with the socket and the session list still correct
-    // - the failure the protocol is least able to notice. Failing lets the client keep what it has.
+    // A snapshot is authoritative, so `{data:""}` paints a live session blank while every other
+    // signal looks correct. Failing lets the client keep what it has.
     const { hub, id } = await attached(() => undefined);
     await assert.rejects(async () => await hub.repaint(id), /no repaint arrived/);
   });
@@ -402,10 +390,8 @@ void describe("shutdown", () => {
   });
 });
 
-// The strip is pushed, not polled (plan 002), and the hub is where the inferred half of that push
-// is decided. What matters here is not that a frame CAN be produced but when one is: a frame per
-// sync is a poll with the timer moved to the server, and no frame on a change is the stale tab the
-// item exists to remove.
+// The hub is where the inferred half of the push is decided, and what matters is WHEN a frame is
+// produced: one per sync is a poll with the timer moved, and none on a change is a stale tab.
 void describe("a state change is announced, and nothing else is", () => {
   void test("each session is announced once when it first appears", async () => {
     const { hub, registry, announced } = build();
@@ -422,9 +408,8 @@ void describe("a state change is announced, and nothing else is", () => {
   });
 
   void test("a sync that changed nothing says nothing", async () => {
-    // The one assertion that separates this design from a poll. A frame every sync would keep a
-    // phone's radio awake for news that is always "no news", and would make the strip's traffic a
-    // function of the sync interval rather than of what the agents did.
+    // What separates this from a poll: a frame every sync keeps a phone's radio awake for "no news",
+    // and makes the strip's traffic a function of the interval rather than of the agents.
     const { hub, registry, announced } = build();
     await registry.create("/workspace/a", "claude");
     await hub.sync();
@@ -449,10 +434,8 @@ void describe("a state change is announced, and nothing else is", () => {
   });
 
   void test("a session with no attachment is announced from the registry, code and all", async () => {
-    // `exited 137` is the answer to "did it finish, or did I lose it", so the code travels with
-    // the state rather than being left for a fetch. There is no stream to read here - the hub
-    // never attaches to a dead pane - so the registry's reading is the only one there is.
-    //
+    // `exited 137` is the answer to "did it finish, or did I lose it", so the code travels with the
+    // state. The hub never attaches to a dead pane, so the registry's reading is the only one.
     const { hub, registry, die, announced } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     die(session.id, "137");
@@ -461,11 +444,8 @@ void describe("a state change is announced, and nothing else is", () => {
   });
 
   void test("a session that dies while the hub is attached is announced exited, not idle", async () => {
-    // The dangerous direction. With `remain-on-exit on` the attach client survives the dead pane,
-    // so `SessionPty.onExit` never fires and the stream reads `idle` two seconds after the last
-    // byte. Announcing that overwrote the registry's correct `exited 137` on every open client:
-    // an agent killed mid-run showed a healthy `idle` pill, no code and no reap prompt, until the
-    // page was reloaded. tmux says the pane is dead, so the stream does not get a vote.
+    // With `remain-on-exit on` the attach client survives the dead pane and the stream reads `idle`,
+    // which used to be announced over the registry's correct `exited 137`.
     const { hub, registry, die, ptys, announced } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     await hub.sync();
@@ -511,9 +491,8 @@ void describe("a state change is announced, and nothing else is", () => {
   });
 
   void test("a hook's statement goes out through the same funnel, and repeats do not", async () => {
-    // src/http.ts calls this the moment a hook POST lands, which is the difference between a
-    // transition seen in milliseconds and one seen at the next sync. The dedupe has to hold across
-    // the two sources or a chatty agent restating `waiting` becomes a frame per statement.
+    // Called the moment a hook POST lands, which is milliseconds against a whole sync. The dedupe
+    // must hold across both sources, or a chatty agent is a frame per statement.
     const { hub, registry, ptys, announced } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     await hub.sync();
@@ -530,11 +509,8 @@ void describe("a state change is announced, and nothing else is", () => {
 
 void describe("our attach client dying is not the agent dying", () => {
   void test("a session tmux still lists gets a new pty rather than a sticky exited tab", async () => {
-    // tmux `detach-client` kills OUR client and leaves the pane running, and it is one keystroke
-    // away for anyone with a real keyboard. `SessionPty.onExit` then declares `exited` on the
-    // stream, which is sticky, while the session is still in the live list - so the dead pty was
-    // kept, the strip showed a finished agent that was still working, and every keystroke was
-    // written into a dead pty and went nowhere. tmux lists the session, so tmux is the authority.
+    // `detach-client` kills OUR client and leaves the pane running, and the stream then sticks at
+    // `exited` while the session is still listed - so tmux is the authority.
     const { hub, registry, created } = build();
     const { session } = await registry.create("/workspace/a", "claude");
     await hub.sync();

@@ -39,9 +39,8 @@ void describe("profiles parse", () => {
 
 void describe("a broken waiting mechanism disables the mechanism, not the profile", () => {
   void test("an absolute or escaping waiting.settings disables the mechanism", () => {
-    // installHookSettings writes this file at every boot, so an absolute path is an
-    // arbitrary-JSON-write primitive a profiles file could aim at the operator's real
-    // ~/.claude/settings.json. Relative to the agent-state directory, and inside it.
+    // This file is written at every boot, so an absolute path is an arbitrary-JSON-write primitive a
+    // profiles file could aim at the operator's real settings.
     for (const settings of [
       "/Users/someone/.claude/settings.json",
       "../../.claude/settings.json",

@@ -1,6 +1,5 @@
-// The property: when the soft keyboard opens, the app is as tall as the part of the window the
-// keyboard is not covering, and it sits where that part is. The failure this replaces was silent -
-// everything rendered, and the key row and the last terminal rows were simply behind the keyboard.
+// When the keyboard opens the app is as tall as the part of the window it does not cover, and sits
+// there. The failure it replaces was silent: the key row was simply behind the keyboard.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

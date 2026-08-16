@@ -1,26 +1,5 @@
-// m0/supervisor-crash-test: what actually happens when the node process dies on this Mac.
-//
-// NOTHING RESTARTS THE SERVER. There is no supervisor, no restart loop, no launchd agent and no
-// watchdog on this machine, and this file does not add one - answering that is m4/launchd-watchdog
-// (plan 006). Every restart below is this test process starting the server again by hand, in the
-// same way a person would have to, and the assertions in between are what an unattended Mac looks
-// like in the window before that person arrives: tmux still holding every agent, and nothing
-// answering the port.
-//
-// What it pins down, because "the sessions survive" is only half the story:
-//   - the tmux sessions survive with the same ids and the same pane pids, so the work is intact
-//   - the registry's metadata does not survive the process, but the half of it tmux still holds
-//     does: the restarted server ADOPTS the survivor (m2/session-metadata-survives-restart), so
-//     GET /api/sessions lists it with the right cwd and agent and GET /api/cwds counts it
-//   - adoption is bounded by the cwd allowlist, matched on `#{session_path}`: a session created
-//     on the same socket outside the allowlist is NOT adopted, however it is named
-//   - the per-session hook secret does not survive and cannot be recovered, so the surviving
-//     agent's hook POSTs are 401 - and recreating the session does NOT fix that, because
-//     `new-session -A` attaches to the live session and never re-injects an environment. The
-//     adopted session says so, as `waitingDetectionLost`, instead of going quietly deaf
-//
-// The server is spawned as a process rather than driven in-process, for the same reason
-// src/host-boundary.test.ts does it: SIGKILL of a real pid is the event being tested.
+// What happens when the node process dies on this Mac: NOTHING RESTARTS IT. Every restart below is
+// this test doing by hand what a person would - and SIGKILL of a real pid is the event tested.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -38,9 +17,8 @@ import { sessionId } from "./session-id.ts";
 const serverPath = fileURLToPath(new URL("server.ts", import.meta.url));
 const socket = `agentdeck-crash-${String(process.pid)}`;
 
-// `realpathSync`, because on macOS `os.tmpdir()` is `/var/folders/...`, a symlink into
-// `/private`. tmux reports `#{session_path}` resolved, and `Registry.list()` requires the
-// allowlist entry and the remembered cwd to agree with it exactly.
+// `realpathSync`, because macOS `tmpdir()` is a symlink and tmux reports `#{session_path}`
+// resolved - and `list()` requires the allowlist entry and the remembered cwd to agree exactly.
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
 const home = temp("agentdeck-crash-home-");
@@ -48,10 +26,8 @@ const work = temp("agentdeck-crash-work-");
 const conf = temp("agentdeck-crash-conf-");
 const secretFile = join(conf, "secret-seen-by-the-agent");
 
-// The pane writes its own AGENTDECK_SECRET where the test can read it, then stays alive. This is
-// the only way to get at it: `createOrAttach` deliberately unsets the variable from the tmux
-// session environment in the same invocation that creates the session, so `show-environment -t`
-// has nothing. Reading it from inside the pane is exactly what a real hook does.
+// The pane writes its own AGENTDECK_SECRET where the test can read it: `show-environment -t` has
+// nothing, by design, so reading it from inside the pane is what a real hook does.
 const profiles = join(conf, "agents.json");
 writeFileSync(
   profiles,
@@ -70,9 +46,8 @@ let port = 0;
 let token = "";
 let child: ChildProcess | undefined;
 
-// The session created before the crash, and the two facts about it that outlive the server: the
-// pane pid tmux still holds, and the secret its own pane wrote out. Every test below the first
-// one is about this session, so they are file-scoped rather than passed around.
+// The session created before the crash, and the two facts that outlive the server: the pane pid and
+// the secret its pane wrote out. File-scoped, because every test below the first is about it.
 let id = "";
 let paneLine = "";
 let secret = "";
@@ -99,12 +74,8 @@ const start = async (): Promise<ChildProcess> => {
       AGENTDECK_PORT: String(port),
       AGENTDECK_MOUNTS: work,
       AGENTDECK_PROFILES: profiles,
-      // No LANG and no LC_* here, deliberately. `Tmux.list()` separates its fields with U+001F,
-      // and tmux renders that byte as `_` unless it believes the locale is UTF-8 - so with LANG
-      // unset every field of every session parsed into one string and nothing was ever listed.
-      // That was m0/create-500, and it is fixed at its cause in `baseEnv` - so LANG is NOT passed
-      // any more, and this test now also crosses the locale-less environment launchd will hand
-      // the job at m4.
+      // No LANG and no LC_*, deliberately: tmux renders U+001F as `_` for a client it does not
+      // believe is UTF-8, which is fixed in `baseEnv` - and is the environment launchd will give.
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -192,9 +163,7 @@ const createSession = async (
 
 /**
  * A hook POST as the surviving agent makes it: its own id, and the secret its pane was given.
- *
- * Unauthenticated on purpose - the bearer token is not what this route checks. The secret in the
- * header is the whole assertion, so it is never routed through `api`.
+ * Unauthenticated on purpose - the secret in the header is the whole assertion.
  */
 const hookPost = async (presented = secret): Promise<number> => {
   const response = await fetch(
@@ -210,9 +179,8 @@ const hookPost = async (presented = secret): Promise<number> => {
 
 /** `<session id> <pane pid>` for everything on our socket, so survival is pid-level, not name-level. */
 const panes = (): string[] => {
-  // An empty socket is a result, not an error: `list-panes -a` exits non-zero with "no current
-  // target" once the last session is gone, and the last session going is something these tests
-  // do on purpose. Every assertion below reads this as a set, so [] is the honest answer.
+  // An empty socket is a result rather than an error: `list-panes -a` exits non-zero once the last
+  // session is gone, which these tests do on purpose.
   let out = "";
   try {
     out = execFileSync(
@@ -294,10 +262,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("started again by hand, the survivor is adopted: listed, with the right cwd and agent", async () => {
-    // The fix for m2/session-metadata-survives-restart. `#meta` still dies with the process; what
-    // brings the session back is tmux itself - `#{session_path}` is the cwd and the id is
-    // `sessionId(cwd, agent)`, so the agent is the profile that reproduces the id. No file, no
-    // database, nothing written down.
+    // `#meta` still dies with the process; what brings the session back is tmux itself, since the
+    // path is the cwd and the id is a pure function of it. Nothing written down.
     await start();
     assert.deepEqual(await listedIds(), [id], "the surviving session was not adopted");
     assert.deepEqual(await sessionsIn(work), [id], "GET /api/cwds does not count the survivor");
@@ -312,9 +278,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("the adopted session KEEPS its hook path, because the secret is derived", async () => {
-    // This is the case that used to mute every tab after a restart. The secret is
-    // HMAC(bearer token, session id) rather than `randomBytes`, so the new process recomputes the
-    // value the surviving agent still holds instead of having to be told it.
+    // What used to mute every tab after a restart: the secret is derived rather than minted, so the
+    // new process recomputes what the surviving agent still holds.
     const [session] = await listedSessions();
     assert.equal(
       session?.waitingDetectionLost,
@@ -331,10 +296,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("a session outside the allowlist is NOT adopted, however it is named", async () => {
-    // The hole m0/host-boundary closed, checked against the new door. `outside` is a real
-    // directory that is not in AGENTDECK_MOUNTS, and the session is created with the exact name
-    // the server would derive for it - `sessionId(outside, "shell")` - so the only thing standing
-    // between it and a tab on the phone is the allowlist check on `#{session_path}`.
+    // A real directory off the allowlist, with a session created under the exact name the server
+    // would derive - so the check on `#{session_path}` is the only thing in the way.
     const outside = temp("agentdeck-crash-outside-");
     const forged = sessionId(outside, "shell");
     execFileSync("tmux", [
@@ -374,9 +337,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("an attach the client had before the crash is answered with a snapshot, not `no session`", async () => {
-    // The half of m2/reconnect this item unblocks, asserted at the wire rather than the list: the
-    // client comes back with the id it held before the crash and must be given a screen.
-    // The token is a subprotocol, not a query parameter: a URL lands in logs and history (ws.ts).
+    // Asserted at the wire rather than the list: the client comes back with the id it held before
+    // the crash and must be given a screen. The token is a subprotocol, never a query parameter.
     const ws = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`, token);
     try {
       await new Promise<void>((resolve, reject) => {
@@ -409,12 +371,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("a second agent in the same tree SEES the survivor in the lists", async () => {
-    // The reason the survivor being merely invisible was not survivable. This used to be asserted
-    // through the two-agents-in-one-tree warning, which was removed on 2026-08-09 (plan 004); the
-    // property it was standing in for is unchanged and is asserted directly below - a survivor
-    // that adoption missed drops out of `list()`, and everything built on `list()` then reports a
-    // directory as holding one session while an agent is still running in it and still editing
-    // those files.
+    // Why an invisible survivor was not survivable: it drops out of `list()`, so everything built on
+    // that reports a directory as free while an agent is still editing those files.
     const body = await createSession("neighbour");
     assert.equal(body.warning, undefined, "a neighbouring session warned");
     assert.ok(panes().includes(paneLine), "the second agent disturbed the surviving session");
@@ -442,10 +400,8 @@ void describe("the node process is killed and nothing brings it back", () => {
 
     assert.deepEqual(await listedIds(), [id]);
 
-    // `new-session -A` attaches to the live session and injects no environment. That used to be
-    // where the secret was lost - the survivor held the old one while the registry had minted a new
-    // one it could not deliver. Derived, the two are the same string and there is nothing to
-    // deliver.
+    // `-A` attaches to the live session and injects no environment, which used to be where the
+    // secret was lost. Derived, the two are the same string and there is nothing to deliver.
     assert.equal(
       await hookPost(),
       200,
@@ -454,14 +410,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("a refused hook moves no state, and marks the tab muted", async () => {
-    // A 401 that still moved the state would be worse than the refusal it reports: the tab would
-    // say `waiting` on the word of a caller the server could not authenticate. And a session whose
-    // hooks are refused must SAY so - an agent started before the secret became derivable holds a
-    // random one and can never match, and a tab that quietly never asks for you is the failure the
-    // flag exists to prevent.
-    // Asserted as "did not CHANGE" rather than "is not waiting": an earlier case in this file posts
-    // a hook that is accepted, so the session legitimately sits at `waiting` by the time this runs.
-    // The property is that a refused hook moves nothing, whatever the state happens to be.
+    // A 401 that still moved the state would say `waiting` on the word of a caller the server could
+    // not authenticate. Asserted as "did not CHANGE": an earlier case leaves it legitimately there.
     const before = (await listedSessions())[0]?.state;
 
     assert.equal(await hookPost("a-secret-from-the-old-scheme"), 401);
@@ -476,12 +426,8 @@ void describe("the node process is killed and nothing brings it back", () => {
   });
 
   void test("restarting the AGENT clears a detected loss - and does NOT rotate the secret", async () => {
-    // Two properties in one, and the second is a cost rather than a feature. Killing the session
-    // and starting it again ends a detected loss, because the new process is handed the derived
-    // secret at creation. But that secret is a pure function of (key, session id), so the restart
-    // no longer ROTATES it the way a freshly minted random one did - a leaked session secret now
-    // outlives the agent that leaked it, and only rotating the bearer token changes it. Recorded in
-    // audit.md rather than left for someone to discover from this assertion.
+    // Two properties, the second a cost: a restart ends a detected loss, but no longer ROTATES the
+    // secret the way a minted one did - only the bearer token changes it now (audit.md).
     const stale = secret;
     const deleted = await api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
     assert.equal(deleted.status, 200);

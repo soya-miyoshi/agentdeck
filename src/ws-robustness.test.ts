@@ -128,9 +128,8 @@ const maskedTextFrame = (payload: Buffer): Buffer => {
 void describe("one socket cannot take the server down with it", () => {
   void test("a malformed frame kills that socket and nothing else", async () => {
     const socket = await rawHandshake();
-    // Invalid UTF-8 in a text frame. The receiver rejects it before `message` ever fires, so the
-    // frame budget cannot see it; `ws` re-emits it as `error` on the WebSocket, and a WebSocket
-    // with no `error` listener throws out of the EventEmitter and exits the process.
+    // Invalid UTF-8 in a text frame, rejected before `message` fires so the budget cannot see it -
+    // and a WebSocket with no `error` listener throws out of the EventEmitter and exits.
     socket.write(maskedTextFrame(Buffer.from([0xff, 0xfe, 0xfd])));
     socket.on("error", () => undefined);
 

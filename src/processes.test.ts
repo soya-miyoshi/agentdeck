@@ -1,9 +1,5 @@
-// What a session is running, as GET /api/processes answers it.
-//
-// The tree building is driven against a table written by hand, because the cases worth pinning -
-// a grandchild, a pane that has gone, a row `ps` printed in a shape this cannot read - are ones a
-// live machine will not produce on demand. The last case runs the real `ps` once, so a change to
-// the column list that stops parsing is caught rather than assumed away.
+// The tree building runs against a hand-written table, because the cases worth pinning are ones a
+// live machine will not produce on demand. The last case runs the real `ps` once.
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";

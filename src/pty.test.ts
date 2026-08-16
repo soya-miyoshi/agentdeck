@@ -67,9 +67,8 @@ const build = () => {
 
 void describe("what gets spawned", () => {
   void test("attaches to an existing session rather than creating one", () => {
-    // Creating is the registry's job and has already happened. Conflating them would mean the
-    // thing that reads output also decides what runs, and a reattach after a crash would try to
-    // create a session that is already there.
+    // Creating is the registry's job and has already happened: conflating them would make a reattach
+    // after a crash try to create a session that is already there.
     const { spawned } = build();
     const call = spawned[0];
     assert.equal(call?.file, "tmux");
@@ -99,9 +98,8 @@ void describe("what gets spawned", () => {
   });
 
   void test("attaches with a built environment, not this process's", () => {
-    // A tmux client is a way INTO a session's environment: `update-environment` copies named
-    // variables from the attaching client into the session it attaches to. That option is emptied
-    // on the server, and this is the other end of the same rule.
+    // A tmux client is a way INTO a session's environment via `update-environment`. That option is
+    // emptied on the server, and this is the other end of the same rule.
     const { spawned } = build();
     const names = Object.keys(spawned[0]?.options.env ?? {});
     assert.ok(names.length > 0, "the attach inherited this process's whole environment");

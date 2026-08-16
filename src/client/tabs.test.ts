@@ -132,11 +132,8 @@ void describe("which tab stays selected when the list changes", () => {
   });
 });
 
-// `toTabs` deciding the flag is only half of "visibly distinct": a strip that computed it and
-// never rendered it would pass every test above while looking exactly like a healthy tab on the
-// phone, which is the failure this item names. There is no DOM here and no renderer in the
-// dependency budget, so the template itself is read - the cheapest thing that fails if the flag
-// stops reaching the screen.
+// Deciding the flag is half of "visibly distinct": a strip that computed and never rendered it passes
+// everything above. No DOM in the budget, so the template is read - the cheapest thing that fails.
 void describe("the strip renders the flag rather than only computing it", () => {
   const template = readFileSync(new URL("./TabStrip.vue", import.meta.url), "utf8")
     // Comments explain the decision; they do not draw anything. Reading them as evidence would
@@ -149,10 +146,8 @@ void describe("the strip renders the flag rather than only computing it", () => 
   });
 
   void test("it says so in words, not in a shade of grey", () => {
-    // A colour alone is not a difference a person can name, and on the phone it is the difference
-    // between two greys. A word is what lets somebody act on it - which word is a matter of how
-    // much room 40 columns leaves, so this pins that letters are rendered rather than pinning the
-    // wording. The sentence still has to be reachable, and `title` is where it lives.
+    // A colour alone is two greys on a phone and not a difference a person can name. This pins that
+    // LETTERS are rendered rather than the wording, with the sentence reachable in `title`.
     const flag = /<span\b[^>]*class="lost"[\s\S]*?>([^<]*)<\/span/.exec(template);
     assert.ok(flag !== null, "the flag is not rendered as a span at all");
     assert.match(flag[1] ?? "", /[A-Za-z]{3}/);

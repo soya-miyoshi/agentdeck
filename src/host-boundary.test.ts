@@ -1,20 +1,5 @@
-// m0/host-boundary's done-when sentence, for the halves that are properties of a BOOT rather
-// than of a function.
-//
-// `src/containment.test.ts` already tests `defaultTokenFile`, `tokenInsideAllowlist` and
-// `loadToken` as functions, and `src/tmux.test.ts` drives a real tmux server for the environment
-// and the secret. What neither can show is the clause the finding was actually confirmed by hand
-// against: "`pnpm start` works on a clean host with no environment variables set, and refuses to
-// start if the token path resolves inside an allowlist entry". The old default,
-// `/var/lib/agentdeck/token`, is a path no ordinary Mac user can create, so the server died on
-// the token before it ever reached the port - a failure that only exists end to end, in a process
-// started the way a person starts it. So these tests spawn `node src/server.ts`.
-//
-// Three variables are set that a person would not have to set, and no others. TMUX_SOCKET,
-// because the default socket name is the operator's live one and a test must not create sessions
-// on it or kill it. AGENTDECK_PORT, because 7777 may be a running agentdeck. PATH, because the
-// child has to find `tmux` and `node`. HOME is pointed at an empty directory, which is the whole
-// point: it stands in for the clean host.
+// The halves that are properties of a BOOT rather than a function: the old token default was a path
+// no ordinary Mac user can create, so the server died before the port. HOME is the clean host.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -60,10 +45,8 @@ after(() => {
 });
 
 /**
- * Start the server as a process and resolve once it has said what it was going to say.
- *
- * Resolves on the listening line for a successful boot, or on exit for a refusal, so that a
- * refusal that is meant to be immediate cannot pass by hanging instead.
+ * Start the server as a process and resolve once it has said what it was going to say - the
+ * listening line, or exit, so a refusal meant to be immediate cannot pass by hanging.
  */
 const boot = async (env: Record<string, string>): Promise<Boot> => {
   const socket = `agentdeck-boot-${String(process.pid)}-${String(sockets.length)}`;
@@ -106,16 +89,14 @@ const boot = async (env: Record<string, string>): Promise<Boot> => {
 
 void describe("a clean host, which is what the container-era token home made impossible", () => {
   void test("`pnpm start` reaches the port with nothing set, and leaves a 0600 token", async () => {
-    // The pre-change default was /var/lib/agentdeck/token. On this Mac that is not writable by
-    // this user, and it was confirmed by hand that the server refused to start - so this test
-    // fails against the pre-change tree by never printing a listening line.
+    // The pre-change default is not writable by this user on a Mac, so this test fails against that
+    // tree by never printing a listening line.
     const home = mkdtempSync(join(tmpdir(), "agentdeck-clean-home-"));
     try {
       const { code, signal, stdout } = await boot({ HOME: home, AGENTDECK_PORT: "0" });
       assert.match(stdout, /listening on 127\.0\.0\.1/, "the server did not reach the port");
-      // Either exit is fine: the SIGTERM that ends the test can land in the window between
-      // listening and the shutdown handler being installed. What must not happen is a non-zero
-      // exit, which would be the server failing after it claimed the port.
+      // Either exit is fine - the SIGTERM can land before the shutdown handler is installed. What
+      // must not happen is a non-zero exit, which is the server failing after claiming the port.
       assert.ok(code === 0 || signal === "SIGTERM", `boot exited ${String(code)}`);
 
       const tokenPath = join(home, ".agentdeck", "token");
@@ -146,11 +127,8 @@ void describe("a clean host, which is what the container-era token home made imp
   });
 
   void test("the agent-state directory is agentdeck's own, and a live Claude config is untouched", async () => {
-    // The fallback used to be CLAUDE_CONFIG_DIR, the operator's live config, rewritten every
-    // boot - including for sessions agentdeck has nothing to do with. So the check is both
-    // halves: the warning fires whenever AGENTDECK_AGENT_STATE_DIR itself is unset (the
-    // silent-landing case was exactly the one where CLAUDE_CONFIG_DIR was set), and the directory
-    // it names is not written to.
+    // The fallback used to be the operator's live Claude config, rewritten every boot. Both halves
+    // are checked: the warning fires on the variable being unset, and the directory is untouched.
     const home = mkdtempSync(join(tmpdir(), "agentdeck-clean-home-"));
     const claude = mkdtempSync(join(tmpdir(), "agentdeck-live-claude-"));
     try {
@@ -186,9 +164,8 @@ void describe("a clean host, which is what the container-era token home made imp
 
 void describe("the token is never inside a tree a session is pointed at", () => {
   void test("a token under an allowlisted directory is a refusal to start, not a warning", async () => {
-    // Plan 005 states this in prose in three places and nothing checked it. There is no degraded
-    // mode: starting anyway serves precisely the situation the rule exists to prevent, and does it
-    // silently, so the assertion is on the exit code as much as on the sentence.
+    // Plan 005 states this in prose three times and nothing checked it. There is no degraded mode,
+    // so the assertion is on the exit code as much as on the sentence.
     const home = mkdtempSync(join(tmpdir(), "agentdeck-clash-home-"));
     try {
       const { code, stderr, stdout } = await boot({
@@ -246,10 +223,8 @@ void describe("the token is never inside a tree a session is pointed at", () => 
 
 void describe("the agent profiles file is a host-execution surface, not config", () => {
   void test("a profiles file inside an allowlisted tree refuses the boot", async () => {
-    // `command` and `args` go unmodified into `tmux new-session -- command args` and run as the
-    // human, so a profiles file inside a tree an agent is started in lets that agent choose what
-    // the next session executes - and no prescribed review command looks at the file. The same
-    // rule as the token, for the file that is the more direct surface of the two.
+    // `command` and `args` go unmodified into `tmux new-session --` and run as the human, so a
+    // profiles file inside an allowlisted tree lets an agent choose what the next session executes.
     const home = mkdtempSync(join(tmpdir(), "agentdeck-prof-home-"));
     const work = mkdtempSync(join(tmpdir(), "agentdeck-prof-work-"));
     try {
@@ -301,10 +276,8 @@ void describe("the agent profiles file is a host-execution surface, not config",
   });
 });
 
-// `dist/client` is published UNAUTHENTICATED - the page has to load before a token exists - so it
-// is the second location a credential must never be placed in, and the allowlist rule cannot see
-// it: if this repo is not itself on AGENTDECK_MOUNTS, `tokenInsideAllowlist` says nothing and the
-// boot check passes while the token is downloadable at a URL equal to its filename.
+// `dist/client` is published UNAUTHENTICATED, and the allowlist rule cannot see it: with this repo
+// off AGENTDECK_MOUNTS the boot check passes while the token is downloadable by filename.
 void describe("the published build directory is a place a secret cannot go", () => {
   const clientDir = fileURLToPath(new URL("../dist/client", import.meta.url));
 
@@ -322,12 +295,8 @@ void describe("the published build directory is a place a secret cannot go", () 
   });
 
   void test("a symlink at the token path cannot smuggle it in either", async () => {
-    // Both refusals compared LEXICAL paths, and `writeFileSync` follows symlinks. So a link at
-    // ~/.agentdeck/token pointing into the publish root passed both - its lexical path is nowhere
-    // near either - and the first boot created a real 0600 file inside dist/client, served at a
-    // URL equal to its filename to anything on the tailnet with no token at all. Measured before
-    // the fix: the file appeared and was downloadable. static.ts had used realpath for exactly
-    // this reason from the start; these checks had not.
+    // Both refusals compared LEXICAL paths while `writeFileSync` follows symlinks, so a link into
+    // the publish root passed both and the first boot created a downloadable 0600 file there.
     const home = mkdtempSync(join(tmpdir(), "agentdeck-symlinked-"));
     const planted = join(clientDir, `smuggled-${String(process.pid)}`);
     mkdirSync(join(home, ".agentdeck"), { recursive: true });
@@ -362,10 +331,8 @@ void describe("the published build directory is a place a secret cannot go", () 
 
 void describe("the documents name the mechanism this host has", () => {
   void test("plan 002 replaces /proc/<pid>/environ with the tmux read that was real here", async () => {
-    // The leak was documented as one agent reading another's /proc/<pid>/environ, a path macOS
-    // does not have - so the plan described a hazard by a mechanism absent on this machine while
-    // the easier one, `tmux show-environment -t`, went unmentioned. A reader checking the Linux
-    // path and not finding it concludes the hazard is absent.
+    // The leak was documented by a mechanism macOS does not have, while the easier one went
+    // unmentioned - so a reader checking the Linux path concludes the hazard is absent.
     const plan = await readDoc("plans/002-wire-protocol.md");
     const start = plan.indexOf("/proc/<pid>/environ");
     assert.notEqual(start, -1, "plan 002 should still name the path, as the thing being corrected");
@@ -456,9 +423,8 @@ void describe("the audit's own section is closed out", () => {
   });
 
   void test("plan 005 records the accepted cost of the allowlist being a boundary", async () => {
-    // A session started by hand in tmux no longer becomes a tab. That is a real loss of a real
-    // behaviour, decided deliberately, and the decision is only reviewable if it is written down
-    // where the boundary is described rather than left implicit in Hub.sync.
+    // A hand-started session no longer becomes a tab - a real loss, decided deliberately, and only
+    // reviewable if it is written where the boundary is described.
     const plan = await readDoc("plans/005-containment.md");
     const header = plan.slice(0, plan.indexOf("\n## ", 1));
     assert.match(header, /allowlist/i);

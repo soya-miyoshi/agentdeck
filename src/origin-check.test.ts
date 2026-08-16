@@ -1,7 +1,5 @@
-// The Origin check is real code (src/http.ts, src/ws.ts) that does nothing unless an expected
-// origin is configured, and AGENTDECK_ORIGIN is read in exactly one place and set in none. So the
-// documents and the boot output are what decide whether a reader can tell it is off, and that is
-// what these assert: a stated protection whose enable switch is documented nowhere reads as on.
+// The Origin check does nothing unless an expected origin is configured, and nothing sets one. So the
+// documents and the boot output decide whether a reader can tell it is off.
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

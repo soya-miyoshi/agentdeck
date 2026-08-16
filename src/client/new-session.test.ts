@@ -1,17 +1,5 @@
-// m3/new-session-picker's done-when, executed rather than asserted about: a session created
-// THROUGH the picker's own code path.
-//
-// src/client/end-to-end.test.ts creates its session over the API before driving the client, which
-// is exactly why the missing picker survived every green milestone. Here nothing posts by hand:
-// the directory comes from `fetchCwds`, the agent from `fetchAgents`, both are put through
-// `directoryChoices`/`agentChoices`/`canStart`, and the create is `createSession` from
-// src/client/api.ts - the same modules NewSession.vue and App.vue call. The server end is real all
-// the way down: a spawned src/server.ts, the real tmux binary, a real pty, a real /bin/sh.
-//
-// What a person with a phone must still confirm by hand, because it is not scriptable from here:
-// that the sheet's rows and the Start button are reachable one-handed, that the sheet clears the
-// home indicator and the notch on a device with insets, and that the warning banner is legible
-// over the terminal. The logic below is the same logic the component renders; the geometry is not.
+// A session created THROUGH the picker's own code path, since posting by hand is exactly why the
+// missing picker survived every green milestone. NOT scriptable: the sheet's geometry on a device.
 
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
@@ -120,9 +108,8 @@ before(async () => {
   await startServer();
   token = readFileSync(join(home, ".agentdeck", "token"), "utf8").trim();
   const base = `http://127.0.0.1:${String(port)}`;
-  // api.ts asks for "/api/cwds" because a browser resolves that against the page it was served
-  // from. Node has no page, so the base is supplied here and the request itself is still the real
-  // one, over the real network, to the real server.
+  // api.ts asks for a relative path because a browser resolves it against the page. Node has no page,
+  // so the base is supplied and the request is still the real one to the real server.
   globalThis.fetch = async (input: Parameters<typeof realFetch>[0], init?: RequestInit) =>
     await realFetch(typeof input === "string" ? new URL(input, base) : input, init);
   Reflect.set(globalThis, "window", { location: { href: `${base}/` } });
@@ -328,9 +315,8 @@ void describe("what the picker offers", () => {
   });
 });
 
-// The two phone properties m4/pwa set, at the source. src/pwa.test.ts holds them against the built
-// CSS but cannot say which element they belong to, and the picker is the newest control to need
-// both: the sheet is the last thing above the home indicator while it is open.
+// The two phone properties at the SOURCE: the built-CSS check cannot say which element they belong
+// to, and the sheet is the last thing above the home indicator while it is open.
 void describe("the picker as a phone control", () => {
   void test("every row and both buttons claim the 44px touch target", () => {
     const rules = ["\\.toggle,\\s*\\n?\\.start", "\\.row"];

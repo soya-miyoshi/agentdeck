@@ -1,16 +1,5 @@
-// The done-when of m4/token-qr, executed against the real server rather than against `qr.ts`.
-//
-// `src/qr.test.ts` proves the encoder: a string in, the same string decoded back out of the grid
-// and out of the rendered lines. It cannot prove the thing the item is actually about, which is
-// that the process a person starts on their Mac prints a QR of THE TOKEN IT JUST ISSUED, beside a
-// URL that answers - and that it does so on the first run only. Nothing in a unit test would
-// notice if `server.ts` printed the QR before `loadToken` (a code for a token that no longer
-// exists), printed some other string, printed it on every boot, or printed the token as text
-// beside it.
-//
-// So this file boots the server three times against temp HOMEs, captures stdout, and DECODES what
-// it printed - with the decoder in `src/fixtures/qr-decoder.ts`, which shares no code with the
-// encoder - then compares it against the bytes in `$HOME/.agentdeck/token`.
+// What a unit test cannot see is whether the process a person starts prints a QR of THE TOKEN IT
+// JUST ISSUED, once - so this boots three times and decodes what it printed against the file.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -29,8 +18,7 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const serverPath = join(repoRoot, "src", "server.ts");
 
 // Named once because teardown has to kill the tmux server this socket names, not just the node
-// process that started it: the server sets `exit-empty off`, so a tmux holding no sessions lives
-// until something signals it.
+// process: `exit-empty off` means a tmux holding no sessions lives until signalled.
 const socket = `agentdeck-qr-${String(process.pid)}`;
 
 const temps: string[] = [];
@@ -62,11 +50,8 @@ interface Boot {
 }
 
 /**
- * One boot, held until it has listened and then a moment longer.
- *
- * The grace after "listening on" is not slack: the QR is printed AFTER the listen line on purpose,
- * so a test that stopped reading at "listening on" would see no QR on the run that prints one and
- * would pass for the wrong reason on the run that does not.
+ * One boot, held until it has listened and a moment longer: the QR is printed AFTER the listen line,
+ * so stopping there would see no QR on the run that prints one and pass on the run that does not.
  */
 const boot = async (
   home: string,
@@ -87,13 +72,8 @@ const boot = async (
   };
   let stdout = "";
   let stderr = "";
-  // A real PTY when the case is about what a person sees, pipes when it is about what a
-  // redirected or launchd-supervised run writes. The difference is the whole point of the
-  // isTTY gate, so a test that only ever pipes could not tell the two apart.
-  //
-  // A PTY is one stream for both, so the PTY run sends stderr to a file and reads it back: the
-  // boot warnings mention example origins, and merging them into stdout would let a case that
-  // asks what the server PRINTED AS ITS URL pass or fail on a warning's wording.
+  // A real PTY for what a person sees, pipes for what a redirected run writes - which is the whole
+  // point of the isTTY gate. The PTY run sends stderr to a file, or a warning's wording leaks in.
   let child: ChildProcess | undefined;
   let pty: IPty | undefined;
   let errFile: string | undefined;
@@ -193,9 +173,8 @@ void describe("the QR the server prints on first run", () => {
     const token = readFileSync(tokenFile, "utf8").trim();
     assert.ok(token.length > 0);
 
-    // Decoded, not eyeballed. This is the whole acceptance criterion: whatever a camera reads off
-    // this terminal has to be the credential this process will accept, so the phone gets it
-    // without hand-typing 43 random characters.
+    // Decoded rather than eyeballed, which is the whole acceptance criterion: what a camera reads off
+    // this terminal has to be the credential this process will accept.
     const lines = qrBlockLines(first.stdout);
     assert.ok(lines.length > 0, `no QR was printed on the first run\n${first.stdout}`);
     assert.equal(decodeLines(lines), token);
@@ -211,9 +190,8 @@ void describe("the QR the server prints on first run", () => {
     assert.ok(first.stdout.includes(origin), "the configured origin was not printed beside the QR");
     assert.ok(first.stdout.includes(tokenFile), "the token file was not named");
 
-    // And the credential is in the code only. A token printed as text beside it lands in the
-    // terminal's scrollback, in any capture of it, and in whatever the operator pastes into an
-    // issue - which is the leak the file's 0600 mode exists to prevent.
+    // The credential is in the code only: printed as text beside it, it lands in scrollback and in
+    // whatever the operator pastes into an issue.
     assert.ok(!first.stdout.includes(token), "the token was printed as text beside the QR");
     assert.ok(!first.stderr.includes(token), "the token was printed to stderr");
 
@@ -224,9 +202,8 @@ void describe("the QR the server prints on first run", () => {
     assert.match(gate, /aria-label="token"/);
     assert.match(gate, /emit\("token"/);
 
-    // A second boot against the same HOME is not a first run. Reprinting a live credential into
-    // the scrollback of every restart is how it ends up in a screen recording; rotation is
-    // deleting the file, which the third boot below shows makes it a first run again.
+    // A second boot against the same HOME is not a first run: reprinting a live credential on every
+    // restart is how it reaches a screen recording. Rotation is deleting the file.
     const second = await boot(home, origin);
     assert.equal(readFileSync(tokenFile, "utf8").trim(), token, "the second boot reissued");
     assert.deepEqual(qrBlockLines(second.stdout), [], "the QR was reprinted on a later boot");
@@ -246,12 +223,8 @@ void describe("the QR the server prints on first run", () => {
   });
 
   void test("prints no code at all when stdout is not a terminal", async () => {
-    // `pnpm start > ~/agentdeck.log 2>&1 &`, or a launchd agent with a StandardOutPath. The grid
-    // IS the token - the decoder three lines below is the proof - so printing it into a file
-    // created with the process umask leaves the credential sitting in the operator's home
-    // directory, in whatever backs it up, and in the log they later paste into a bug report
-    // alongside the boot warnings they meant to report. It does not read as a credential, so
-    // nobody redacts it. Nothing is holding a phone up to a log file, so there is nothing lost.
+    // A redirected run, or a launchd StandardOutPath. The grid IS the token and does not look like
+    // one, so nobody redacts it - and nothing holds a phone up to a log file, so nothing is lost.
     const home = temp("agentdeck-qr-home-");
     const run = await boot(home, undefined, { tty: false });
     const tokenFile = join(home, ".agentdeck", "token");
@@ -297,10 +270,8 @@ void describe("the QR the server prints on first run", () => {
 
 void describe("the QR encoder is server-side, and stays out of what the phone downloads", () => {
   void test("no built client asset contains the encoder", () => {
-    // The source-level check in src/qr.test.ts is about imports; this is about the artefact. A
-    // bundler that inlined it through some other path would leave the source clean and still ship
-    // it. `6,34,62,90,118` is the encoder's alignment-pattern table, which survives minification
-    // when the identifiers around it do not.
+    // The source-level check is about imports; this is about the artefact, which a bundler could
+    // still ship. The alignment-pattern table survives minification when identifiers do not.
     const clientDir = join(repoRoot, "dist", "client");
     // Built rather than skipped over: a self-skipping test for the one guarantee this check exists
     // to make is a green tick for nothing.

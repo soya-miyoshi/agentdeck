@@ -22,9 +22,8 @@ void describe("session ids", () => {
   });
 
   void test("the same path under two agents produces two ids", () => {
-    // Without the agent in the key, a second create in one directory would attach to the agent
-    // already running there and return a session whose `agent` field was a lie - which makes
-    // plan 004's "two agents in one working tree: warn, do not block" unreachable.
+    // Without the agent in the key, a second create in one directory attaches to the agent already
+    // there and returns a session whose `agent` field is a lie.
     const claude = sessionId("/workspace/agentdeck", "claude");
     const gemini = sessionId("/workspace/agentdeck", "gemini");
     assert.notEqual(claude, gemini);

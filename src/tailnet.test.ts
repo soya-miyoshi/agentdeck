@@ -1,8 +1,5 @@
-// The two admin-console preconditions `tailscale serve` has and the CLI does not report well.
-//
-// The fixtures here are the real shape of `tailscale status --json` from the development Mac on
-// 2026-08-08, with HTTPS certificates disabled - `"CertDomains": null` - which is the state this
-// item was written against and the one the report exists for.
+// The two admin-console preconditions `tailscale serve` has and the CLI does not report well. The
+// fixtures are the real shape of `status --json` with HTTPS certificates disabled.
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
@@ -126,12 +123,8 @@ void describe("plan 006 is where this shape is written down", () => {
   });
 });
 
-// --- The reader itself, and the boot that prints what it found. ---
-//
-// Everything above is pure. What follows drives `readTailnet` and then a whole `node src/server.ts`
-// against a STUB tailscale, the way src/watchdog.test.ts does: AGENTDECK_TAILSCALE names an
-// absolute path and the stub is a shell script. The real CLI is never run here - one switch is off
-// on this Mac, so the only reachable real answer is the refusal, and a stub can reach both.
+// The reader itself, and the boot that prints what it found, against a STUB tailscale. The real CLI
+// is never run: one switch is off here, so the only reachable real answer is the refusal.
 
 const serverPath = fileURLToPath(new URL("server.ts", import.meta.url));
 const run = promisify(execFile);
@@ -318,9 +311,8 @@ void describe("reading the tailnet", () => {
 
 void describe("the real tailscale still reports what the parser reads", () => {
   void test("Self.DNSName and CertDomains are the fields this version emits", async () => {
-    // Not a fixture: the field NAMES are the assumption that a tailscale upgrade could break
-    // silently, turning "certificates are off" into a permanent wrong answer. Skipped where there
-    // is no tailscale, and never mutating - `status --json` only.
+    // Not a fixture: the field NAMES are the assumption an upgrade could break silently, turning
+    // "certificates are off" into a permanent wrong answer. Never mutating.
     const binary = tailscaleBinary();
     if (binary === undefined || process.env["AGENTDECK_TAILSCALE"] !== undefined) return;
     let raw: string;

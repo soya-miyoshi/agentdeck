@@ -28,11 +28,8 @@ interface Harness {
   timers: { delayMs: number; run: () => void }[];
   fire: () => void;
   /**
-   * Whether an INPUT WINDOW is still pending, which is what a drain loop is waiting on.
-   *
-   * Not "any timer": an open connection always has the heartbeat-silence watchdog outstanding, so
-   * a loop that drained until the timer list emptied would go on to fire the watchdog, drop the
-   * socket, and then read its assertions off a fresh socket that had sent nothing.
+   * Whether an INPUT WINDOW is pending, which is what a drain loop waits on - not "any timer": the
+   * heartbeat watchdog is always outstanding, and firing it would drop the socket mid-assertion.
    */
   pendingWindow: () => boolean;
   statuses: ConnectionStatus[];
@@ -46,21 +43,15 @@ interface Harness {
   /** How many times the token has been re-presented to the server over HTTP. */
   probes: number;
   /**
-   * Hold the probe's answer until the test releases it.
-   *
-   * `verifyToken` is a network request with no timeout, and the ladder awaits it with no socket -
-   * so on a bad network the window it leaves open is as long as the request takes. Everything the
-   * user or the browser can do during that window is reachable only with a probe that can be left
-   * pending.
+   * Hold the probe's answer until the test releases it: `verifyToken` has no timeout and the ladder
+   * awaits it with no socket, so that window is only reachable with a probe left pending.
    */
   deferProbe: boolean;
   /** Answer the pending probe. */
   answer: (verdict: TokenVerdict) => void;
   /**
-   * Make the socket factory throw instead of returning a socket.
-   *
-   * `new WebSocket` throws rather than closing when the endpoint is refused before a connection is
-   * attempted at all - blocked mixed content, a `connect-src` the page's CSP does not allow.
+   * Make the socket factory throw instead of returning a socket - `new WebSocket` throws rather than
+   * closing when the endpoint is refused outright: mixed content, or a CSP `connect-src`.
    */
   refuseSocket: boolean;
 }
@@ -83,10 +74,8 @@ const harness = (): Harness => {
       return socket;
     },
     timers: [],
-    // The SOONEST timer, not the first one scheduled. Since the client watches for heartbeat
-    // silence, an open connection always has a long timer outstanding, and popping the queue in
-    // order fired that 30-second watchdog ahead of the 1-second input window sitting behind it -
-    // which is not an ordering any clock produces.
+    // The SOONEST timer, not the first scheduled: popping in order fired the 30-second watchdog
+    // ahead of the 1-second window behind it, which is not an ordering any clock produces.
     fire: () => {
       const soonest = Math.min(...state.timers.map((timer) => timer.delayMs));
       const [timer] = state.timers.splice(
@@ -134,10 +123,8 @@ const harness = (): Harness => {
           closed: false,
           deliver: (message) => handlers.message(JSON.stringify(message)),
         };
-        // A peer close closes the socket. Tests drive one by calling `handlers.closed()` directly,
-        // and the fake used to leave `closed` false for that - so a socket the SERVER dropped still
-        // counted as live, and "how many sockets are still live" could not be asked. Wrapping the
-        // handler here rather than at 29 call sites keeps that question answerable.
+        // A peer close closes the socket. Wrapped here rather than at 29 call sites, so "how many
+        // sockets are still live" stays answerable when a test drives `handlers.closed()`.
         const peerClosed = handlers.closed;
         handlers.closed = () => {
           socket.closed = true;
@@ -189,12 +176,8 @@ const frameBytes = (frame: Record<string, unknown>): number =>
   new TextEncoder().encode(JSON.stringify(frame)).length;
 
 /**
- * Let the token probe's promise settle.
- *
- * A fixed number of microtask turns rather than two, because the number of turns an already-settled
- * promise takes to reach the ladder is an implementation detail of the ladder - the probe is now
- * raced against a bound, which is one more `await` than it used to be. Counting them here made
- * every one of these tests assert the shape of `#onClosed` by accident.
+ * Let the token probe's promise settle. A fixed number of turns rather than two, because counting
+ * them made every test assert the shape of `#onClosed` by accident.
  */
 const settle = async (): Promise<void> => {
   for (let turn = 0; turn < 8; turn++) await Promise.resolve();
@@ -244,10 +227,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   };
 
   void test("the client never sends a frame the server's receiver would refuse", () => {
-    // `ws` enforces maxPayload BEFORE the message event, so an over-size frame is not answerable
-    // with an error frame - the socket closes with 1009, which from the client looks exactly like
-    // a phone in a lift. It runs the ladder, re-attaches every tab with a real capture-pane each,
-    // and the paste is gone with no explanation, so the user pastes again and it repeats.
+    // `ws` enforces maxPayload BEFORE the message event, so an over-size frame closes the socket
+    // with 1009 - which from the client looks exactly like a phone in a lift, and repeats.
     const h = harness();
     // 400 KB of a pasted diff, which is a large paste but an ordinary one.
     const pasted = "diff --git a/src/x.ts b/src/x.ts +one changed line here\n".repeat(6000);
@@ -296,9 +277,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("typing is still one frame per keystroke", () => {
-    // The regression the chunker could quietly introduce at the other end of the range. A
-    // keystroke that arrived as two frames would be two writes into the pty for one key, and the
-    // per-socket frame budget is what a person typing fast would then be spending.
+    // The other end of the range: a keystroke arriving as two frames is two writes into the pty for
+    // one key, spending the frame budget a fast typist needs.
     const h = harness();
     const frames = paste(h, "l");
     assert.equal(frames.length, 1);
@@ -320,11 +300,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("an ordinary paste stays well inside the server's per-window frame budget", () => {
-    // The second way the same paste can vanish, and the quieter one. Frames past
-    // MAX_FRAMES_PER_WINDOW are DROPPED by the receiver rather than closing the socket
-    // (src/ws.ts withinRate), so a chunker that cut too finely would trade a 1009 close for a
-    // silently truncated paste - the same lost bytes with less to go on. 500 KB is the top of
-    // what a person pastes into a terminal by hand.
+    // The quieter way the same paste vanishes: frames past the receiver's budget are DROPPED rather
+    // than closing the socket, so cutting too finely trades a 1009 for a silent truncation.
     const h = harness();
     const frames = paste(
       h,
@@ -343,9 +320,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("a multi-megabyte paste is paced rather than spliced", () => {
-    // The frames past MAX_FRAMES_PER_WINDOW are DROPPED by the receiver mid-stream, not refused,
-    // so an unpaced 4 MiB paste reaches the pty with a hole in the middle of it and the shell
-    // runs the concatenation of two fragments nobody typed.
+    // Frames past the receiver's budget are DROPPED mid-stream rather than refused, so an unpaced
+    // 4 MiB paste reaches the pty with a hole and the shell runs two fragments joined.
     const h = harness();
     const pasted = "a line of a pasted build log, about sixty bytes long\n".repeat(80_000);
     h.connection.start();
@@ -402,10 +378,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("an agent's own terminal replies cannot starve a keystroke", () => {
-    // `input()` is not only the keyboard. TerminalPane wires xterm's onData straight in, and xterm
-    // fires onData for the replies it owes to escape sequences the AGENT wrote - one event per
-    // `\e[6n`. Paced one frame per slot regardless of size, 200,000 eight-byte replies hold the
-    // window for over an hour, and Ctrl-C is exactly what a person reaches for by then.
+    // `input()` is not only the keyboard: xterm answers the AGENT's escape sequences through it, and
+    // at one frame per slot 200,000 eight-byte replies hold the window for over an hour.
     const h = openHarness();
     h.connection.attach("a", 80, 24);
     for (let i = 0; i < 200_000; i += 1) h.connection.input("a", "\u001b[24;80R");
@@ -440,9 +414,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("input typed before the socket opens is held, not destroyed", () => {
-    // `#socket` is assigned before the socket is OPEN, and browserSocket.send silently discards
-    // anything written while it is still CONNECTING. Draining into that window loses the head of a
-    // paste and delivers the tail, so the pty runs the middle of what was pasted.
+    // `#socket` is assigned before the socket is OPEN and `send` silently discards anything written
+    // while CONNECTING, so draining into that window loses the head and delivers the tail.
     const h = harness();
     h.connection.start();
     h.connection.attach("a", 80, 24);
@@ -460,9 +433,8 @@ void describe("a paste is one onData event and may be larger than a frame", () =
   });
 
   void test("a paste cut short by a disconnect is reported rather than silently truncated", () => {
-    // Frames 1-40 have already been applied to the shell; the rest are discarded by the reset. A
-    // silent discard is indistinguishable from a paste that never started, so the user pastes
-    // again and the lines that already ran run twice.
+    // Frames 1-40 already reached the shell and the rest are discarded. A silent discard looks like
+    // a paste that never started, so the user pastes again and those lines run twice.
     const h = openHarness();
     h.connection.attach("a", 80, 24);
     h.connection.input(
@@ -567,10 +539,8 @@ void describe("reconnection", () => {
 
 void describe("a token rejected mid-session, rather than at startup", () => {
   void test("the first reconnect after the rotation asks, and stops", async () => {
-    // Rotating the token does not close the socket that is already open - it refuses the NEXT
-    // handshake. So the discovery is one ladder step after the drop, and no sooner: the drop
-    // itself arrives on a connection that was working, which is the ordinary outage. What must not
-    // happen is the refused handshake being read as more of the same outage.
+    // Rotating the token refuses the NEXT handshake rather than closing this socket, so discovery
+    // is one ladder step later - and that refusal must not read as more of the same outage.
     const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
     h.last().handlers.closed();
@@ -587,9 +557,8 @@ void describe("a token rejected mid-session, rather than at startup", () => {
   });
 
   void test("a handshake that succeeds and carries nothing is not evidence the token is good", async () => {
-    // A `101` is answered by whatever sits in front of the server as readily as by the server, so
-    // a socket that opened and then said nothing has proved nothing. Reading it as proof left this
-    // case going round the ladder once more for no information.
+    // A `101` is answered by whatever sits in front of the server, so a socket that opened and said
+    // nothing has proved nothing - reading it as proof cost one more ladder step.
     const h = harness();
     h.verdict = "rejected";
     h.connection.start();
@@ -601,9 +570,8 @@ void describe("a token rejected mid-session, rather than at startup", () => {
   });
 
   void test("a 403 that arrives after a period of success stops it too, and keeps the token", async () => {
-    // The server was restarted with a different AGENTDECK_ORIGIN under a client that had been
-    // connected all along. Nothing about the token changed, so asking for a new one would send the
-    // user after the wrong thing.
+    // The server restarted with a different AGENTDECK_ORIGIN under a client connected all along.
+    // Nothing about the token changed, so asking for a new one sends the user after the wrong thing.
     const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS });
     h.last().handlers.closed();
@@ -622,11 +590,8 @@ void describe("a token rejected mid-session, rather than at startup", () => {
 
 void describe("a socket that is stuck rather than absent", () => {
   void test("the ladder says what is wrong instead of re-presenting the token forever", async () => {
-    // The audit's open finding: the watchdog drops a stuck-CONNECTING socket, `#onClosed` probes
-    // the token, the probe says the server is fine, and the loop runs again - a bearer token
-    // re-presented once a cycle, forever, with no diagnosis. The probe is what makes this case
-    // diagnosable at all: HTTP works and the socket does not, which is neither the network nor the
-    // token.
+    // HTTP works and the socket does not, which is neither the network nor the token - without the
+    // probe this is a bearer token re-presented once a cycle, forever, with no diagnosis.
     const h = harness();
     h.connection.start();
     for (let cycle = 0; cycle < 6; cycle++) {
@@ -689,10 +654,8 @@ void describe("a socket that is stuck rather than absent", () => {
   });
 
   void test("an unreachable server is never diagnosed as a broken socket", async () => {
-    // A phone in a lift. The probe does not answer either, so the sentence above - which claims
-    // the server IS answering - would be a guess presented to the user as a finding. This is why
-    // "could not reach it" is a verdict of its own rather than folded into "ok": the two retry
-    // identically, and they are opposite evidence about everything else.
+    // A phone in a lift: the probe does not answer either, so the sentence above would be a guess
+    // presented as a finding. The two retry identically and are opposite evidence.
     const h = harness();
     h.verdict = "unreachable";
     h.connection.start();
@@ -744,9 +707,8 @@ void describe("a rejected token is not a network failure", () => {
 
 void describe("a refused origin is neither the network nor the token", () => {
   void test("it stops the ladder and says what has to change", async () => {
-    // The audit's open half of the AGENTDECK_ORIGIN finding: a 403 used to read as "not a 401, so
-    // the token is still good, so it must be the network", and the client reconnected forever
-    // while the server answered every request correctly.
+    // A 403 used to read as "not a 401, so it must be the network", and the client reconnected
+    // forever while the server answered every request correctly.
     const h = harness();
     h.verdict = "forbidden";
     h.connection.start();
@@ -765,11 +727,8 @@ void describe("a refused origin is neither the network nor the token", () => {
 
 void describe("what is typed while disconnected", () => {
   void test("is dropped and said so, not delivered into whatever comes next", async () => {
-    // The rule this file has always stated: a keystroke held through an outage arrives seconds or
-    // minutes later, into whatever the agent is showing by then. A "y" answers a question that is
-    // no longer on screen; two halves of a command line concatenate into one nobody typed. Pacing
-    // a paste means holding input across the CONNECTING window - `#socket` is assigned before the
-    // socket opens - and that is all it means.
+    // A keystroke held through an outage arrives into whatever the agent shows by then. Pacing means
+    // holding across the CONNECTING window only - `#socket` is assigned before the socket opens.
     const h = openHarness();
     h.last().handlers.closed();
     await settle();
@@ -793,11 +752,8 @@ void describe("what is typed while disconnected", () => {
   });
 
   void test("the overflow warning is once per overflow, not once per socket", () => {
-    // `#overflowed` was cleared only on close, so a queue that overflowed, drained, and overflowed
-    // again an hour later dropped input in silence. What is dropped is the tail of what is in
-    // flight while everything queued after it is still sent, so the pty receives a hole and then
-    // resumes - the concatenation of two fragments nobody typed, which this file names as worse
-    // than dropping the lot.
+    // Cleared only on close, a queue that overflowed, drained and overflowed an hour later dropped
+    // input in silence - a hole the pty resumes after, which is worse than dropping the lot.
     const h = openHarness();
 
     const flood = (): void => {
@@ -808,9 +764,8 @@ void describe("what is typed while disconnected", () => {
     const first = h.errors.filter((m) => /dropped/.test(m)).length;
     assert.equal(first, 1, "the first overflow was not announced exactly once");
 
-    // Drain the queue the way the window timer does, then overflow again. Each fired window
-    // schedules the next while anything is still queued, so this runs until nothing is pending
-    // rather than a fixed number of times.
+    // Drain the way the window timer does: each fired window schedules the next while anything is
+    // queued, so this runs until nothing is pending rather than a fixed number of times.
     for (let i = 0; i < 2000 && h.pendingWindow(); i++) h.fire();
     flood();
     const second = h.errors.filter((m) => /dropped/.test(m)).length;
@@ -818,15 +773,8 @@ void describe("what is typed while disconnected", () => {
   });
 });
 
-// THE CLIENT-VISIBLE HEARTBEAT, at the level where the clock is fake.
-//
-// src/half-open.test.ts proves the real thing end to end, over a genuinely half-open socket, and
-// that is the acceptance test. It cannot reach these cases: a real run only ever fires the
-// watchdog at the one deadline the server's interval sets, so nothing there distinguishes "the
-// bound came from the frame" from "the bound was compiled in and happened to match", and nothing
-// there can hold a socket at exactly the moment before the deadline to show it is the ping that
-// pushed the deadline out. The failure this design refuses - a confidently wrong tab - lives in
-// that distinction.
+// THE CLIENT-VISIBLE HEARTBEAT, where the clock is fake. src/half-open.test.ts is the acceptance
+// test but cannot tell "the bound came from the frame" from "it was compiled in and matched".
 
 /** The pending silence watchdogs, told apart from the input window by their delay. */
 const watchdogs = (h: Harness): { delayMs: number; run: () => void }[] =>
@@ -836,9 +784,8 @@ const watchdogs = (h: Harness): { delayMs: number; run: () => void }[] =>
 
 void describe("the client-visible heartbeat", () => {
   void test("the pre-first-frame default is the server's interval, not a second number", () => {
-    // The window before the first heartbeat lands is timed against a constant on this side, and a
-    // constant duplicated across the wire is a number free to drift. Plan 002 puts `intervalMs` on
-    // the frame for everything after; this asserts the one value the frame cannot cover.
+    // The window before the first heartbeat is timed against a constant on this side, and one
+    // duplicated across the wire is free to drift. This is the value the frame cannot cover.
     assert.equal(DEFAULT_HEARTBEAT_INTERVAL_MS, PING_INTERVAL_MS);
     assert.equal(HEARTBEAT_GRACE_INTERVALS, 2);
   });
@@ -883,10 +830,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a tab whose agent says nothing for hours is never reported as dead", () => {
-    // THE FAILURE MODE THIS DESIGN EXISTS TO PREVENT, and the one a blind silence timer causes.
-    // This connection receives no snapshot, no chunk and no state for the whole test - the agent
-    // is simply idle - and every heartbeat must retire the outstanding deadline rather than
-    // letting it stand. One watchdog at a time, replaced each beat, never reached.
+    // What a blind silence timer does to an idle agent: no snapshot, no chunk, no state for the
+    // whole test, and every heartbeat must retire the outstanding deadline rather than let it fire.
     const h = openHarness();
     let previous = watchdogs(h)[0];
     for (let beat = 0; beat < 200; beat++) {
@@ -907,11 +852,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a nonsense stated interval falls back to the default rather than bricking the tab", () => {
-    // `#receive` runs no parser over a server frame, so `intervalMs` is a wire value used as a
-    // control parameter. Absent, zero, negative, NaN or overflowing, an unchecked value arms a
-    // bound that expires on the next tick - and because the interval is Connection state rather
-    // than socket state, the same instantly-expiring bound is re-armed on every replacement
-    // socket, so one bad frame reconnects forever against a healthy server.
+    // `intervalMs` is a wire value used as a control parameter, and an unchecked one arms a bound
+    // that expires on the next tick - re-armed by every replacement socket, so it never recovers.
     const bad: unknown[] = [undefined, 0, -1, NaN, Infinity, 1e308, "15000", null, 1, 1e9];
     for (const intervalMs of bad) {
       const h = openHarness();
@@ -931,19 +873,16 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("the width the server states is what the client is told to render at", () => {
-    // Not this bundle's PANE_COLS. The client and the server are built and restarted separately,
-    // so the compiled constant is stale for as long as it takes to run `make restart` - which on
-    // the phone showed up as ten columns of dead padding down the right-hand edge, not as a
-    // version skew.
+    // Not this bundle's PANE_COLS: the two halves are built and restarted separately, and on the
+    // phone the skew showed up as dead padding rather than as a version mismatch.
     const h = openHarness();
     h.last().deliver({ t: "hello", cols: 40 });
     assert.deepEqual(h.paneCols, [40]);
   });
 
   void test("every socket re-states the width, so a restart at a new width is picked up", () => {
-    // The case that produced the bug: the server is restarted with a different PANE_COLS under a
-    // page that has been open the whole time. Only the reconnect can tell it, and a width learned
-    // once would leave the tab rendering at the old one until a reload.
+    // The server restarted with a different PANE_COLS under a page open the whole time: only the
+    // reconnect can tell it, and a width learned once would stand until a reload.
     const h = openHarness();
     h.last().deliver({ t: "hello", cols: 40 });
     h.last().handlers.closed();
@@ -954,9 +893,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a nonsense stated width falls back rather than rendering a pane of nothing", () => {
-    // Same shape as `intervalMs` above and for the same reason: `#receive` runs no parser over a
-    // server frame, and this value is handed to `terminal.resize`. A zero, a NaN or a string is a
-    // terminal with no columns - a blank tab produced by a server that answered wrongly.
+    // Same shape as `intervalMs`, and this one is handed to `terminal.resize`: a zero, a NaN or a
+    // string is a terminal with no columns, from a server that answered wrongly.
     const bad: unknown[] = [undefined, 0, -1, NaN, Infinity, 1.5, "50", null, 100_000];
     for (const cols of bad) {
       const h = openHarness();
@@ -970,9 +908,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a poisoned interval does not survive into the next socket", () => {
-    // The permanent half of the failure: a replacement socket arms its bound from Connection
-    // state, so a value that was never clamped would outlive the socket that carried it. Only a
-    // page reload clears that, and the tab shows "Reconnecting..." the whole time.
+    // The permanent half: a replacement socket arms from Connection state, so an unclamped value
+    // outlives the socket that carried it and only a reload clears it.
     const h = openHarness();
     h.last().deliver({ t: "ping", intervalMs: 0 } as unknown as ServerMessage);
     h.last().handlers.closed();
@@ -1010,9 +947,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a socket dropped by the bound and later closed for real reconnects once", async () => {
-    // A half-open socket does eventually get an RST, minutes after the watchdog gave up on it.
-    // Two runs of the ladder for one connection is two sockets racing, and the loser's frames
-    // arrive on a connection nothing is reading.
+    // A half-open socket does get an RST eventually, minutes after the watchdog gave up. Two runs of
+    // the ladder is two sockets racing, and the loser's frames arrive on a dead connection.
     const h = openHarness();
     const first = h.last();
     h.fire();
@@ -1034,10 +970,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a socket the bound gave up on can no longer speak for the connection", () => {
-    // `close()` only STARTS the closing handshake, so the browser goes on dispatching frames it had
-    // already buffered for the abandoned socket. Its handlers are wired to this same Connection, and
-    // a snapshot repaints unconditionally by design - so a 30-second-old screen would land on top of
-    // the live one and rewind the tracked position, costing a resync and a second cold snapshot.
+    // `close()` only STARTS the handshake, so buffered frames keep arriving on handlers wired to
+    // this Connection - and a snapshot repaints unconditionally, so a stale screen lands on the live one.
     const h = openHarness();
     const dead = h.last();
     h.connection.attach("a", 80, 24);
@@ -1067,10 +1001,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("a socket that never opens is watched too", async () => {
-    // The network freezing between the TCP connect and the 101: no close, no error the client sees,
-    // no open. Armed only on open, nothing times this at all, and `poke()` returns while a socket
-    // exists - so the tab sits at "connecting" until the browser's own handshake timeout, which
-    // Chrome and Safari leave to the TCP stack.
+    // The network freezing between the TCP connect and the 101: no close, no error, no open. Armed
+    // only on open, nothing times it, and `poke()` returns while a socket exists.
     const h = harness();
     h.connection.start();
     assert.equal(watchdogs(h).length, 1, "an un-opened socket was watched by nothing");
@@ -1086,10 +1018,8 @@ void describe("the client-visible heartbeat", () => {
   });
 
   void test("sockets that open and then say nothing back off and become visible", async () => {
-    // A path that completes the handshake and then forwards nothing server->client. Resetting the
-    // ladder on the handshake alone makes this a permanent 250 ms loop - re-attaching every tab,
-    // a cold capture-pane each - that the user is never shown, because the reconnecting banner
-    // waits for a second failed attempt.
+    // A path that completes the handshake and forwards nothing. Resetting the ladder on the
+    // handshake alone makes it a permanent 250ms loop the banner never shows.
     const h = harness();
     h.connection.start();
     const delays: number[] = [];
@@ -1137,14 +1067,8 @@ void describe("the client-visible heartbeat", () => {
   });
 });
 
-// A backgrounded tab is not a special case in this file's model - it is the ordinary one, slowed
-// down. A hidden tab's timers are throttled to roughly one a minute, so every delay here becomes a
-// floor rather than a duration: the silence bound notices later, the ladder's step is longer than
-// the ladder chose, and the cap being 4 s buys nothing while nobody is looking at the screen. What
-// makes that acceptable is that the delays are only ever exceeded, never undercut - a throttled
-// clock cannot make this connection reconnect sooner than it decided to - and that the moment the
-// tab comes back, the wait is abandoned rather than served out. App.vue calls `poke()` on
-// `visibilitychange` and on `online` for exactly that.
+// A backgrounded tab is the ordinary case slowed down: throttled timers make every delay a floor
+// rather than a duration. Acceptable because they are only ever exceeded, and `poke()` abandons them.
 void describe("a tab that was in the background", () => {
   void test("does not serve out a delay that was scheduled while nobody was looking", async () => {
     const h = harness();
@@ -1192,9 +1116,8 @@ void describe("a tab that was in the background", () => {
   });
 
   void test("a wake while a socket already exists does not open a second one", () => {
-    // `visibilitychange` and `online` both fire on a phone coming out of a pocket, and a stuck
-    // socket is still a socket. Two sockets for one connection is two ladders racing, and the
-    // loser's frames arrive on a connection nothing is reading.
+    // Both fire on a phone coming out of a pocket, and a stuck socket is still a socket - two of
+    // them is two ladders racing, with the loser's frames arriving on a dead connection.
     const h = harness();
     h.connection.start();
     h.connection.poke();
@@ -1212,9 +1135,8 @@ void describe("a tab that was in the background", () => {
   });
 
   void test("a wake after a rejected token does not re-present it", async () => {
-    // The ladder is stopped, and `poke()` is called by an event the user cannot avoid firing -
-    // switching back to the tab. Re-opening there would put the paste field behind a socket that
-    // is being refused over and over.
+    // The ladder is stopped and `poke()` fires on an event the user cannot avoid - switching back to
+    // the tab. Re-opening there puts the paste field behind a socket being refused.
     const h = harness();
     h.verdict = "rejected";
     h.connection.start();
@@ -1227,11 +1149,8 @@ void describe("a tab that was in the background", () => {
 });
 
 void describe("what happens during the window the token probe is open", () => {
-  // `verifyToken` is an HTTP request with no timeout, and `#onClosed` awaits it having already
-  // dropped `#socket`. On the network this ladder exists for, that window is not a microtask - it
-  // is however long a request takes to fail on a phone that has just lost signal. Everything the
-  // browser fires at a tab in that state lands inside it, and `online` fires at exactly the moment
-  // the pending probe was waiting for.
+  // `#onClosed` awaits an untimed request having already dropped `#socket`, so that window is as
+  // long as a failing request on a dead network - and `online` fires at exactly that moment.
 
   void test("a wake does not open a second socket while the probe is still out", async () => {
     const h = harness();
@@ -1252,12 +1171,8 @@ void describe("what happens during the window the token probe is open", () => {
   });
 
   void test("and the answer, when it comes, does not leave a socket nobody owns", async () => {
-    // The worse half. The probe resumes into a ladder that no longer describes the sockets that
-    // exist: it schedules a retry, the retry calls `#open`, and `#open` overwrites `#socket`
-    // without closing what was there. The overwritten socket is still connected, still delivering
-    // frames, and still holding a `closed` handler that will run the ladder a second time - two
-    // ladders for one connection, each re-attaching every tab, against the server that was already
-    // the reason for the reconnect.
+    // The worse half: the probe resumes into a ladder that no longer describes the sockets that
+    // exist, and `#open` overwriting `#socket` leaves one still delivering frames and one ladder each.
     const h = harness();
     h.deferProbe = true;
     h.connection.start();
@@ -1280,11 +1195,8 @@ void describe("what happens during the window the token probe is open", () => {
   });
 
   void test("a probe answering after the connection was closed does not sign the user out", async () => {
-    // `stop()` is teardown: the component unmounted, or the page already signed out and is showing
-    // the paste field. A verdict that arrives afterwards is about a socket nobody is watching, and
-    // `unauthorized` is not a notification - it clears the stored token and replaces the page. The
-    // ordering it destroys is real: the user pastes a good token, a new Connection starts, and the
-    // dead one's late 401 wipes what they just pasted.
+    // `stop()` is teardown, and `unauthorized` is not a notification - it clears the stored token.
+    // The user pastes a good one, a new Connection starts, and the dead one's late 401 wipes it.
     const h = harness();
     h.deferProbe = true;
     h.connection.start();
@@ -1314,9 +1226,8 @@ void describe("what happens during the window the token probe is open", () => {
 });
 
 void describe("the shapes the ladder is not allowed to end in", () => {
-  // One rule, checked from three directions: there is never a moment with no socket, no scheduled
-  // retry and nothing the user can act on. That state is invisible in a green suite: nothing
-  // fails, there is simply a tab that looks like it is connecting and never will be again.
+  // One rule from three directions: never a moment with no socket, no scheduled retry and nothing
+  // the user can act on. That state is invisible in a green suite.
 
   void test("a probe that never answers does not strand the ladder", async () => {
     // `fetch` has no timeout and `#probing` deliberately turns a wake away, so a request that never
@@ -1384,10 +1295,8 @@ void describe("the shapes the ladder is not allowed to end in", () => {
   });
 
   void test("re-opening over a live socket leaves one socket and no stray retry", async () => {
-    // `#open` drops whatever socket is there first, and dropping a socket that HAS carried frames
-    // runs the ladder synchronously - no probe is needed for one the server was talking to seconds
-    // ago - so it schedules a retry on its way out. That retry would fire beside the socket opened
-    // immediately afterwards and drop it, and every tab would re-attach for nothing.
+    // Dropping a socket that HAS carried frames runs the ladder synchronously and schedules a retry
+    // on its way out - which would fire beside the socket opened immediately afterwards.
     const h = harness();
     h.connection.start();
     h.connection.attach("a", 80, 24);
@@ -1408,10 +1317,8 @@ void describe("the shapes the ladder is not allowed to end in", () => {
 
 void describe("the ladder left running while nobody is looking", () => {
   void test("holds one socket and one pending retry however long it runs", async () => {
-    // A backgrounded tab does not stop the ladder, it slows it: the browser throttles the timers,
-    // so the cycles are minutes apart and there may be a great many of them before anyone looks.
-    // Nothing per-cycle may accumulate - not sockets, not timers, not probes - because the tab
-    // that comes back is the same object that has been running unwatched since it was hidden.
+    // A backgrounded tab slows the ladder rather than stopping it, so nothing per-cycle may
+    // accumulate: the tab that comes back is the object that has been running unwatched.
     const h = harness();
     h.connection.start();
     h.connection.attach("a", 80, 24);
@@ -1444,13 +1351,8 @@ void describe("the ladder left running while nobody is looking", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-// The ladder is a handful of flags - stopped, probing, carried, opened, handled, diagnosed - and
-// the ways they combine are not enumerable by reading the code that sets them. What matters is not
-// which combination is reached but that none of them reaches the ONE state the whole item exists to
-// prevent: no socket, nothing scheduled, and a banner the user cannot act on. That state fails no
-// assertion anywhere - the suite stays green and the tab simply says "connecting" until it is
-// reloaded - so it is asserted here as an invariant after every step of every path, rather than as
-// the outcome of the paths somebody thought of.
+// The ladder's flags combine in ways reading the code does not enumerate, and the one state to
+// prevent fails no assertion anywhere - so it is checked as an invariant after every step.
 void describe("no combination of the ladder's flags strands the connection", () => {
   const live = (h: Harness): FakeSocket[] => h.sockets.filter((socket) => !socket.closed);
 
@@ -1586,12 +1488,8 @@ void describe("no combination of the ladder's flags strands the connection", () 
 // ---------------------------------------------------------------------------------------------
 
 void describe("dropping the previous socket from inside #open", () => {
-  // `#open` starts by dropping whatever socket is there, and that drop runs `#onClosed`. For a
-  // socket that carried frames `#onClosed` needs no probe, so it runs to the end synchronously and
-  // schedules a retry - and that retry calls `#open`. The cycle is only broken by the retry being
-  // cancelled immediately afterwards and by the dropped socket's `handled` flag; neither is
-  // obvious from the call site, and getting it wrong is a stack overflow in a browser tab or a
-  // socket per re-open.
+  // `#open` drops the current socket, which runs `#onClosed` synchronously, which schedules a retry,
+  // which calls `#open`. Only the cancel afterwards and the `handled` flag break that cycle.
 
   void test("re-opening fifty times over a live socket costs fifty sockets, not more", () => {
     const h = harness();
@@ -1645,9 +1543,8 @@ void describe("dropping the previous socket from inside #open", () => {
 // ---------------------------------------------------------------------------------------------
 
 void describe("a phone unlocking fires visibilitychange and online together", () => {
-  // App.vue wires `poke()` to both, and both fire within a tick of each other when a phone comes
-  // out of a pocket. Two sockets for one connection is two ladders, each re-attaching every tab
-  // with its own cold snapshot, at the server that was already the reason for the reconnect.
+  // App.vue wires `poke()` to both, and both fire within a tick when a phone comes out of a pocket.
+  // Two sockets is two ladders, each re-attaching every tab with its own cold snapshot.
 
   void test("two wakes over a pending retry open one socket and cancel the retry", async () => {
     const h = harness();
@@ -1694,9 +1591,8 @@ void describe("a phone unlocking fires visibilitychange and online together", ()
 
 // ---------------------------------------------------------------------------------------------
 
-// The three answers to one closed socket, side by side. Read separately each looks reasonable;
-// what the design actually requires is that they are told APART, because they have three different
-// remedies and two of them are things only the user can do.
+// The three answers to one closed socket, side by side: each looks reasonable alone, and what the
+// design requires is telling them APART - two of the three remedies are only the user's to apply.
 void describe("a refused origin, a rejected token and a dead network are three answers", () => {
   interface Outcome {
     status: ConnectionStatus;
@@ -1741,9 +1637,8 @@ void describe("a refused origin, a rejected token and a dead network are three a
 
   void test("a network that answers nothing keeps the token and keeps trying", async () => {
     const outcome = await closeOnce("unreachable");
-    // Still "open": the FIRST retry is silent by design, so a half-second reconnect the user would
-    // never otherwise notice does not flash a banner at them. What matters is that it is neither
-    // of the two stopping verdicts.
+    // Still "open": the FIRST retry is silent by design, so a half-second reconnect flashes no
+    // banner. What matters is that it is neither of the two stopping verdicts.
     assert.equal(outcome.status, "open", "a phone in a lift was announced as a failure");
     assert.equal(outcome.retries, 1, "being out of range ended the ladder");
     assert.equal(outcome.signedOut, 0, "being out of range signed the user out");
@@ -1753,11 +1648,8 @@ void describe("a refused origin, a rejected token and a dead network are three a
 
 void describe("a fixed server does not need the user to know to reload", () => {
   void test("a wake retries after a forbidden verdict, but never after a rejected token", async () => {
-    // `forbidden` is terminal for the ladder - retrying an origin refusal cannot help - but it was
-    // terminal for the tab too: the operator fixes AGENTDECK_ORIGIN, restarts, and the page stays
-    // dead because nothing in the app can restart a stopped Connection. A deliberate wake is the
-    // signal to try again. A rejected TOKEN is different: the answer is the paste field, not
-    // another attempt with the same credential.
+    // `forbidden` is terminal for the ladder but must not be for the tab: the operator fixes the
+    // origin and restarts, and a deliberate wake is the signal to try again. A token is not.
     const forbidden = harness();
     forbidden.verdict = "forbidden";
     forbidden.connection.start();

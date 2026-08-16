@@ -16,10 +16,8 @@ import { after, before, describe, test } from "node:test";
 
 import { withClient } from "./static.ts";
 
-// The secret this test tries to steal. It sits OUTSIDE the build directory, and every refusal
-// below is checked by reading it and asserting the response does not contain it - so a test that
-// passes because the server answered 403 for the wrong reason, or answered the SPA page instead,
-// still fails if the bytes ever come back.
+// The secret this test tries to steal, OUTSIDE the build directory: every refusal is checked by
+// asserting the response does not contain it, so a 403 for the wrong reason still fails.
 const SECRET = "not-the-clients-business-9f2c1a";
 
 let root: string;
@@ -80,12 +78,8 @@ interface Answer {
 }
 
 /**
- * A request written onto the socket by hand.
- *
- * `fetch` cannot be used for the traversals: the WHATWG URL parser resolves `..` and `%2e%2e`
- * away before a byte leaves the client, so the attack never arrives and the test proves nothing.
- * A phone's browser does the same - but `curl --path-as-is`, any script, and anything that is not
- * a browser do not, and this server is reachable from a tailnet.
+ * A request written onto the socket by hand: the WHATWG parser resolves `..` away before a byte
+ * leaves `fetch`, so the attack never arrives - but a script on the tailnet is not a browser.
  */
 const method = async (verb: string, path: string): Promise<Answer> => {
   const socket = connect(port, "127.0.0.1");
@@ -179,10 +173,8 @@ void describe("escaping the build directory", () => {
     });
   }
 
-  // The other half of plan 001's requirement: not everything odd is an escape. These spellings
-  // are names, not climbs, so they must land INSIDE the build directory - where they find
-  // nothing and get the page - rather than being stripped into a climb by a handler that
-  // rewrites `../` once instead of resolving.
+  // Not everything odd is an escape: these spellings are names rather than climbs, so they must land
+  // INSIDE the build directory rather than be rewritten into one.
   const insiders = ["/....//....//private/token", "//private/token", "/./private/token"];
   for (const path of insiders) {
     void test(`${path} lands inside the build directory`, async () => {
@@ -194,12 +186,8 @@ void describe("escaping the build directory", () => {
     });
   }
 
-  // A request target the WHATWG parser refuses outright. `//` and `/\` read as the start of an
-  // authority with an empty host, and `http://[` as a broken IPv6 literal: `new URL` throws on each.
-  // That parse runs synchronously in the request listener, so an unguarded throw there ends the
-  // process - every attached phone loses its socket and nothing restarts the deck. The assertion is
-  // deliberately weak (a status line came back at all, and the next request still gets served),
-  // because the point is that the server is still alive.
+  // Targets the WHATWG parser refuses outright, parsed synchronously in the request listener - so an
+  // unguarded throw ends the process. The assertion is weak on purpose: the server is still alive.
   const unparseable = ["//", "/\\", "http://["];
   for (const path of unparseable) {
     void test(`${path} is answered rather than taking the process down`, async () => {
@@ -212,9 +200,8 @@ void describe("escaping the build directory", () => {
   }
 
   void test("a double-encoded climb is a filename, and lands inside the build directory", async () => {
-    // `%252f` decodes once to the literal text `%2f`, which is a character a filename may
-    // contain and not a separator. Plan 001 asks that such a path land inside the build
-    // directory or be refused; this one lands inside it, finds nothing, and gets the page.
+    // `%252f` decodes once to the literal `%2f`, which a filename may contain and a path may not.
+    // It lands inside the build directory, finds nothing, and gets the page.
     const res = await get("/..%252fprivate/token");
     assert.equal(res.status, 200);
     assert.ok(!res.body.includes(SECRET));
@@ -224,9 +211,8 @@ void describe("escaping the build directory", () => {
 
 void describe("what the handler will and will not do", () => {
   void test("a decomposed unicode spelling lands inside the build directory or is refused", async () => {
-    // macOS filesystems compare these two spellings of the same name as equal, so a check that
-    // compares bytes and a filesystem that does not can disagree about which file was named.
-    // Either answer is fine; leaving the build directory is not.
+    // macOS compares these two spellings as equal, so a byte comparison and the filesystem can
+    // disagree about which file was named. Either answer is fine; leaving the directory is not.
     const res = await get(`/${encodeURIComponent("café.txt")}`);
     assert.ok(res.status === 200 || res.status === 404, `answered ${String(res.status)}`);
     assert.ok(!res.body.includes(SECRET));
@@ -251,10 +237,8 @@ void describe("what the handler will and will not do", () => {
     }
   });
 
-  // The socket's `Origin` check (plan 001) stops a foreign page opening a socket, but a foreign
-  // page that FRAMES this one gets there anyway: the framed document is this origin, so it reads
-  // the token and its own socket passes the check, and keystrokes typed at an invisible frame
-  // land in a live session's stdin. So the page has to refuse to be framed at all.
+  // The Origin check stops a foreign page opening a socket, but one that FRAMES this page is this
+  // origin - it reads the token and passes the check - so the page must refuse to be framed.
   void test("no answer can be framed, and none may load or talk off-origin", async () => {
     for (const path of ["/", "/assets/index-abc123.js", "/../private/token", "/assets/gone.js"]) {
       const res = await get(path);
@@ -266,20 +250,17 @@ void describe("what the handler will and will not do", () => {
   });
 });
 
-// The two ways this process could be taken down by a request it answers correctly. Neither is a
-// traversal; both end the same way, with the deck gone and tmux sessions nobody can reach until
-// a human is at the Mac - nothing restarts it before plan 001's M4 agent.
+// Two ways this process is taken down by a request it answers correctly. Neither is a traversal, and
+// both end with the deck gone and sessions nobody can reach until a human is at the Mac.
 void describe("surviving the request path", () => {
-  // Bounded, because the failure it is written against is a request that is never answered at
-  // all - an unhandled rejection leaves the socket open forever, so without a timeout the proof
-  // is a hang rather than a failure.
+  // Bounded, because the failure is a request never answered at all: without a timeout the proof is
+  // a hang rather than a failure.
   void test(
     "a file that vanishes mid-request is a 404, not a dead process",
     { timeout: 30_000 },
     async () => {
-      // `pnpm build` sets `emptyOutDir`, so every file under `dist/client` is unlinked and rewritten
-      // while the server is up. A `stat` that loses that race used to reject with nobody catching
-      // it, and Node's default for an unhandled rejection is to throw and exit.
+      // `pnpm build` unlinks and rewrites every file while the server is up, and a `stat` that loses
+      // that race used to reject with nobody catching it.
       const churn = join(root, "assets", "churn.js");
       const away = join(root, "assets", "churn.away");
       writeFileSync(churn, "export const churn = 1;\n");
@@ -316,9 +297,8 @@ void describe("surviving the request path", () => {
   );
 
   void test("an aborted download does not leak the descriptor it opened", async () => {
-    // `pipe` unpipes when the client goes away but never destroys the source, and an
-    // `fs.ReadStream` holds a raw fd with no finaliser. Every navigation away mid-load leaks one,
-    // and this route takes no bearer token, so anything on the tailnet can loop it to EMFILE.
+    // `pipe` unpipes when the client goes but never destroys the source, and this route takes no
+    // bearer token - so anything on the tailnet can loop it to EMFILE.
     const big = join(root, "assets", "big-0000.js");
     writeFileSync(big, `export const big = "${"x".repeat(24 << 20)}";\n`);
 
@@ -400,10 +380,8 @@ void describe("an unbuilt client", () => {
     assert.equal(res.status, 503);
     const body = await res.text();
     assert.match(body, /pnpm build/);
-    // ...but not WHERE. This route is unauthenticated, and the absolute build path names the
-    // account, the checkout layout and the forge owner to anyone who can reach the port, in the
-    // state the server is most likely to be probed in. `/api/health` is held to the same line.
-    // The full sentence, path included, goes to the log, where the person who can act on it is.
+    // ...but not WHERE: this route is unauthenticated, and an absolute build path names the account
+    // and the checkout layout. The full sentence goes to the log instead.
     assert.doesNotMatch(body, /\//, "the wire answer disclosed a filesystem path");
   });
 
