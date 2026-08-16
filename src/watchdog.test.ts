@@ -700,11 +700,11 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
     assert.match(text, /<key>AGENTDECK_REPO<\/key>\s*<string>[^<]+<\/string>/);
   });
 
-  void test("the README writes down the exact launchctl commands the operator runs", () => {
-    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    assert.match(readme, /launchctl bootstrap gui\//);
-    assert.match(readme, /launchctl bootout gui\//);
-    assert.match(readme, /com\.agentdeck\.watchdog/);
+  void test("docs/watchdog.md writes down the exact launchctl commands the operator runs", () => {
+    const doc = readFileSync(join(repoRoot, "docs", "watchdog.md"), "utf8");
+    assert.match(doc, /launchctl bootstrap gui\//);
+    assert.match(doc, /launchctl bootout gui\//);
+    assert.match(doc, /com\.agentdeck\.watchdog/);
   });
 });
 
@@ -1030,9 +1030,9 @@ void describe("the environment the recovered server gets is the plist's, and it 
     }
   });
 
-  void test("the README tells the operator to fill the environment in, AGENTDECK_ORIGIN by name", () => {
-    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    const installing = readme.slice(readme.indexOf("### Installing it"));
+  void test("docs/watchdog.md tells the operator to fill the environment in, AGENTDECK_ORIGIN by name", () => {
+    const doc = readFileSync(join(repoRoot, "docs", "watchdog.md"), "utf8");
+    const installing = doc.slice(doc.indexOf("## Installing it"));
     assert.match(installing, /AGENTDECK_ORIGIN/);
     assert.match(installing, /AGENTDECK_ROOTS/);
     assert.match(installing, /AGENTDECK_PROFILES/);
@@ -1134,11 +1134,11 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
   const mentionsTimer = (text: string): boolean =>
     /60 seconds|60-second/.test(text) && /unattended|no human action|timer/i.test(text);
 
-  void test("the README's toolchain exception says the timer runs it with no human action", () => {
-    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    const start = readme.indexOf("Every one of those lines is a review gate");
+  void test("SECURITY.md's toolchain exception says the timer runs it with no human action", () => {
+    const security = readFileSync(join(repoRoot, "SECURITY.md"), "utf8");
+    const start = security.indexOf("Every one of those lines is a review gate");
     assert.notEqual(start, -1, "the toolchain exception has been renamed or removed");
-    const exception = readme.slice(start, readme.indexOf("\n## ", start));
+    const exception = security.slice(start, security.indexOf("\n## ", start));
     assert.ok(
       mentionsTimer(exception),
       "the toolchain exception does not say installing the LaunchAgent makes `scripts/` unattended",
@@ -1154,8 +1154,8 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
   void test("the install copies the script out of the checkout before pointing launchd at it", () => {
     // The fix rather than the warning: what launchd runs unattended should not be a file an agent
     // can rewrite between reviews.
-    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    const installing = readme.slice(readme.indexOf("### Installing it"));
+    const doc = readFileSync(join(repoRoot, "docs", "watchdog.md"), "utf8");
+    const installing = doc.slice(doc.indexOf("## Installing it"));
     assert.match(installing, /cp scripts\/watchdog\.mjs/);
     assert.match(installing, /AGENTDECK_REPO/);
     // And the script can actually be run from that copy, which is the half a document cannot do.
@@ -1169,7 +1169,7 @@ void describe("installing the LaunchAgent changes what `scripts/` is, and that i
     const honest = (text: string): boolean =>
       /buys\s+review\s+scope,\s+not\s+write\s+protection/i.test(text) && /interpreter/.test(text);
     for (const [what, text] of [
-      ["README.md", readFileSync(join(repoRoot, "README.md"), "utf8")],
+      ["docs/watchdog.md", readFileSync(join(repoRoot, "docs", "watchdog.md"), "utf8")],
       ["the plist", readFileSync(plist, "utf8")],
       ["plan 005", readFileSync(join(repoRoot, "plans", "005-containment.md"), "utf8")],
     ] as const) {

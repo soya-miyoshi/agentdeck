@@ -75,7 +75,7 @@ void describe("the prose states the exclusion by name, not by provenance", () =>
   ];
 
   const states: Record<string, RegExp> = {
-    "../README.md": /its name is exactly the one\nagentdeck would derive/,
+    "../SECURITY.md": /its name is exactly the one\nagentdeck would derive/,
     "../plans/005-containment.md":
       /its name equals\n> `sessionId\(that path, a configured agent\)`/,
     "./hub.ts": /whose NAME is not `sessionId\(its allowlisted path, a configured agent\)`/,

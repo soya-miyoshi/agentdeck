@@ -1,679 +1,264 @@
 # agentdeck
 
-Run coding-agent sessions on the Mac, drive them from a phone.
+Run coding-agent sessions on your Mac, drive them from your phone.
 
-One tab per repo. Each tab shows whether that agent is working, waiting for you, or
-finished, and streams its live terminal output. No database, and nothing from the stream is ever
-written down — scrollback lives in tmux for as long as tmux does. (Each agent's own state, its
-transcripts and settings, live wherever that agent keeps them. That is the agent's business, not
-ours.)
+<p align="center">
+  <img src="docs/screenshot-phone.png" alt="agentdeck on a phone: a tab strip, the New session bar, and a live Claude Code session" width="360">
+</p>
 
-Status: **planning**. No code yet — see [`plans/`](plans/).
+One tmux session per repository, one tab per session. Each tab shows whether that agent is working,
+waiting for you, or has exited, and streams its live terminal output over a WebSocket. No database:
+scrollback lives in tmux for as long as tmux does.
 
-The name is a placeholder and cheap to change while the repo is empty. It deliberately
-avoids "claude" in the product name (Anthropic's trademark guidance discourages that for
-third-party tools).
+## How it works
 
-## Why this exists rather than MulmoTerminal
+The server binds loopback only. Tailscale is what carries the phone to it, over your own tailnet
+with a real TLS certificate — nothing is exposed to the public internet.
 
-MulmoTerminal already does the hard part — PTY sessions, tmux persistence, a phone client —
-and we run it today. But it is 59,630 lines of TypeScript, 91 `/api/*` routes and 999 npm
-packages, of which the parts these requirements need are the ~8,000-line session layer.
-Everything else (collections, feeds, accounting, wiki, calendar sync, slide and diagram
-rendering, an MCP broker) is code we do not use, do not maintain, and cannot review — which
-is attack surface, not free functionality. Its packages also come from an upstream author we
-have decided not to track.
+```
+   iPhone / iPad                              Your Mac
+ ┌───────────────┐                ┌──────────────────────────────────────┐
+ │  PWA          │                │  tailscaled                          │
+ │  tab strip    │   HTTPS / WSS  │    └─ tailscale serve :443           │
+ │  xterm.js     │◀──────────────▶│         └─▶ 127.0.0.1:7777           │
+ │  status dots  │    tailnet     │              agentdeck (node)        │
+ │  key row      │    only        │                ├─ node-pty           │
+ └───────────────┘                │                ├─ session registry   │
+   bearer token in                │                └─ ring buffer (RAM)  │
+   localStorage                   │                       │              │
+                                  │              tmux -L agentdeck       │
+                                  │                ├─ session: repo-a    │
+                                  │                ├─ session: repo-b    │
+                                  │                └─ session: repo-c    │
+                                  │              one per ghq repository  │
+                                  └──────────────────────────────────────┘
+```
 
-The requirement set here is small enough to own completely. That is the point.
+- The **allowlist** is the set of directories a session may start in. `make start` fills it from
+  `ghq root --all`, so every repository you have cloned with ghq is startable and a new clone needs
+  no restart.
+- A **bearer token** guards every `/api` route and the WebSocket upgrade. It is generated on first
+  run and printed as a QR code for the phone.
+- **tmux owns the processes.** Stopping or restarting the server does not stop your agents; the
+  restarted server adopts them back.
 
 ## Requirements
 
-1. Multiple concurrent agent sessions, one per repository.
-2. **More than one kind of agent, with none privileged.** Claude Code, Gemini, whatever comes
-   next — side by side in one tab strip, any of them able to orchestrate other models from
-   inside its own session. See [`plans/004-agent-profiles.md`](plans/004-agent-profiles.md).
-3. Reach them from a phone, off the local network.
-4. Tabbed UI: one tab per session.
-5. Per-tab status: working / waiting for input / exited.
-6. Per-tab live output stream.
-7. No persistence requirement beyond the working day.
-8. Infrastructure cost: zero.
+- **macOS**, with **tmux** installed.
+- **Node 22.18+** and **pnpm 9** (both pinned in `mise.toml` — `mise install` gets them).
+- **[ghq](https://github.com/x-motemen/ghq)**. agentdeck's default launch path derives its allowlist
+  from `ghq root --all`, so your repositories are expected to live under a ghq root. Without ghq,
+  set `AGENTDECK_MOUNTS` by hand instead (see [Environment](#environment)).
+- **[Tailscale](https://tailscale.com/)** on both the Mac and the phone. This is not optional for
+  phone access: the server listens on `127.0.0.1` and never on a LAN address.
+- At least one agent CLI you want to run — Claude Code, Gemini CLI, or just a shell.
 
-## The shape of the answer
-
-Requirement 6 is what decides the architecture. A live stream wants a socket, not a document
-store — MulmoTerminal's phone client polls a Firestore document every 2 seconds, which costs a
-read per poll and lags by up to that long. And requirement 6 means the stream never has to be
-written down at all.
-
-Tailscale already connects the phone to the Mac, so there is no relay problem left to solve.
-Together that removes the entire cloud tier:
-
-```
-Phone (PWA)                        Mac (host)
-┌───────────────┐          ┌────────────────────────────────────────────┐
-│ tabs          │   WSS    │ tailscaled ─ tailscale serve               │
-│ xterm.js      │◀────────▶│      │ loopback :port                      │
-│ status dots   │  tailnet │      └─▶ agentdeck server                  │
-└───────┬───────┘          │            ├ node-pty ─ tmux (own daemon)  │
-        │                  │            ├ session registry              │
-        │                  │            └ ring buffer (memory)          │
-        │  optional: alerts while the app is closed                     │
-        └──▶ Cloudflare Worker + VAPID (free tier)                      │
-                           └────────────────────────────────────────────┘
-                             one allowlist entry per repository worked in
-```
-
-**No database.** Scrollback lives in tmux, and a bounded in-memory ring buffer covers instant
-repaint on reconnect. Redis, D1 and Firestore were all considered and are all unnecessary — see
-[`plans/001-architecture.md`](plans/001-architecture.md).
-
-**It runs on the Mac, as you.** There is no boundary between an agent session and the machine:
-an agent that runs `rm -rf ~` or a poisoned `curl | sh` reaches the home directory, the SSH keys,
-the browser profiles and every other repository. This was a container once, and
-[`plans/005-containment.md`](plans/005-containment.md) is kept as the best account of what that
-bought and what its removal costs. The remaining lever is the `cwd` allowlist — a short list of
-the repositories actually worked in — and it decides where a session _starts_, not where it can
-reach. A git remote is what protects the work.
-
-**Decided, not installed:** [`plans/008-separate-user.md`](plans/008-separate-user.md) moves the
-server to a dedicated non-administrator macOS account, started at boot by a root-owned
-`LaunchDaemon` that nobody logs into. That returns most of the paragraph above — the home
-directory, the SSH keys, the browser profiles, the other repositories — to being out of reach, and
-puts the list of host-executed files below inside an account with no `sudo` and no write access to
-`/opt/homebrew`. None of it has been run. Everything on this page describes the machine as it is
-today, which is a single account.
-
-The blast radius therefore includes agentdeck's own repository, and that is the one whose contents
-the host then executes: the `package.json` scripts, `pnpm-lock.yaml`
-(pnpm 9 runs dependency lifecycle scripts, so a rewritten resolution entry is host execution at
-the next install), any lint, format or toolchain config the host tool discovers for itself —
-`eslint.config.*`, `.prettierrc*` (prettier imports every entry of its `plugins` array as
-JavaScript), `.mise*.toml` and `mise-tasks/` (mise runs `[env] _.source` and `[tasks]` on the
-host, and auto-discovers more filenames than the one we happen to have) —
-`src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and
-the suite already shells out), `src/fixtures/` (imported by test files, so `node --test` runs it
-too even though the glob above does not match it), `src/client/public/` (Vite copies it verbatim into `dist/client`,
-which this server publishes with no bearer token — and that copy dereferences symlinks, so an entry
-there becomes a real file holding whatever it pointed at), `.claude/`, `.github/workflows/`,
-`.git/config`, `.git/hooks/`
-and everything under `node_modules` and `.pnpm-store` are all agent-writable, so running the
-toolchain runs agent-authored code on the Mac with your identity. `.claude/` is the one with no
-build step in front of it: `.claude/skills/*/SKILL.md`,
-`CLAUDE.md` and `.claude/settings.json` are loaded by a Claude Code process running on the Mac, so
-merely starting an agent session in this repo on the host is the trigger — and the iterate skill
-is also what prescribes this review, so an agent that edits it edits its own gate. `.git/config`
-and `.git/hooks/` have a weaker trigger still: `git` itself runs them, so `[core] pager`, an
-`[alias]` with a `!` prefix or a `textconv` entry turns the review command into the payload, and
-a `post-checkout` or `pre-push` hook fires on the ordinary branch-and-merge workflow with the
-human's identity and `~/.ssh` in reach. `.github/workflows/` is executed by a GitHub runner and
-declares its own `permissions:`, so reviewing the workflow before pushing is the only thing that
-bounds the token it gets. `node_modules`, `.pnpm-store`, `.git/config` and `.git/hooks/` are the
-ones review misses — none of them is tracked, so `git status` says
-clean after an agent rewrites `node_modules/.bin/eslint` or `.git/hooks/pre-push`. All four are
-covered by extra commands in the checklist below rather than by a boundary, which is weaker and is
-stated as such.
-
-The user's bearer token stays out of any directory a session is pointed at, for the same reason:
-the root of a working tree — where an agent's `ls -la` or `grep -rn token .` meets it — is the one
-place it must not be. It lives in `~/.agentdeck/token`, created 0600 on first run;
-`AGENTDECK_TOKEN_FILE` moves it. **The server refuses to start if that path resolves inside an
-allowlist entry**, which is the rule made executable rather than written down three times.
-
-The run that creates that file — first run, and every run after the file is deleted — prints the
-token to the terminal as a QR code, with the URL to open beside it as text. Scan the code with the
-phone's camera and paste the result into the app's token field; the field is also there for typing
-it by hand if the camera is not to hand. **The QR carries the token alone and not a URL containing
-it**: a scanned `?token=...` would sign the phone in with one tap and leave the credential in
-browser history, in the `Referer` header of every request the page makes, and in the log of
-anything sitting in front of the server. The URL printed beside it is `AGENTDECK_ORIGIN` when that
-is set, and the loopback address the server is actually listening on when it is not — this process
-cannot know whether a `tailscale serve` exists in front of it, so it does not claim one.
-
-**That printed block is the credential, so do not do the first run in a pane that is being
-recorded.** The token has a second home the two boot refusals cannot reach - they check where the
-FILE is, and this is scrollback. `capture-pane -p -e` preserves the escape sequences the QR is made
-of, and agentdeck itself runs that on every cold attach, so a QR printed into a tmux pane comes back
-verbatim; the same goes for `pipe-pane`, `script`, Terminal.app and iTerm2 session logging, and a
-screen recording. Starting the server inside tmux is the ordinary way to keep it alive on a Mac,
-which is exactly when this bites. agentdeck prints nothing when stdout is not a terminal, which
-covers a pipe and a launchd log file, but a TTY that is being recorded is still a TTY. If the first
-run happened somewhere that keeps a transcript, treat the token as disclosed: delete the file,
-restart, and re-scan on each device.
-
-The allowlist is a boundary and not only a check on `POST /api/sessions`: agentdeck lists,
-attaches to and streams the sessions whose directory is on it, and ignores everything else on the
-tmux socket. That socket is `/tmp/tmux-<uid>/agentdeck` and every process running as you can write
-it, so without this a `tmux -L agentdeck new-session -d -c / -- /bin/sh` typed by anything at all
-becomes a tab your phone can type into.
-
-Two consequences worth knowing, both deliberate. A session on the agentdeck tmux socket becomes a
-tab iff its directory (the one tmux reports) is allowlisted **and** its name is exactly the one
-agentdeck would derive for that directory and a configured agent. What is excluded is a session
-whose name does not match — not a session agentdeck did not start, so a hand-started session
-under a matching name **is** listed and typed into. And adding a newly cloned repo means adding it to the allowlist and
-restarting the server. Sessions running at that moment survive it in most of the ways that matter:
-tmux keeps the processes alive, and the restarted server adopts them back — their directory comes
-from tmux and their agent from the session id, so they are listed, attachable and streamed again,
-allowlist-checked on the directory tmux reports exactly as everything else is. The per-session hook
-secret comes back too: it is **derived**, `HMAC(bearer token, session id)`, so a restarted process
-recomputes the value the running agent already holds instead of having to be told it. That is what
-stops a restart — including the unattended one the watchdog performs — muting every tab. The residual
-is that anything holding the token can now compute every session's secret; nothing an agent holds
-gets it there, and the token already starts and kills sessions anywhere on the allowlist.
-Why git push credentials stay away from the agent is in
-[`plans/005-containment.md`](plans/005-containment.md).
-
-## Environment
-
-Every variable the server reads. All of them are optional; the row says what an unset one means.
-
-| Variable                    | Default                    | Unset means                                                                                                                                                                                                                  |
-| --------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AGENTDECK_PORT`            | `7777`                     | Loopback only either way; `tailscale serve` decides exposure.                                                                                                                                                                |
-| `AGENTDECK_TOKEN_FILE`      | `~/.agentdeck/token`       | Generated 0600 on first run. Never inside an allowlist entry — the server refuses to start.                                                                                                                                  |
-| `AGENTDECK_MOUNTS`          | empty                      | Colon-separated absolute paths, fixed at boot; exact match, never prefix. With `AGENTDECK_ROOTS` also empty, **no directory is startable**.                                                                                   |
-| `AGENTDECK_ROOTS`           | empty                      | Colon-separated absolute paths to scan for repositories, re-read on every check — a clone made while the server runs is startable with no restart. `ghq root --all` is what `make start` passes. The root itself is not startable. |
-| `AGENTDECK_PROFILES`        | none                       | No agents, so nothing to start. See `agents.example.json`, and copy it somewhere outside every allowlist entry — it decides what command each session runs, and the server refuses to start if it is inside one.             |
-| `AGENTDECK_AGENT_STATE_DIR` | `~/.agentdeck/agent-state` | Hook settings land there, and an agent only reads them if its profile points it there.                                                                                                                                       |
-| `AGENTDECK_TURNS_DIR`       | `~/.agentdeck/turns`       | Where the turn log lives (plan 007): one 0600 JSONL file per session, holding what each turn asked and what the agent answered, in plain text. It outlives the tmux session and the reboot.                                   |
-| `AGENTDECK_UPLOAD_DIR`      | `~/.agentdeck/uploads`     | Where an image sent from the phone is written, 0600, one directory per session, newest 20 kept. Outside every allowlist entry on purpose: a screenshot is not the work, and the agent is handed the path rather than the bytes. |
-| `AGENTDECK_ORIGIN`          | none                       | **The Origin check plan 001 describes is off**: `/api` and `/ws` accept any Origin, so any page the browser visits can drive the socket with a token it holds. Set it to the `https://<host>.ts.net` origin the phone loads. |
-| `TMUX_SOCKET`               | `agentdeck`                | The `-L` name. Sessions are found on this socket and nowhere else.                                                                                                                                                           |
-| `AGENTDECK_REAP_INTERVAL_MS` | `3600000`                 | How often the running server collects what sessions leave behind. **It kills processes**, including what an agent started inside a live pane, so it announces itself on boot. `0` turns it off. `make reap` shows a pass without acting; `AGENTDECK_REAP_KEEP` is the pattern the timed pass spares inside a live pane (MCP servers by default); `scripts/reap.mjs` documents the rest of the `AGENTDECK_REAP_*` knobs. |
-
-A session's own environment is **built, not inherited**: a pane gets `PATH`, `HOME`, `SHELL`,
-`TERM`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`, `LOGNAME`, plus whatever names that agent's profile
-lists in `env`. Nothing else from the shell that ran `pnpm start` reaches it — `SSH_AUTH_SOCK`
-above all, since a forwarded ssh-agent is `git push --force` to every repository that key reaches.
-
-**What that bounds is what a pane INHERITS, and not what its own shell puts back.** `HOME` has to
-be on the list, so a login or interactive shell in the pane reads the operator's dotfiles and
-re-exports whatever they export. If `~/.zprofile` sets `SSH_AUTH_SOCK` to the 1Password or
-`ssh-agent` socket — the setup those tools document — then every shell started under it has the
-forwarded agent again, and so does every command Claude Code runs, since it execs a login-shell
-snapshot of the same rc files. The shipped `agents.example.json` therefore starts `/bin/zsh` with
-no `-l`, but that only covers the profile we ship: keeping a credential out of a session means
-keeping it out of the dotfiles `HOME` points at, and there is no way for this server to enforce
-that.
-
-The inheritance bound holds even when the tmux server was not ours to begin with. `start-server`
-does nothing to a socket that already has a live server — and attaching to an orphaned session,
-which the refusal text tells you to do, starts one from your shell. So at boot agentdeck also
-clears every variable off the server's _global_ environment that is not on the list above, and
-logs the names it cleared. Without that the client half bounds nothing, and emptying
-`update-environment` would make it worse rather than better: tmux's own default list names
-`SSH_AUTH_SOCK`, so the default was overwriting it from our clean client by accident.
-
-## Driving it from a browser
-
-The client is Vue plus `@xterm/xterm` and `@xterm/addon-fit`. `pnpm build` writes it to
-`dist/client` and the server serves it from there on 7777, so the app and the API are one origin
-— that is the path the phone uses. For iterating on the client itself the page comes instead from
-Vite's dev server, which proxies `/api` and `/ws` to the server on 7777, and the two caveats below
-are about that flow only.
-
-```
-# one terminal: the server
-AGENTDECK_MOUNTS=/absolute/path/to/a/repo AGENTDECK_PROFILES=~/agentdeck-agents.json pnpm start
-
-# another: the page
-pnpm dev
-```
-
-Rather than retyping that line, `make start` reads the environment from `.env` (copy
-`.env.example`; Node's `--env-file` does no expansion, so every path in it must be absolute) and
-sets `AGENTDECK_ROOTS` to `ghq root --all`. The server walks those roots on every check rather than
-at boot, so a repository cloned while it is running is in the picker at the next tap of `New
-session` — no edit and no restart. `make mounts` prints the roots and what is under them, and `make stop` ends the server on
-`AGENTDECK_PORT` — but not the work, since tmux keeps the agents and a restart adopts them back. A variable
-set in the shell still wins over the file, so any one entry can be overridden per launch.
-
-`make restart` is the one to use **from the phone**, or from a pane inside the deck. `make stop`
-followed by `make start` cannot work from there: `start` runs in the foreground, so stopping the
-server kills the socket carrying the keystrokes before the second command is ever read. `restart`
-stops, waits for the port to actually be released, and relaunches detached with its output appended
-to `~/.agentdeck/server.log` (`AGENTDECK_LOG`). The agents are untouched either way — what a
-restart costs nothing a session needs: the hook secret is derived, so `waiting` detection comes back
-with the session. Agents started before that change hold a random one and cannot match — the first
-refused hook marks their tab `muted`, and restarting that agent is what clears it.
-
-`make up` starts the deck **with the watchdog supervising it**, which `start` and `restart` do not.
-`scripts/watchdog.mjs` is one pass and launchd is what repeats it, so this is a loop that runs a
-pass every 60 seconds (`AGENTDECK_WATCHDOG_EVERY`) for as long as it lives — it does **not** survive
-a reboot or a logout, which is exactly what the LaunchDaemon in `scripts/` is for. There is no
-separate server start: a pass against a port with nothing on it starts one, so bringing up the
-supervisor brings up the deck through the same code path that will recover it later. `.env` is
-sourced into the loop rather than only into a server, because the watchdog spawns `src/server.ts`
-itself with no `--env-file` and a server it recovers inherits the loop's environment.
-
-`make down` stops the loop and then the server, in that order — the other way round is the watchdog
-dutifully restarting what was just stopped. `make stop` says so loudly if the loop is running, since
-otherwise it reads as `stop` being broken when the server reappears a minute later.
-
-Open the URL Vite prints, paste the token from `~/.agentdeck/token` into the field, and the tab for
-your session appears.
-
-Two things about the dev flow specifically, neither of which applies to the built bundle the
-server serves, where the app and the API are already one origin. **`AGENTDECK_ORIGIN` must be
-unset for this**, or set to the Vite
-origin: the proxy leaves the browser's `Origin` header alone, so a server configured with the
-`https://<host>.ts.net` origin answers 403 to the upgrade and to every `/api` call — and the client
-cannot tell that from a network failure, so it reconnects forever instead of saying so. And the
-token you paste is stored in `localStorage`, which is keyed by origin, so the dev server is pinned
-to port 7778 rather than Vite's shared default — on 5173 every other Vite project on the machine
-would share an origin with the credential that starts sessions in every allowed repository. Type in
-the box above the key row and press Send: the text goes out as `input` frames, and what paints back
-is the agent's own output arriving as `chunk`s — nothing is echoed locally, because the agent may be
-in a mode that transforms or refuses what you typed.
-
-Two things worth doing by hand, because they are what the design is for. Paste a few hundred
-kilobytes of log into the box — it arrives whole and the socket stays up, the client having cut it
-into frames under the receiver's limit. And lock the phone, or pull the network for a while, then
-come back: the tab repaints rather than showing a hole.
-
-A source of directories and `AGENTDECK_PROFILES` are not optional in practice — with neither
-`AGENTDECK_ROOTS` nor `AGENTDECK_MOUNTS` set there is no directory to start a session in, and with
-no profiles there is no agent to start. See the Environment table above.
-
-Automated, the same path is `src/client/end-to-end.test.ts`: the real client modules against a real
-server process, a real tmux session and a real `/bin/sh`, over a real WebSocket. Everything below
-the two pieces that need a DOM.
-
-## Typing: the box, not the terminal
-
-**The pane takes no keystrokes.** Everything you type goes into the box above the key row and
-reaches the pty on one submit. Typing straight into xterm cost a network round trip per character
-before anything appeared — the pty's echo is the only thing that paints — there was nothing to
-long-press for the OS's paste menu, and a Japanese IME's half-composed text went to the agent as it
-was being composed. A textarea has all three for free.
-
-- **Send** appends CR, which is what submits a line at a pty or a prompt in an agent's TUI.
-- **Insert** sends the text and nothing else, for a path or a fragment you want to add to.
-- Newlines inside the box stay LF, so a pasted five-line question is one turn and not five.
-- **Copy**, in the New session bar, puts the pane's text on the clipboard — the selection if there
-  is one, the visible screen if not. The pane claims every touch gesture so that dragging scrolls
-  it, which is the same gesture iOS would have used to select, so on a phone this is the only way
-  anything on that screen leaves it.
-- An uploaded image's path lands in the box rather than on the wire, so the question can be written
-  beside it before anything is sent.
-
-The terminal is made read-only at its helper textarea rather than with xterm's `disableStdin`,
-which gates xterm's whole data event: the terminal's own replies to the agent's escape sequences —
-DSR, DA — would stop reaching the pty with it, and a TUI that asks where the cursor is would wait
-forever for an answer nobody sent.
-
-## Answering a prompt from the phone
-
-A soft keyboard has no Escape, no Tab, no arrows and no Ctrl, and those are precisely the keys an
-agent's permission prompt is answered with. The row of text caps along the bottom of the app is
-those keys: Esc, Tab, Left, Down, Up, Right, Enter and Ctrl. They are bytes to a pty rather than DOM
-key events — `0x1b`, `0x09`, `0x0d` (CR, not LF: the pty's line discipline is what turns it into a
-line), `ESC [ A` or `ESC O A` depending on the terminal's application-cursor-keys mode (DECCKM),
-which `src/client/key-row.ts` reads off xterm rather than guessing — and they go out through the
-same paced `Connection.input` every other keystroke uses.
-
-**Ctrl latches rather than being held.** There is one thumb, so the second press is a separate
-event: tap Ctrl, and the next thing sent from that tab is sent as its control code and the latch is
-spent. From the row that is the next cap; from the box it is the first character of the submit, with
-no CR behind it — Ctrl is a modifier on a key, not on a line. **Ctrl then `c` then Send is `0x03`**,
-and it is the only route to an interrupt now that nothing sends characters as they are typed. The
-cap is highlighted while the latch is armed, the Send button reads `Ctrl+`, and tapping Ctrl again
-disarms it.
-
-Automated, against real things: `src/client/end-to-end.test.ts` answers a shell `read` that is
-BLOCKED — the answer is typed, nothing happens, Enter is what commits it — interrupts a `sleep 300`
-with the latch, completes a filename with Tab, and reads Esc and the arrows back out of `cat -v`.
-Real server, real tmux, real pty, real shell. One thing measured there is worth knowing before
-debugging an arrow: tmux parses its client's input as keys and re-encodes them for the pane, so
-`ESC O A` reaches a pane that has not set DECCKM as `ESC [ A`.
-
-**NOT demonstrated: a thumb on a phone.** The only other tailnet device has been offline, so
-"answered from the phone" is unproven here. For someone holding one:
-
-1. `pnpm build`, start the server, open the deck on the phone and paste the token.
-2. Start a session with an agent that asks — claude, in a repository where it will want to edit a
-   file — and give it a task that needs permission.
-3. When the prompt appears, answer it with the row rather than the keyboard: the arrows to move
-   between the choices, Enter to take one, Esc to back out.
-4. Interrupt something with Ctrl, `c` and Send, and check the agent stops rather than the character
-   `c` appearing in the prompt.
-5. Check the row itself in standalone mode, where the insets are non-zero: the caps must sit above
-   the home indicator, and the row's background must run under it.
-6. The box, which has never been held: tapping it must not zoom the page, the app must not jump when
-   the keyboard opens, a long-press must offer Paste, and dictation must reach it. Copy something out
-   with the Copy button and paste it somewhere else on the phone.
-
-## Installing to the home screen
-
-The built client ships a manifest (`/manifest.webmanifest`, `display: standalone`), its icons, and
-a service worker at `/sw.mjs`. `src/pwa.test.ts` checks all of that against the real build served by
-the real server: the manifest parses and is served as `application/manifest+json`, every icon it
-names exists at the size it claims, the worker is served from the root as JavaScript with a
-`no-cache` header, and the safe-area insets and 44px touch targets survive into the built CSS.
-
-**The install itself has not been demonstrated.** It needs a phone, and the only other tailnet
-device has been offline. Nothing in this repository has been observed launching without browser
-chrome. To confirm the remaining half, on an iPhone:
-
-1. Finish `m4/tailscale-serve` first. Safari will not register a service worker outside a secure
-   context, and iOS will not treat a plain-`http` page as installable, so the deck has to be
-   reached over its `https://<host>.ts.net` URL — not over `http://<mac>:7777`.
-2. `pnpm build`, then start the server, and open that HTTPS URL in **Safari** (Chrome on iOS cannot
-   add to the home screen).
-3. Share, then **Add to Home Screen**. The icon shown should be the blue prompt mark, not a
-   screenshot of the page — a screenshot means the `apple-touch-icon` did not load.
-4. Launch it from the home screen. It should open with no address bar and no toolbar. That is the
-   done-when.
-5. Check the layout in that mode specifically, because it is the only mode where the insets are
-   non-zero: the tab strip must sit below the status bar with its own background running up under
-   it, and the terminal's bottom rows — the cursor, and any permission prompt — must sit above the
-   home indicator rather than under it.
-6. In Safari on the Mac, with the phone attached, Develop > the device > Service Workers should
-   show one worker for the origin, scope `/`, and no storage under Caches. If anything appears
-   under Caches, something other than `public/sw.mjs` put it there.
-
-### Two consequences of installing, both about the token
-
-**The `.ts.net` hostname has to be agentdeck's alone.** The manifest takes `scope: "/"` and the
-worker registers at the root, and the token lives in `localStorage`, which is keyed by ORIGIN and
-not by path. So mounting a second service on the same hostname — `tailscale serve --set-path` is
-the ordinary way to do that — gives it read access to a credential that starts sessions in every
-allowed repository, kills live ones and attaches to every other agent's terminal. This is the same
-reasoning that moved the dev server off Vite's shared default port. If you ever want a sibling
-service there, the deck has to move under a path prefix first, and the manifest's `scope` and
-`start_url` and the `register()` URL move with it.
-
-**Installing makes the token permanent, and there is no revocation.** An installed iOS web app gets
-its own storage partition and is exempt from Safari's eviction of script-writable storage, so the
-token stops being purged after a week of disuse and lives until the app is deleted. It also now
-exists in two partitions — the installed app cannot see the one you pasted into Safari, so you will
-paste it twice. The server has no expiry and no revocation list: the only way to invalidate a token
-is to delete the token file and restart, which invalidates it for every device at once and means
-pasting the new one into each of them again.
-
-### Removing a worker that should not be running
-
-Delete `src/client/public/sw.mjs`, run `pnpm build`, and restart the server. `/sw.mjs` then answers
-404 — the static handler never falls back to `index.html` for a path that names a file — and 404 is
-the one response that makes a browser drop the registration on its next update check, so reloading
-the page on the phone unregisters the worker. A 200 with HTML would not: the browser reads that as
-a failed update and keeps running the worker it already has. `src/pwa.test.ts` holds the 404.
-
-## The watchdog
-
-Nothing on this Mac supervises the node process. tmux is a daemon of its own, so a crash leaves
-every agent alive and the server gone: the work survives, the phone gets nothing, and the recovery
-is a person opening a terminal (`src/supervisor-crash.test.ts` is the measurement of exactly that).
-`scripts/watchdog.mjs` is the answer, and `scripts/com.agentdeck.watchdog.plist` is the LaunchAgent
-that runs it every 60 seconds.
-
-One pass does three things: finds the node process holding the port, probes
-`http://127.0.0.1:<port>/api/health`, and checks whether `tailscale serve` is still configured for
-it. What it does about the answer:
-
-| It sees                                             | It does                                                                                                                                                  |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A 200, however slow                                 | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict.                                                             |
-| Nothing listening                                   | Starts the server at once. There is no socket to drop and no snapshot to lose.                                                                           |
-| Accepted and silent for 15s, or a 503               | Counts it. Three consecutive passes — three minutes — before it restarts anything.                                                                       |
-| Still unhealthy after two restarts                  | Stops. Marks the state file `gaveUp` and puts a critical dialog on the screen. A server that is down and known to be down beats one killed every minute. |
-| `tailscale serve` never configured                  | Says so and carries on. That is `m4/tailscale-serve`, which is not built.                                                                                |
-| `tailscale serve` configured last pass and gone now | Notifies. That is the reboot case, and it is an outage.                                                                                                  |
-
-The 15-second probe timeout is five times what the server gives its own `tmux list-sessions` round
-trip. That gap is the whole point: a busy machine, a large capture or a wedged tmux makes a healthy
-server slow, and restarting it drops every phone's socket and every tab's snapshot for nothing.
-
-A restart is announced, never silent — `osascript` puts a banner up saying the tmux sessions were
-kept, because a restart notification that does not say so is one you learn to fear. State between
-passes lives in `~/.agentdeck/watchdog-state.json`; the log is
-`~/Library/Logs/agentdeck-watchdog.log`. The server the watchdog starts writes its own output to
-`~/Library/Logs/agentdeck-server.log` (`AGENTDECK_SERVER_LOG` moves it) — a separate file, because
-those are the server's words rather than the watchdog's, and a server that refuses to boot says why
-in one line before it exits. Without that file the watchdog would report "started" and then, three
-minutes later, "still unhealthy after two restarts", with the sentence explaining why sent nowhere.
-
-It cannot fight a sleeping Mac. With the lid shut nothing runs, and Energy Saver or `caffeinate` is
-the only answer.
-
-### Installing it
-
-**The repository does not install this** — no package script, mise task or other script here runs
-`launchctl`, and `src/watchdog.test.ts` asserts that. The install is the operator's, by hand. Read
-the plist first: check the node binary, both script paths and the log path against your own
-checkout, since launchd expands neither `~` nor `$PATH`.
-
-**Fill in the environment block as well as the paths.** The watchdog spawns the server with its own
-environment, so under launchd the plist _is_ the server's environment and nothing you exported in
-the shell you normally run `pnpm start` from is there. `AGENTDECK_ORIGIN` in particular: absent, the
-Origin check on every `/api` route and every `/ws` upgrade is off, so the recovered server is less
-protected than the one it replaced. Three things — a source of directories (`AGENTDECK_ROOTS` or
-`AGENTDECK_MOUNTS`, either alone will do), `AGENTDECK_PROFILES` and `AGENTDECK_ORIGIN` — are what
-the watchdog refuses to start a server without: it logs it and
-puts a banner up instead of quietly producing a server with an empty allowlist, no agents or no
-Origin check. Add `AGENTDECK_TOKEN_FILE` and
-`AGENTDECK_AGENT_STATE_DIR` if you moved them off their defaults. `AGENTDECK_REPO` is already in
-the plist and has to stay, because `ProgramArguments` names the copy outside the checkout.
-
-**A `.env` is not part of this.** `make start` loads one; the watchdog spawns
-`node src/server.ts` with no `--env-file`, so the plist is the whole environment and anything you
-keep in `.env` has to be repeated there or the recovered server does not have it.
-
-**Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file in this
-repository, which agents working here can write — as you, every 60 seconds, with no human action.
-Everywhere else `scripts/` is executed by a command a person types after the review under
-[Toolchain](#toolchain); a timer is not. So `ProgramArguments` names a copy outside the checkout
-and the install step is a `cp` — which also means **every later change to `scripts/watchdog.mjs`
-has to be copied across by hand**, or the timer goes on running the old one. That re-copy is the
-gate, not an oversight. **The copy buys review scope, not write protection.** Both files
-launchd executes stay writable by this uid — `~/.agentdeck/bin/watchdog.mjs` and the mise node
-named as `ProgramArguments[0]` — so anything running as you can still rewrite the script and the
-interpreter, and because the copy lives outside the checkout that edit is one `git status` and
-`git diff` cannot see. Only a root-owned script and a root-owned interpreter would close it, and
-this repository does not install either. It does not close the whole hole elsewhere either: the
-watchdog still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable code
-as you either way, and only running the server from a checkout an agent cannot write closes that
-(audit.md). Nor does the copy move `~/.agentdeck/watchdog-state.json`: that file is part of the
-policy too — its give-up latch stops the watchdog restarting anything — and anything running as you
-can write it, which is why a latched pass still probes and re-alerts hourly instead of going quiet.
+## Setup
 
 ```sh
-mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs
-cp scripts/com.agentdeck.watchdog.plist ~/Library/LaunchAgents/
-# AGENTDECK_ORIGIN is REPLACE_ME in the repository copy on purpose - the tailnet name is this
-# machine's, not the project's. Fill it in the INSTALLED copy; the watchdog treats the sentinel
-# exactly as it treats an absent value, and refuses to start a server rather than one with the
-# Origin check off.
-plutil -replace EnvironmentVariables.AGENTDECK_ORIGIN -string "https://<host>.ts.net" \
-  ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
-launchctl kickstart -p gui/$(id -u)/com.agentdeck.watchdog   # run one pass now
-launchctl print gui/$(id -u)/com.agentdeck.watchdog          # is it loaded, what did it exit
-tail -f ~/Library/Logs/agentdeck-watchdog.log
+mise install
+pnpm install --frozen-lockfile
+pnpm build            # builds the phone client into dist/client
 ```
 
-To take it away again, which also leaves the machine as it is today:
+**1. Agent profiles.** These decide what command each session runs, so keep the file **outside**
+every repository an agent can write. The server refuses to start if it is inside an allowlisted
+directory.
 
 ```sh
-launchctl bootout gui/$(id -u)/com.agentdeck.watchdog
-rm ~/Library/LaunchAgents/com.agentdeck.watchdog.plist
+mkdir -p ~/.agentdeck
+cp agents.example.json ~/.agentdeck/agents.json
 ```
 
-After it has given up, it stays given up until you say otherwise: `rm
-~/.agentdeck/watchdog-state.json`, then `launchctl kickstart`.
+```json
+{
+  "claude": {
+    "name": "Claude Code",
+    "command": "claude",
+    "waiting": { "via": "hook", "settings": "settings.json" }
+  },
+  "shell": { "name": "Shell", "command": "/bin/zsh" }
+}
+```
 
-You can run a pass by hand at any time without launchd, which is how the logic was demonstrated:
+**2. `.env`.** Copy the example and edit it. Node's parser does no expansion, so every path must be
+absolute — no `~`, no `$HOME`.
 
 ```sh
-AGENTDECK_WATCHDOG_STATE=/tmp/watchdog-state.json node scripts/watchdog.mjs
+cp .env.example .env
 ```
 
-## From the phone: `tailscale serve`
-
-The server binds `127.0.0.1` and nothing else. `tailscale serve --bg 7777` on this Mac is the one
-place remote exposure is decided; it puts a real certificate on the machine's `ts.net` name and
-proxies to the loopback port. Never `tailscale funnel` — that is the public internet, and nothing
-here is built to survive it.
-
-With the server already running, one command does it and checks its own work:
-
+```sh
+AGENTDECK_PROFILES=/Users/you/.agentdeck/agents.json
+AGENTDECK_ORIGIN=https://your-mac.your-tailnet.ts.net
 ```
+
+## Tailscale
+
+Two switches are **off by default** in the Tailscale admin console, and both are needed:
+
+- **HTTPS Certificates** — <https://login.tailscale.com/admin/dns>
+- **Serve** — for your tailnet
+
+With Serve off, `tailscale serve` **hangs** rather than failing, which reads like a wedged machine
+rather than a refusal. With the server already running:
+
+```sh
 AGENTDECK_PORT=7777 node scripts/tailscale-serve.mjs
 ```
 
-It reads `tailscale status --json` first and **refuses** if either switch below is off, because
-running `tailscale serve --bg` in that state hangs rather than fails; every call it makes has a
-timeout, and a hang is reported with the enable link the CLI printed. Then it applies the proxy,
-checks `tailscale serve status` names the port, fetches `/api/health` over loopback and again over
-the `ts.net` URL, and finishes by printing the exact `AGENTDECK_ORIGIN=` line to restart with. It
-exits non-zero on any of those, so a green run is the whole verification.
+That script checks both switches first, applies the proxy, verifies `/api/health` over both loopback
+and the `ts.net` URL, and prints the exact `AGENTDECK_ORIGIN=https://<host>.ts.net` line to put in
+your `.env`. It exits non-zero on any failure, so a green run is the whole verification.
 
 By hand, the same thing:
 
-```
-tailscale serve --bg 7777       # with a timeout: it blocks forever if Serve is not enabled
+```sh
+tailscale serve --bg 7777       # run with a timeout: it blocks forever if Serve is off
 tailscale serve status          # what is configured, and the https:// URL
-tailscale serve reset           # take it down again
+tailscale serve reset           # take it down
 ```
 
-**Two tailnet settings are off by default and the CLI will not tell you which one bit you.** Both
-are at <https://login.tailscale.com/admin/dns>, and agentdeck reports at boot which of them this
-machine is missing, by name, along with the URL and the exact `AGENTDECK_ORIGIN` value:
+**Never `tailscale funnel`.** That is the public internet, and nothing here is built to survive it.
 
-- **Serve**, for the tailnet. Without it `tailscale serve --bg` prints an enable link
-  (`https://login.tailscale.com/f/serve?node=…`) and then **never exits** — it blocks waiting for
-  someone to click it, so a script or a `launchd` job hangs rather than fails. Run it with a
-  timeout.
-- **HTTPS Certificates**. Without them there is no certificate for the `ts.net` name at all;
-  `tailscale cert <name>` answers `your Tailscale account does not support getting TLS certs`, and
-  `tailscale status --json` reports a null `CertDomains`, which is what agentdeck reads.
+Give agentdeck its own `ts.net` hostname. The token lives in `localStorage`, which is keyed by
+origin, so any other service mounted on the same hostname can read a credential that starts and
+kills sessions in every allowed repository.
 
-Behind the proxy the page, `/api` and `/ws` are all the same origin — the `https://<host>.ts.net`
-one — so the dev-flow caveats above do not apply, and this is the run where the `Origin` check can
-actually be on. Set it to the value the boot log names:
+## Running it
 
-```
-AGENTDECK_ORIGIN=https://<host>.tailXXXXXX.ts.net pnpm start
+```sh
+make start      # foreground, allowlist from `ghq root --all`
+make stop       # stops the server, not the agents
+make restart    # detached restart; safe to run from inside the deck itself
+make up         # start with the watchdog supervising (restarts a crashed server)
+make down       # stop the watchdog, then the server
+make mounts     # the roots, and what is startable under them right now
 ```
 
-**Neither half of this is demonstrated on this Mac** (2026-08-09): both switches are still off, so
-`tailscale serve` has never been in place here and the `ts.net` URL has never loaded. What is
-tested is everything up to the switches — the refusals, the hang, the reports — against a stubbed
-`tailscale`.
+`make restart` is the one to use **from the phone**: `stop` followed by `start` cannot work there,
+because `start` runs in the foreground and stopping the server kills the socket carrying your
+keystrokes. Restarting costs a session nothing — tmux holds the agents, and the server adopts them
+back. The per-session hook secret comes back too: it is derived, `HMAC(bearer token, session id)`, so
+a restarted server recomputes what the running agent already holds, and status detection survives.
 
-The agentdeck _server_ never sets that variable itself and never runs `tailscale serve` itself; the
-script above is a thing you run, not something a boot does. Turning the check on
-from ambient machine state rather than from your intent would 403 the loopback and Vite flows the
-same server serves, and re-applying the proxy on every boot would make exposure two decisions
-instead of one.
+Neither `make up` nor the watchdog survives a reboot; installing a launchd job is yours to do. See
+[`docs/watchdog.md`](docs/watchdog.md).
+
+### Getting the token onto the phone
+
+The first run — and any run after you delete `~/.agentdeck/token` — prints the token as a QR code
+with the URL beside it. Scan it with the phone's camera and paste the result into the app's token
+field. The QR carries the **token alone**, not a URL containing it, so it never lands in browser
+history or a `Referer` header. The token file must live outside every repository a session can start
+in, and the server refuses to start if that path resolves inside an allowlist entry.
+
+**Do not do the first run in a recorded pane.** tmux `capture-pane`, `script`, terminal session
+logging and screen recordings all preserve it verbatim. If that happened, treat the token as
+disclosed: delete the file, restart, re-scan everywhere.
+
+There is no expiry and no revocation list. The only way to invalidate a token is to delete the file
+and restart, which invalidates it for every device at once.
+
+### Installing to the home screen
+
+Open the `https://<host>.ts.net` URL in **Safari** on iOS (Chrome cannot add to the home screen),
+then Share → Add to Home Screen. It launches with no browser chrome. A service worker needs a secure
+context, so this only works over the Tailscale HTTPS URL, not over `http://<mac>:7777`.
+
+## Using it from the phone
+
+**You type into the box, not into the terminal.** Everything you write goes into the text area above
+the key row and reaches the pty on one submit. Typing straight into xterm cost a network round trip
+per character, offered no paste menu, and sent a Japanese IME's half-composed text to the agent.
+
+- **Send** appends CR — what submits a line at a prompt.
+- **Insert** sends the text with no CR, for a path or a fragment.
+- Newlines inside the box stay LF, so a pasted five-line question is one turn, not five.
+- **Copy** puts the pane's text on the clipboard — the selection if there is one, the visible screen
+  if not. On a phone this is the only way text leaves that screen, since dragging scrolls the pane.
+
+A soft keyboard has no Escape, Tab, arrows or Ctrl, and those are exactly the keys an agent's
+permission prompt is answered with. The **key row** along the bottom sends them as raw bytes.
+**Ctrl latches** rather than being held: tap Ctrl, then the next thing sent goes as its control code.
+Ctrl, `c`, Send is `0x03`, and it is the way to interrupt an agent.
+
+## Environment
+
+Everything is optional; the row says what leaving it unset means.
+
+| Variable                     | Default                    | Unset means                                                                                                                                     |
+| ---------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTDECK_PORT`             | `7777`                     | Loopback either way; `tailscale serve` decides exposure.                                                                                        |
+| `AGENTDECK_PROFILES`         | none                       | No agents, so nothing to start. Must be outside every allowlisted directory.                                                                    |
+| `AGENTDECK_ROOTS`            | empty                      | Colon-separated absolute paths scanned for repositories, re-read on every check. `make start` passes `ghq root --all`. The root itself is not startable. |
+| `AGENTDECK_MOUNTS`           | empty                      | Colon-separated absolute paths, fixed at boot, exact match and never prefix. With `AGENTDECK_ROOTS` also empty, nothing is startable.           |
+| `AGENTDECK_ORIGIN`           | none                       | **The Origin check is off**, so any page your browser visits can drive the socket with a token it holds. Set it to the `https://<host>.ts.net` origin. |
+| `AGENTDECK_TOKEN_FILE`       | `~/.agentdeck/token`       | Created 0600 on first run. Never inside an allowlisted directory — the server refuses to start.                                                 |
+| `AGENTDECK_AGENT_STATE_DIR`  | `~/.agentdeck/agent-state` | Where hook settings land, for status detection.                                                                                                 |
+| `AGENTDECK_TURNS_DIR`        | `~/.agentdeck/turns`       | One 0600 JSONL file per session, in plain text. It outlives the tmux session.                                                                   |
+| `AGENTDECK_UPLOAD_DIR`       | `~/.agentdeck/uploads`     | Where images sent from the phone are written, 0600, newest 20 per session.                                                                      |
+| `TMUX_SOCKET`                | `agentdeck`                | The `-L` name. Sessions are found on this socket and nowhere else.                                                                              |
+| `AGENTDECK_REAP_INTERVAL_MS` | `3600000`                  | How often the server collects abandoned processes. **It kills things.** `0` turns it off; see [Housekeeping](#housekeeping).                    |
+
+A session's environment is **built, not inherited**: a pane gets `PATH`, `HOME`, `SHELL`, `TERM`,
+`LANG`, `LC_ALL`, `TMPDIR`, `USER`, `LOGNAME`, plus whatever its profile lists. `SSH_AUTH_SOCK` above
+all is left out — a forwarded ssh-agent is `git push --force` to every repository that key reaches.
+But `HOME` has to be there, so an interactive shell reading your dotfiles can put it back. Keeping a
+credential out of a session means keeping it out of the dotfiles `HOME` points at.
+
+## What you are accepting
+
+**It runs as you, with no sandbox.** An agent that runs `rm -rf ~` or a poisoned `curl | sh` reaches
+your home directory, your SSH keys, your browser profiles and every other repository. The allowlist
+decides where a session _starts_, not where it can reach. **A git remote is what protects the work.**
+
+That blast radius includes agentdeck's own checkout, and the host then executes parts of it — the
+`package.json` scripts, the lockfile, the lint and toolchain config, the tests. Review a diff before
+running the toolchain in a checkout an agent has been working in.
+
+**Read [`SECURITY.md`](SECURITY.md) before using this on a machine that matters.** It has the full
+list, the review checklist, how the bearer token is handled, and what a separate user account would
+and would not fix.
+
+## Housekeeping
+
+Agents leave processes behind — a `nohup`ed build, a polling loop, a tmux server nothing reaped. The
+running server collects them hourly and says so on boot. To look before acting:
+
+```sh
+make reap        # what is collectable, and nothing happens
+make reap-kill   # the same pass, acting
+```
+
+Three defaults are worth knowing. A `pnpm dev` whose terminal has closed **is** collected, with its
+whole tree (`AGENTDECK_REAP_SPARE_LISTENERS=1` spares it). What a live agent started is collected
+too, except MCP servers (`AGENTDECK_REAP_KEEP`); the agent process itself is never touched. Only
+agentdeck's own tmux socket is in scope, never your personal one.
+
+Closing a session from the phone ends its whole tree, MCP servers included.
 
 ## Non-goals
 
-Written down because "code we do not use" is the thing this repo exists to avoid. Each of
-these is a feature MulmoTerminal has and we are deliberately not rebuilding:
+No file browsing or editing, no git/GitHub integration, no MCP broker or plugin system, no
+multi-user access or public exposure, no persistence of terminal output beyond tmux's own lifetime,
+and no desktop UI — the desktop already has a terminal.
 
-- File browsing, editing, or diff viewing
-- Git or GitHub integration (PR lists, issue work, worktrees)
-- Content generation, slide/diagram rendering, wikis, collections, feeds
-- Calendar, Drive, or any Google integration
-- An MCP broker or plugin system
-- Multi-user access, sharing, or any public exposure
-- Persistence of terminal output beyond the tmux session's own lifetime
-- A desktop UI — the desktop already has a terminal
+Six runtime dependencies, and that is the budget: `node-pty`, `ws`, `vue`, `@xterm/xterm`,
+`@xterm/addon-fit`, `qrcode-generator`.
 
-If one of these turns out to be needed, it gets its own plan and its own argument first.
+## Development
 
-## Infrastructure
-
-Almost none, by design. The main path touches no cloud service.
-
-The one optional exception is push notification delivery while the app is closed, which needs
-something with an internet address. If we build it, it is a single Cloudflare Worker plus KV,
-declared as a stack in the `infra` repository like everything else — not configured by hand in
-a dashboard.
-
-## Toolchain
-
-Node 22 and pnpm, pinned in `mise.toml`. pnpm because `infra` already uses it and because its
-strict linking refuses phantom dependencies — a package can only import what it actually
-declares, which is the property we want in a repo whose whole premise is a small, known
-dependency set.
-
-Target: **six runtime dependencies or fewer.** Currently planned — `node-pty`, `ws`, `vue`,
-`@xterm/xterm`, `@xterm/addon-fit`, a QR encoder for getting the token onto the phone, and Vite as
-a dev dependency. That is the budget spent; any addition needs a line in a plan saying why, and
-[`plans/003-milestones.md`](plans/003-milestones.md) has the line for the sixth.
-
-Everything runs on the Mac:
-
-```
-mise install
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm lint
-pnpm test
+```sh
+pnpm typecheck && pnpm lint && pnpm test   # ~40s
 ```
 
-**Every one of those lines is a review gate, not a convenience.** Each executes files this
-repository's own agents can write — `eslint.config.*` is evaluated as JavaScript, `.prettierrc*`
-names plugin files prettier imports as JavaScript, the `package.json` scripts are handed to a
-shell, `pnpm-lock.yaml` is resolved by a pnpm 9 that does not gate dependency lifecycle scripts,
-`src/**/*.test.ts` is executed as code by `node --test`, and `node_modules/.bin` is prepended to
-`PATH`. `scripts/` belongs in that list for a reason the lockfile caveat does not cover:
-`package.json` declares `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm
-always runs the root project's own lifecycle scripts, so `pnpm install --frozen-lockfile` executes
-a file in this tree whatever the lockfile says — and `scripts/healthcheck.mjs` and
-`scripts/restart-survival.mjs` are run by hand besides. **If you install the LaunchAgent, `scripts/`
-stops being triggered only by a person**: launchd then runs `scripts/watchdog.mjs` unattended, as
-you, in your GUI session, every 60 seconds and again after every reboot, so an edit to it is
-executed within a minute with no human action and no chance to read a diff — and that same edit chooses the command line the
-watchdog spawns as the server. Pointing the plist at a copy outside the checkout is what keeps this
-review gating it; see "Installing it" under [The watchdog](#the-watchdog). `mise install` is the same (`.mise*.toml` and `mise-tasks/` are agent-writable and mise
-executes `[env] _.source` and `[tasks]`), and so is starting an agent session in this repo, which
-loads `.claude/`. `git` in this repo is the same again, since it runs `.git/config` and
-`.git/hooks/`. `pnpm build` is on the list for a different reason: Vite copies `src/client/public/`
-verbatim into `dist/client`, which this server publishes with no bearer token, and that copy
-DEREFERENCES symlinks — so an entry there becomes a real file in the publish root holding whatever
-it pointed at, which `static.ts` cannot refuse because by serve time it is not a symlink. Measured:
-a link to a file outside the repo came back as its contents over HTTP. There used to be a container between all of that and the machine; there is not one
-now, which makes the review below the only control rather than the second of two.
+For iterating on the client, Vite's dev server proxies `/api` and `/ws` to the server on 7777:
 
-So before any of those commands,
-`git status` and `git diff` must be clean of unreviewed agent edits to
-`package.json`, `pnpm-lock.yaml`, `eslint.config.*`, `.prettierrc*`,
-`.mise*.toml`, `mise-tasks/`, `src/**/*.test.ts`, `src/fixtures/`, `scripts/`, `.claude/`,
-`.github/workflows/`, `src/client/public/` and the agent profiles file `AGENTDECK_PROFILES`
-points at. That last one is
-the most direct host-execution surface of the lot and had been on none of these lists: a profile's
-`command` and `args` go unmodified into `tmux new-session -- command args` and run as you, so a
-profile rewritten to `/bin/sh -c 'curl ...|sh'` runs at the next tap of that agent in the picker.
-The server refuses to start when that file resolves inside an allowlist entry, the same rule the
-token file gets, so keeping it out of this repository is the supported arrangement. **That
-list is a floor, not the whole job**: the host tools discover their own config, so the exception
-requires reading every added or modified file in the diff, not only the named ones. The same
-review is owed before starting an agent session in this repo,
-which is the only trigger `.claude/` needs. That review is
-blind to
-`node_modules` and `.pnpm-store`, which are gitignored, and blind to `.git/config` and
-`.git/hooks/` for the same reason, so three more commands belong in the same checklist:
-
-```
-rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile
-git config --local --list
-ls -la .git/hooks          # anything without a .sample suffix is a live hook
+```sh
+make start        # one terminal
+pnpm dev          # another; the page comes from Vite on 7778
 ```
 
-The first of those used to be `git status --ignored` over the two paths, which **cannot
-see what it was there for**: `git status` collapses an ignored directory to a single line naming
-the directory, so a rewritten `node_modules/.bin/eslint` produces byte-identical output.
-`--ignored=matching` does list the files, but it lists all fifty thousand of them, which is not a
-review either. Nothing that reads the tree can do this job, so the control is replacing the tree
-instead of inspecting it: reinstall from the lockfile, having reviewed `pnpm-lock.yaml` itself in
-the diff above, since pnpm 9 does not gate dependency lifecycle scripts.
-
-Run the review itself with git's own execution turned off — `git -c core.pager=cat -c
-core.hooksPath=/dev/null status`, and the same for `diff`, `switch` and `merge` — so the command
-that inspects the repository is not the command that fires the payload. An entry added to the
-allowlist — `${HOME}`, or the root of a tree holding credentials — is a session started somewhere
-nobody chose.
+`AGENTDECK_ORIGIN` must be unset or set to the Vite origin for that flow, or the server answers 403
+to the upgrade and the client reconnects forever instead of saying so.

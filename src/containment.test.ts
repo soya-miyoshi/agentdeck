@@ -80,21 +80,21 @@ const hostExecutedFiles = [
 ];
 
 void describe("the host-execution consequence is documented where the claim is made", () => {
-  void test("the README says the host executes agent-writable files from this repo", async () => {
-    const readme = await readDoc("README.md");
+  void test("SECURITY.md says the host executes agent-writable files from this repo", async () => {
+    const security = await readDoc("SECURITY.md");
     for (const file of hostExecutedFiles) {
-      assert.ok(readme.includes(file), `README does not name ${file} as agent-writable`);
+      assert.ok(security.includes(file), `SECURITY.md does not name ${file} as agent-writable`);
     }
-    assert.match(readme, /agent-writable/);
+    assert.match(security, /agent-writable/);
   });
 
-  void test("the README says the review is now the only control, not the second of two", async () => {
+  void test("SECURITY.md says the review is now the only control, not the second of two", async () => {
     // The container was the first of two. Its removal is the whole reason the review matters
     // more than it did, and a reader who does not meet that sentence will treat the checklist as
     // belt-and-braces.
-    const readme = await readDoc("README.md");
-    const toolchain = readme.slice(readme.indexOf("## Toolchain"));
-    assert.ok(toolchain.length > 0, "README has no Toolchain section");
+    const security = await readDoc("SECURITY.md");
+    const toolchain = security.slice(security.indexOf("## Toolchain"));
+    assert.ok(toolchain.length > 0, "SECURITY.md has no Toolchain section");
     assert.match(toolchain, /only control rather than the second of two/);
     assert.match(toolchain, /git status/);
     assert.match(toolchain, /git diff/);
@@ -103,12 +103,12 @@ void describe("the host-execution consequence is documented where the claim is m
   void test("the host-run exception names everything the host would execute", async () => {
     // The exception paragraph is where a human decides to run something on the Mac, so the list
     // that matters is the one there, not the one anywhere in the file.
-    const readme = await readDoc("README.md");
-    const toolchain = readme.slice(readme.indexOf("## Toolchain"));
+    const security = await readDoc("SECURITY.md");
+    const toolchain = security.slice(security.indexOf("## Toolchain"));
     for (const file of hostExecutedFiles) {
       assert.ok(
         toolchain.includes(file),
-        `README's toolchain exception does not name ${file} as agent-writable`,
+        `SECURITY.md's toolchain exception does not name ${file} as agent-writable`,
       );
     }
   });
@@ -180,8 +180,8 @@ void describe("the host-execution consequence is documented where the claim is m
 // `git status` cannot see either of these trees, so the ordinary review is blind to them - and
 // the command that was supposed to cover that could not either. `git status --ignored` collapses
 // an ignored directory to one line naming the DIRECTORY: a rewritten `node_modules/.bin/eslint`
-// gives byte-identical output, and this file asserted the string was in the README, which turned
-// an ineffective control into a green check. So the assertion is now the inverse - the README
+// gives byte-identical output, and this file asserted the string was in the document, which turned
+// an ineffective control into a green check. So the assertion is now the inverse - SECURITY.md
 // must NOT prescribe it - plus the replacement, which is the only shape that works here: replace
 // the tree from the reviewed lockfile rather than inspect it.
 void describe("the host-executed trees git cannot see are covered by a command that can", () => {
@@ -192,11 +192,11 @@ void describe("the host-executed trees git cannot see are covered by a command t
     });
   }
 
-  void test("the README's checklist replaces the trees rather than inspecting them", async () => {
-    const readme = await readDoc("README.md");
+  void test("SECURITY.md's checklist replaces the trees rather than inspecting them", async () => {
+    const security = await readDoc("SECURITY.md");
     assert.ok(
-      readme.includes("rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile"),
-      "README does not name a control that reaches inside the two gitignored executed trees",
+      security.includes("rm -rf node_modules .pnpm-store && pnpm install --frozen-lockfile"),
+      "SECURITY.md does not name a control that reaches inside the two gitignored executed trees",
     );
   });
 
@@ -221,10 +221,10 @@ void describe("the host-executed trees git cannot see are covered by a command t
       assert.equal(after, before, "git status --ignored turned out to see inside after all");
       assert.match(before, /node_modules\/\n?$/);
 
-      const readme = await readDoc("README.md");
+      const security = await readDoc("SECURITY.md");
       assert.ok(
-        !readme.includes("git status --ignored -- node_modules"),
-        "the README prescribes a command that cannot see what it is prescribed for",
+        !security.includes("git status --ignored -- node_modules"),
+        "SECURITY.md prescribes a command that cannot see what it is prescribed for",
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -232,9 +232,9 @@ void describe("the host-executed trees git cannot see are covered by a command t
   });
 
   void test("both trees are named as agent-writable where the claim is made", async () => {
-    const readme = await readDoc("README.md");
+    const security = await readDoc("SECURITY.md");
     const plan = await readDoc("plans/005-containment.md");
-    for (const doc of [readme, plan]) {
+    for (const doc of [security, plan]) {
       assert.match(doc, /node_modules/);
       assert.match(doc, /\.pnpm-store/);
     }
@@ -247,7 +247,7 @@ void describe("the host-executed trees git cannot see are covered by a command t
 // with the container, so what remains is the pair of commands that can see the surfaces and the
 // hardening on every git command this pipeline runs.
 const docs: readonly (readonly [string, string])[] = [
-  ["README.md", "README.md"],
+  ["SECURITY.md", "SECURITY.md"],
   ["plan 005", "plans/005-containment.md"],
 ];
 

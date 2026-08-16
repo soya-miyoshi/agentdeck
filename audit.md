@@ -2622,3 +2622,42 @@ and an IME composing in the box - have no headless equivalent, and none of them 
 re-tested on a device. Also unproven on hardware: that tapping the box does not zoom the page (the
 16px font size is the guard), that the app does not jump when the keyboard opens over it, and that
 the pane no longer opens the keyboard when tapped.
+
+## The README rewritten for a public repository, and where its prose went
+
+The README was 679 lines written for one operator on one Mac, and this repository is about to be
+read by people who have never seen it. It is now 261: what it is, a network diagram, the three
+prerequisites (ghq, Tailscale, tmux), setup, the `make` targets, the phone's input model, the
+environment table, and pointers. Everything cut is still written down - none of it was deleted.
+
+*Where each piece went.* `SECURITY.md` (new) has the threat model: runs-as-you, the bearer token and
+its recorded-pane hazard, the allowlist as a boundary rather than a route check, the profiles file as
+the most direct host-execution surface, the built-not-inherited pane environment, and the whole
+Toolchain review - the enumeration of agent-writable host-executed files, the checklist, the two
+gitignored trees, and git's own execution surfaces. `docs/watchdog.md` (new) has the watchdog's pass
+table and the LaunchAgent install with its exact `launchctl` lines. Both are linked from the README.
+
+*The tests moved with the prose, which is the part worth knowing.* Twenty assertions across six test
+files read `README.md` by path and pinned sentences in it, and the concise README failed all twenty.
+Fourteen of them, in four files, were repointed at the file that now carries the claim - the
+host-executed file list, "only control rather than the second of two", the `rm -rf node_modules`
+control, `git config --local --list`, "floor", the `cp scripts/watchdog.mjs` install, "buys review
+scope, not write protection", the adoption-by-name rule. The other six were satisfied by the README
+instead, because what they pin belongs there: the `## Environment` heading and its complete table,
+the token refusal, the derived hook secret, the `AGENTDECK_ORIGIN=https://<host>` line. Not one
+assertion was weakened or removed, and no regex changed - only the path each reads. What they protect
+is that
+the claim is written where a person meets it before acting, and a `SECURITY.md` linked from the
+README's "What you are accepting" serves that at least as well as paragraph 40 of a README did.
+
+*Verified:* the suite is back to its pre-change baseline - 964/972, the 8 failures being
+`src/ci.test.ts` asserting a workflow that `06fa0c7 remove CI` deleted, which this work did not
+touch. `pnpm typecheck` and `pnpm lint` clean. And the documented boot was run rather than inferred:
+a real server on a scratch HOME answered `/api/health` 200, served the built client at `/` 200,
+refused `/api/sessions` 401 with no token, and printed the first-run block - including its refusal to
+print the QR when stdout is not a terminal, which is the sentence SECURITY.md now carries.
+
+**Not demonstrated: a reader.** The claim this work makes is that a stranger can get from `git
+clone` to a session on their phone using only the README, and nobody has tried. The setup path was
+not run end to end from a clean machine either - no `mise install` on a Mac without the toolchain, no
+`tailscale serve` from these instructions, no phone.

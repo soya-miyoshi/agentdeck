@@ -290,11 +290,11 @@ void describe("the agent profiles file is a host-execution surface, not config",
     }
   });
 
-  void test("the README review list and plan 005 both name it", async () => {
+  void test("the SECURITY.md review list and plan 005 both name it", async () => {
     // It was on neither, which is how the most direct execution surface of the lot went
     // unreviewed by the checklist that exists for exactly this.
-    const readme = await readDoc("README.md");
-    const list = readme.slice(readme.indexOf("clean of unreviewed agent edits"));
+    const security = await readDoc("SECURITY.md");
+    const list = security.slice(security.indexOf("clean of unreviewed agent edits"));
     assert.match(list.slice(0, 1200), /AGENTDECK_PROFILES/);
     const plan = await readDoc("plans/005-containment.md");
     assert.match(plan.slice(0, plan.indexOf("\n## ", 1)), /AGENTDECK_PROFILES/);
