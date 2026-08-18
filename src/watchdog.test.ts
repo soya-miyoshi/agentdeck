@@ -614,6 +614,36 @@ void describe("tailscale serve: not configured is not an outage", () => {
     assert.doesNotMatch(outcome.stdout, /tailscale serve is configured/, "it fell back to PATH");
     assert.equal(state().serveConfigured, false);
   });
+
+  // The GUI build of Tailscale ships its `tailscale` as a wrapper around the app, and under
+  // launchd it cannot reach it: it prints its own failure and EXITS 0. Read as output, that text
+  // is not "no serve config" and not a config either, and the old code called it not-configured -
+  // which on the very next pass is "WAS configured and is gone", a notified outage that never
+  // happened. Observed on a Mac whose serve was working throughout.
+  void test("a CLI that exits 0 with its own failure is could-not-ask, not not-configured", () => {
+    stubTailscale(
+      "The Tailscale GUI failed to start: The operation couldn't be completed. " +
+        "(Tailscale.CLIError error 3.)",
+      0,
+    );
+    freshTranscript("tailscale-mute");
+    seedState({ serveConfigured: true });
+    const outcome = pass(port, asStubRepo);
+    assert.match(outcome.stdout, /did not answer with a serve status/);
+    assert.doesNotMatch(outcome.stdout, /WAS configured for the port and is not any more/);
+    assert.doesNotMatch(notified(), /no longer configured/, "a false outage woke somebody");
+    assert.equal(state().serveConfigured, true, "one mute pass forgot that serve was configured");
+  });
+
+  void test("a non-zero exit is could-not-ask too, and keeps what the last pass knew", () => {
+    stubTailscale("something went wrong", 1);
+    freshTranscript("tailscale-failed");
+    seedState({ serveConfigured: true });
+    const outcome = pass(port, asStubRepo);
+    assert.match(outcome.stdout, /did not answer with a serve status/);
+    assert.doesNotMatch(notified(), /no longer configured/, "a false outage woke somebody");
+    assert.equal(state().serveConfigured, true);
+  });
 });
 
 void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {

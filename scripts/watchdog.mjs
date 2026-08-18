@@ -308,6 +308,14 @@ const stopServer = async (pid) => {
 // tailscale serve
 // -----------------------------------------------------------------------------------------
 
+/** Whether the text is `serve status` OUTPUT at all. The GUI build's `tailscale` is a wrapper that
+ *  EXITS 0 and prints `Tailscale.CLIError` when it cannot reach the app, which is not "no config". */
+const isServeAnswer = (text) =>
+  /no serve config/i.test(text) ||
+  /https?:\/\//i.test(text) ||
+  /\bproxy\b/i.test(text) ||
+  /funnel\s+on/i.test(text);
+
 /** Whether `tailscale serve` still points at the port, or `null` for "could not ask". Detect and
  *  report only - re-applying is m4/tailscale-serve's, and that item is blocked (plan 006). */
 const serveState = async () => {
@@ -318,9 +326,10 @@ const serveState = async () => {
       ["serve", "status"],
       { timeout: TOOL_TIMEOUT_MS },
       (error, stdout, stderr) => {
-        // tailscale missing, tailscaled down or not logged in: not configured.
-        if (error) return resolve({ configured: false, funnel: false });
         const text = `${stdout}${stderr}`;
+        // Could not ask, NOT "not configured": a serve that is working must never be reported as
+        // gone because the CLI could not answer - that path notifies, and the alarm would be false.
+        if (error || !isServeAnswer(text)) return resolve(null);
         // Same predicate as scripts/tailscale-serve.mjs, deliberately: Funnel is the public
         // internet rather than the tailnet, and the two must not disagree about what it looks like.
         const funnel = /funnel\s+on/i.test(text) || /^\s*Funnel on\b/im.test(text);
@@ -337,8 +346,13 @@ const serveState = async () => {
 const checkServe = async (state) => {
   const serve = await serveState();
   if (serve === null) {
-    // No fall back to PATH: the writable copy is exactly what must not be executed here.
-    log(`no tailscale at ${TAILSCALE}; the serve check is skipped this pass`);
+    // No fall back to PATH: the writable copy is exactly what must not be executed here. The
+    // second case leaves state.serveConfigured alone, so one mute pass cannot forget what is true.
+    log(
+      existsSync(TAILSCALE)
+        ? `${TAILSCALE} did not answer with a serve status; the serve check is skipped this pass`
+        : `no tailscale at ${TAILSCALE}; the serve check is skipped this pass`,
+    );
     return;
   }
   const { configured, funnel } = serve;

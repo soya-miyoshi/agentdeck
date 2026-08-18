@@ -2756,3 +2756,53 @@ author's - the machine-dependence CLAUDE.md rules out, now visible. And
 `src/client/end-to-end.test.ts`'s "the server process is restarted under an open client" times out
 waiting for the socket after a SIGKILL and restart, reproducibly and in isolation, with no tmux
 error in its output; the ledger records it passing on the author's machine.
+
+## The watchdog's serve check, when the CLI cannot answer
+
+*A working `tailscale serve` was being reported as an outage.* Under launchd the watchdog logged
+`tailscale serve is not configured for the port` every minute while serve was configured and the
+phone could reach the deck - verified over the ts.net URL at the same moment. From a shell the same
+pass, with the same environment, said `configured`. The difference is the execution context, not the
+environment: this Mac has the GUI build of Tailscale, whose `tailscale` command is a wrapper around
+the app, and from a non-interactive LaunchAgent it cannot reach it.
+
+*It fails soft, which is why nothing caught it.* The wrapper EXITS 0 and prints
+`The Tailscale GUI failed to start: ... (Tailscale.CLIError error 3.)`. `serveState` only treated a
+non-zero exit as "could not ask", so exit 0 with that text fell through to the port match, found
+nothing, and returned `configured: false`. The docstring already promised `null` for "could not
+ask" and the missing-binary path already used it; the CLI-error path did not.
+
+*The consequence was worse than a wrong log line.* `checkServe` notifies on configured-to-gone -
+the reboot case, which the docs call an outage - so the first pass after a real one would have sent
+"the phone cannot reach this Mac" about a deck that was fine. It also writes
+`state.serveConfigured = configured`, so a mute pass overwrote what the last true reading knew.
+And the Funnel check rides on the same text, so the one thing that watches for the deck becoming
+public was silently dead.
+
+*The fix is to recognise an answer rather than to enumerate failures.* `isServeAnswer` accepts the
+two well-formed shapes - "no serve config", or output naming a target (`https://`, `proxy`,
+`funnel on`) - and anything else is `null`, "could not ask". That direction is deliberate: a
+tailscale that changes its wording gets a skipped check rather than a false outage. `null` returns
+before `state.serveConfigured` is written, so one mute pass cannot forget what the last real one
+established, and the two null cases now read differently in the log - a missing binary and a mute
+one are different problems.
+
+*Verified:* 973/981 with 2 tests added, typecheck and lint clean; the remaining 10 are the same
+pre-existing failures recorded in the entry above. Run rather than inferred from green: the
+installed LaunchAgent, on its own 60-second timer, went from claiming `not configured` to
+`did not answer with a serve status; the serve check is skipped this pass`, while a pass run by
+hand from a shell in the same minute still reported `configured` - the two contexts now disagree
+honestly instead of one of them lying. Both new tests were checked against the unfixed script and
+fail there.
+
+**Not demonstrated: that the serve check can ever work under launchd on this machine.** It cannot,
+with this build of Tailscale - the fix makes the watchdog honest about not knowing, it does not
+restore the check. Serve-outage detection and the Funnel warning are therefore unavailable under
+the timer here, and the only things that would restore them are the standalone Tailscale
+distribution, which installs a real `/usr/local/bin/tailscale` and needs the admin account this
+operator does not have, or re-applying serve from a context that has GUI access.
+
+**A second-order cost, recorded rather than solved.** `ProgramArguments` names the copy at
+`~/.agentdeck/bin/watchdog.mjs`, so this fix reached the running timer only because it was copied
+across by hand after the checkout changed. Every future change to `scripts/watchdog.mjs` has the
+same requirement, and nothing enforces it: the timer will go on running a stale copy silently.
