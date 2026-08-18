@@ -49,11 +49,16 @@ with a real TLS certificate — nothing is exposed to the public internet.
 - **[ghq](https://github.com/x-motemen/ghq)**. agentdeck's default launch path derives its allowlist
   from `ghq root --all`, so your repositories are expected to live under a ghq root. Without ghq,
   set `AGENTDECK_MOUNTS` by hand instead (see [Environment](#environment)).
-- **[Tailscale](https://tailscale.com/)** on both the Mac and the phone. This is not optional for
-  phone access: the server listens on `127.0.0.1` and never on a LAN address.
+- **[Tailscale](https://tailscale.com/)** on both the Mac and the phone, and on the Mac the
+  **standalone** build from <https://pkgs.tailscale.com/stable/> rather than the Mac App Store one
+  (see [`docs/setup.md`](docs/setup.md#2-tailscale-on-the-mac)). This is not optional for phone
+  access: the server listens on `127.0.0.1` and never on a LAN address.
 - At least one agent CLI you want to run — Claude Code, Gemini CLI, or just a shell.
 
 ## Setup
+
+[`docs/setup.md`](docs/setup.md) is the same thing as one ordered runbook, from a bare Mac to a
+working phone, with how to tell each step worked. The sections below are the reference.
 
 ```sh
 mise install
@@ -121,6 +126,11 @@ tailscale serve reset           # take it down
 
 **Never `tailscale funnel`.** That is the public internet, and nothing here is built to survive it.
 
+**The macOS CLI needs `TERM`.** Unset, the standalone build tries to start the GUI and prints
+`Tailscale.CLIError` on stdout while exiting 0 — so it reads as unparseable output rather than a
+failed command. launchd sets no `TERM`, which is where this bites. Everything here passes it
+(`tailscaleEnv` in `src/tailnet.ts`); a wrapper of your own must too.
+
 Give agentdeck its own `ts.net` hostname. The token lives in `localStorage`, which is keyed by
 origin, so any other service mounted on the same hostname can read a credential that starts and
 kills sessions in every allowed repository.
@@ -143,7 +153,8 @@ back. The per-session hook secret comes back too: it is derived, `HMAC(bearer to
 a restarted server recomputes what the running agent already holds, and status detection survives.
 
 Neither `make up` nor the watchdog survives a reboot; installing a launchd job is yours to do. See
-[`docs/watchdog.md`](docs/watchdog.md).
+[`docs/watchdog.md`](docs/watchdog.md). Once that job **is** installed, do not use `make up`: it
+starts a second supervision loop against the same port and the two fight over recovery.
 
 ### Getting the token onto the phone
 

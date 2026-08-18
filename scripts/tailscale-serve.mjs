@@ -5,7 +5,12 @@
 // with Serve disabled `tailscale serve --bg` prints an enable link and then never exits.
 
 import { execFile } from "node:child_process";
-import { ADMIN_DNS_PAGE, parseTailnetStatus, tailscaleBinary } from "../src/tailnet.ts";
+import {
+  ADMIN_DNS_PAGE,
+  parseTailnetStatus,
+  tailscaleBinary,
+  tailscaleEnv,
+} from "../src/tailnet.ts";
 
 const port = process.env.AGENTDECK_PORT ?? "7777";
 // Generous: `serve --bg` returns in well under a second when Serve is enabled, and this bound is
@@ -23,7 +28,7 @@ const say = (message) => {
  *  most interested in, not an error. `killed` is how a hang is told from a plain failure. */
 const runTool = (binary, args, timeout) =>
   new Promise((resolve) => {
-    execFile(binary, args, { timeout }, (error, stdout, stderr) => {
+    execFile(binary, args, { timeout, env: tailscaleEnv() }, (error, stdout, stderr) => {
       resolve({
         code: error === null ? 0 : (error.code ?? 1),
         killed: error !== null && error.killed === true,
