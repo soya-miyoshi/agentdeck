@@ -2806,3 +2806,47 @@ operator does not have, or re-applying serve from a context that has GUI access.
 `~/.agentdeck/bin/watchdog.mjs`, so this fix reached the running timer only because it was copied
 across by hand after the checkout changed. Every future change to `scripts/watchdog.mjs` has the
 same requirement, and nothing enforces it: the timer will go on running a stale copy silently.
+
+## The Tailscale CLI needs TERM, and the serve check was blind for it
+
+The previous entry built `isServeAnswer` to tell "could not ask" from "not configured", and left
+the cause open, guessing at GUI access the operator does not have. This is that cause, found.
+
+**The standalone macOS build's CLI requires `TERM` to be set.** Without it, `tailscale serve status`
+and `tailscale status --json` alike try to start the GUI and answer
+
+```
+The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)
+```
+
+on stdout, **exiting 0**. Bisected over all 47 variables in an interactive shell: `TERM` is the only
+one that matters, and any value works, including `dumb`. It is not GUI access, not the sandbox, not
+the binary path, and not the shim - the same binary answers correctly a moment later from a
+terminal, which is what made it look intermittent rather than deterministic.
+
+launchd sets no `TERM`. So every pass of the installed LaunchAgent had been reporting the CLI as
+unanswerable since the machine moved to this build, `serveConfigured` had been latched `false`
+throughout, and the "was configured last pass and is gone now" alarm - the reboot case, the one
+outage this watches for - could never fire, because the state it fires on was never reached. The
+Funnel check rode on the same text and was equally dead. The log said so honestly on every line;
+nobody was reading a line that had said the same thing for weeks.
+
+**Fixed at the cause, not at the plist.** `tailscaleEnv` in `src/tailnet.ts` defaults `TERM` to
+`dumb` while preserving a real one, and every shell-out to `tailscale` goes through it -
+`readTailnet` at server boot, `scripts/tailscale-serve.mjs`, and the watchdog's `serveState`. A
+`TERM` in the LaunchAgent's `EnvironmentVariables` would have fixed the timer alone and left the
+server's boot-time tailnet advice, which had the identical defect, still wrong. This is the same
+call the plist comment already records for the locale bug: fix it in the environment the code
+builds, not in the one launchd happens to hand this one job.
+
+**Accepted, with a reason.** The fix reached the running timer by `cp` to `~/.agentdeck/bin`, and
+nothing enforces that copy - the residual the previous entry recorded, unchanged and now
+demonstrated twice.
+
+**Verified, not inferred.** Reproduced under the LaunchAgent's exact environment before the change
+and after; then `serveConfigured: true` and `tailscale serve is configured for the port` in the log
+on the first pass following the copy. The pre-existing 10 test failures are identical on `main`
+before and after, and are about CI workflow files and the reconnection ladder, not this.
+
+**Not demonstrated: the phone.** Serve was re-applied and probed end to end over the `ts.net` name
+from the Mac, but no phone opened the deck in the course of this work.

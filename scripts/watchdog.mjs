@@ -324,7 +324,9 @@ const serveState = async () => {
     execFile(
       TAILSCALE,
       ["serve", "status"],
-      { timeout: TOOL_TIMEOUT_MS },
+      // TERM or the macsys build tries to start the GUI and answers CLIError with exit 0; launchd
+      // sets no TERM, which is what made this check report "could not ask" on every pass.
+      { timeout: TOOL_TIMEOUT_MS, env: { ...process.env, TERM: process.env.TERM || "dumb" } },
       (error, stdout, stderr) => {
         const text = `${stdout}${stderr}`;
         // Could not ask, NOT "not configured": a serve that is working must never be reported as

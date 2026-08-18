@@ -24,6 +24,13 @@ export const tailscaleBinary = (): string | undefined => {
   return TAILSCALE_CANDIDATES.find((path) => existsSync(path));
 };
 
+/** The environment every `tailscale` run needs. The macsys build tries to start the GUI and prints
+ *  `Tailscale.CLIError` on stdout WITH EXIT 0 when TERM is unset, which is what launchd hands a job. */
+export const tailscaleEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => ({
+  ...env,
+  TERM: env["TERM"] === undefined || env["TERM"] === "" ? "dumb" : env["TERM"],
+});
+
 /** Long enough for a busy `tailscaled`, short enough that a wedged one cannot delay a boot. */
 const STATUS_TIMEOUT_MS = 3000;
 
@@ -57,6 +64,7 @@ export const readTailnet = async (): Promise<Tailnet | undefined> => {
   try {
     const { stdout } = await run(binary, ["status", "--json"], {
       timeout: STATUS_TIMEOUT_MS,
+      env: tailscaleEnv(),
     });
     return parseTailnetStatus(JSON.parse(stdout));
   } catch {
