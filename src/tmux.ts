@@ -89,6 +89,17 @@ export const forTerminal = (captured: string): string =>
 // separator a session name could hold would let a crafted name forge extra fields.
 const SEP = "\u001f";
 
+// The same separator as tmux 3.5a renders it. That version escapes a non-printable byte in `-F`
+// output; the 3.7b plan 002 verified against emits the byte. The parse must not pick a tmux.
+const SEP_ESCAPED = "\\037";
+
+/** Whether a `-F` line carries fields at all, in either tmux's rendering of the separator. */
+const hasFields = (line: string): boolean => line.includes(SEP) || line.includes(SEP_ESCAPED);
+
+/** A `-F` line's fields. The raw byte wins, so an escape-shaped path cannot split a 3.7b line. */
+const splitFields = (line: string): string[] =>
+  line.includes(SEP) ? line.split(SEP) : line.split(SEP_ESCAPED);
+
 /**
  * agentdeck's own tmux config, passed as `-f` so `~/.tmux.conf` is never read on this socket.
  * It reaches only a server WE start, so `ensureServer` re-applies what must hold either way.
@@ -324,10 +335,10 @@ export class Tmux {
     }
     const found: { sessionId: string; panePid: number }[] = [];
     for (const line of stdout.split("\n")) {
-      if (!line.includes(SEP)) continue;
-      const at = line.lastIndexOf(SEP);
-      const panePid = Number(line.slice(at + SEP.length).trim());
-      const sessionId = line.slice(0, at);
+      if (!hasFields(line)) continue;
+      const fields = splitFields(line);
+      const panePid = Number(fields[fields.length - 1]?.trim());
+      const sessionId = fields.slice(0, -1).join(SEP);
       if (sessionId !== "" && Number.isInteger(panePid) && panePid > 1) {
         found.push({ sessionId, panePid });
       }
@@ -366,29 +377,32 @@ export class Tmux {
 
     // Loud only for the locale mangling, where NO line carries a separator (see `baseEnv`). One
     // separator-less line is a path holding a newline, and must cost that session alone.
-    if (lines.length > 0 && !lines.some((line) => line.includes(SEP))) {
+    if (lines.length > 0 && !lines.some(hasFields)) {
       throw new Error(
         `tmux returned list-sessions output with no field separator: ${JSON.stringify(lines[0])}. ` +
-          `tmux replaces non-printable bytes with "_" for a client whose locale is not UTF-8; ` +
-          `set a UTF-8 locale for the process running agentdeck - and note LC_ALL outranks ` +
-          `LC_CTYPE and LANG, so a non-UTF-8 LC_ALL must be changed or unset, not worked around.`,
+          `Both renderings are read - the raw byte and the octal escape - so this is the case ` +
+          `neither covers: tmux replaces non-printable bytes with "_" for a client whose locale ` +
+          `is not UTF-8. Set a UTF-8 locale for the process running agentdeck, and note LC_ALL ` +
+          `outranks LC_CTYPE and LANG, so a non-UTF-8 LC_ALL must be changed or unset.`,
       );
     }
 
-    return lines
-      .filter((line) => line.includes(SEP))
-      .map((line) => {
-        const [id = "", dead = "0", status = "", created = "0", path = ""] = line.split(SEP);
-        return {
-          id,
-          path,
-          dead: dead === "1",
-          // An empty dead_status is not zero: tmux leaves it blank for a live pane, and reporting
-          // "exited 0" for a running agent would be a confidently wrong answer.
-          exitCode: dead === "1" && status !== "" ? Number(status) : undefined,
-          startedAt: Number(created) * 1000,
-        };
-      });
+    return lines.filter(hasFields).map((line) => {
+      const fields = splitFields(line);
+      const [id = "", dead = "0", status = "", created = "0"] = fields;
+      // The path is last and the only arbitrary field: rejoin its tail rather than drop it, so a
+      // path shaped like the separator costs that one path and never the fields before it.
+      const path = fields.slice(4).join(SEP);
+      return {
+        id,
+        path,
+        dead: dead === "1",
+        // An empty dead_status is not zero: tmux leaves it blank for a live pane, and reporting
+        // "exited 0" for a running agent would be a confidently wrong answer.
+        exitCode: dead === "1" && status !== "" ? Number(status) : undefined,
+        startedAt: Number(created) * 1000,
+      };
+    });
   }
 
   /**
@@ -406,7 +420,9 @@ export class Tmux {
         exactWindowTarget(id),
         ["#{session_path}", "#{session_created}"].join(SEP),
       ]);
-      const [path = "", created = ""] = stdout.trim().split(SEP);
+      const fields = splitFields(stdout.trim());
+      const created = fields.length > 1 ? (fields[fields.length - 1] ?? "") : "";
+      const path = fields.slice(0, -1).join(SEP);
       if (path === "" || created === "") return undefined;
       return { path, startedAt: Number(created) * 1000 };
     } catch {

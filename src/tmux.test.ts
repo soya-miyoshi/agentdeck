@@ -903,3 +903,64 @@ void describe("closing a session takes its processes with it", () => {
     assert.ok(running(survivor), `closing "alpha" killed "alphabet"'s pane ${String(survivor)}`);
   });
 });
+
+void describe("the field separator, in either rendering tmux gives it", () => {
+  // tmux 3.5a escapes a non-printable byte in `-F` output as `\\037`; the 3.7b plan 002 verified
+  // against emits the byte. These run off canned stdout on purpose: an integration test only ever
+  // sees the rendering of the tmux this host happens to have, and so proves nothing about the other.
+  const renderings: [string, string][] = [
+    ["the raw byte", SEP],
+    ["the octal escape", "\\037"],
+  ];
+
+  for (const [label, sep] of renderings) {
+    void test(`list() reads a session written with ${label}`, async () => {
+      const { tmux } = fake({
+        "list-sessions": ["agentdeck-shell-abc", "0", "", "1700000000", "/repo/a"].join(sep),
+      });
+      const [session] = await tmux.list();
+      assert.equal(session?.id, "agentdeck-shell-abc");
+      assert.equal(session?.path, "/repo/a");
+      assert.equal(session?.dead, false);
+      assert.equal(session?.startedAt, 1_700_000_000_000);
+    });
+
+    void test(`panePids() reads a pane written with ${label}`, async () => {
+      const { tmux } = fake({ "list-panes": ["agentdeck-shell-abc", "4242"].join(sep) });
+      assert.deepEqual(await tmux.panePids(), [
+        { sessionId: "agentdeck-shell-abc", panePid: 4242 },
+      ]);
+    });
+
+    void test(`describe() reads a pane written with ${label}`, async () => {
+      const { tmux } = fake({ "display-message": ["/repo/a", "1700000000"].join(sep) });
+      assert.deepEqual(await tmux.describe("agentdeck-shell-abc"), {
+        path: "/repo/a",
+        startedAt: 1_700_000_000_000,
+      });
+    });
+
+    void test(`a dead session keeps its exit code with ${label}`, async () => {
+      const { tmux } = fake({
+        "list-sessions": ["agentdeck-shell-abc", "1", "7", "1700000000", "/repo/a"].join(sep),
+      });
+      const [session] = await tmux.list();
+      assert.equal(session?.dead, true);
+      assert.equal(session?.exitCode, 7);
+    });
+  }
+
+  void test("a path shaped like the escape costs that path alone, never the fields before it", () => {
+    // tmux does not escape a backslash, so `\037` inside a path is indistinguishable from the
+    // separator. The path is last, so its tail rejoins and the id and the clock stay right.
+    const line = ["agentdeck-shell-abc", "0", "", "1700000000", "/repo/lit\\037eral"].join("\\037");
+    const { tmux } = fake({ "list-sessions": line });
+    return tmux.list().then((sessions) => {
+      const session = sessions[0];
+      assert.equal(session?.id, "agentdeck-shell-abc");
+      assert.equal(session?.dead, false);
+      assert.equal(session?.startedAt, 1_700_000_000_000);
+      assert.notEqual(session?.path, "", "the path was dropped rather than kept");
+    });
+  });
+});

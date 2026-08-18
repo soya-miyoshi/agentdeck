@@ -2700,3 +2700,59 @@ through `POST /api/sessions` (201), and listed it back with the right cwd, agent
 **Not demonstrated: that the shorter comments are still enough.** The test is somebody arriving at
 one of these files cold and getting what they need from two lines. That has not happened yet, and
 the only honest way to find out is the next time one of them is wrong.
+
+## The field separator, read in either rendering tmux gives it
+
+*The deck could not start a session on this host at all.* Every `POST /api/sessions` answered 500
+and `Hub.sync` failed in a loop behind it. The cause was one line: `SEP` is a raw U+001F written
+into a `-F` format string and read back out of tmux's stdout, and **tmux 3.5a escapes a
+non-printable byte in format output as its octal text, backslash-0-3-7** rather than emitting the
+byte. Plan 002 and `m0/tmux-version` cite 3.7b, which emits the byte; this Mac has 3.5a, so the
+parse found no separator and `Tmux.list` threw.
+
+*The error message was wrong, and wrong in the direction that costs an hour.* It blamed the client
+locale - "tmux replaces non-printable bytes with `_` for a client whose locale is not UTF-8" - and
+that reading was disproved by measurement: the escape appears under `LC_CTYPE=UTF-8`, under
+`LANG=en_US.UTF-8`, under `LC_ALL=en_US.UTF-8` and under all three set together. `baseEnv`'s
+`LC_CTYPE` default is still doing real work, just not this work: a Japanese directory name comes
+back through `#{session_path}` intact, and that is what the locale protects.
+
+*Three call sites, not one.* `list()` was the visible failure, but `panePids()` and `describe()`
+parse the same separator, so a fix confined to `list()` would have left `/api/processes` empty and
+adoption-after-restart unable to confirm a path. All three now go through `hasFields` and
+`splitFields`, which prefer the raw byte and fall back to the escape, so the parse names no tmux
+version.
+
+*One thing accepted rather than fixed.* tmux does not escape a backslash, so a directory whose name
+literally contains the four characters backslash-0-3-7 is indistinguishable from a field boundary -
+measured, not assumed. It is handled rather than solved: `session_path` is the last field and the
+only arbitrary one, so its tail is rejoined instead of dropped. A path like that comes back mangled
+and therefore fails the allowlist match, which is the safe direction; the id, the dead flag and the
+clock in front of it stay correct. Closing the hole properly needs a separator tmux cannot rewrite,
+and there is no such byte in `-F` output.
+
+*Verified:* 971/981 with 9 tests added, typecheck and lint clean. The remaining 10 are the CI
+suites `06fa0c7` orphaned by deleting `.github/workflows/ci.yml` without deleting `src/ci.test.ts`,
+plus two this work did not touch - see below. And run rather than inferred from green: a real
+server created a shell session through `POST /api/sessions` (201, where it had been 500), listed it
+back with the right cwd through `GET /api/sessions`, showed its pane pid and process tree through
+`GET /api/processes` (the `panePids` path), and after `make restart` adopted the same session back
+with the same id and `startedAt` and no error in the log (the `describe` path).
+
+*The new tests run off canned stdout on purpose.* An integration test only ever sees the rendering
+of the tmux the host happens to have, so on this Mac it proves nothing about 3.7b and on the
+author's it proved nothing about 3.5a - which is exactly how this shipped. Checked in both
+directions: against the unfixed `tmux.ts` the nine fail 5 and pass 4, and the 4 that pass are the
+raw-byte cases that never broke.
+
+**Not demonstrated: the phone, or any tmux other than 3.5a.** Tailscale is not installed on this
+machine and cannot be by this account, so nothing here was driven from a phone. The 3.7b half of
+every new test is canned stdout, not an observation - it encodes what plan 002 recorded, and the
+first real 3.7b run is what would confirm it.
+
+**Two failures left open, neither of them this work.** `src/de-containerise.test.ts` asserts
+`TODO.md` and plan 002 cite the tmux `tmux -V` reports, so it fails on any host that is not the
+author's - the machine-dependence CLAUDE.md rules out, now visible. And
+`src/client/end-to-end.test.ts`'s "the server process is restarted under an open client" times out
+waiting for the socket after a SIGKILL and restart, reproducibly and in isolation, with no tmux
+error in its output; the ledger records it passing on the author's machine.
