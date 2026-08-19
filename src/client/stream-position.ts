@@ -13,6 +13,7 @@ export interface SnapshotMessage {
   seq: number;
   history?: string;
   data: string;
+  modes?: string;
 }
 
 export interface ChunkMessage {
@@ -22,8 +23,8 @@ export interface ChunkMessage {
 }
 
 export type RenderAction =
-  /** Clear the terminal, then write history (if any) followed by data. */
-  | { kind: "repaint"; history?: string; data: string; position: Position }
+  /** Clear the terminal, then write the pane's modes, history (if any), and data. */
+  | { kind: "repaint"; modes?: string; history?: string; data: string; position: Position }
   | { kind: "write"; data: string; position: Position }
   /** Ask the server for a snapshot rather than render a hole. */
   | { kind: "resync"; haveEpoch: string; haveSeq: number }
@@ -51,6 +52,9 @@ export const receiveSnapshot = (message: SnapshotMessage): RenderAction => {
   // Absent rather than empty when there is none: in alternate-screen mode there is no scrollback
   // to capture at all, and that is correct rather than degraded.
   if (message.history !== undefined) action.history = message.history;
+  // The modes a repaint does not carry: without them the terminal is the one the browser just
+  // opened - normal screen, no mouse tracking - whatever the pane is actually in.
+  if (message.modes !== undefined) action.modes = message.modes;
   return action;
 };
 

@@ -175,6 +175,8 @@ const start = (current: string): void => {
         // This is what makes reconnect uneventful.
         if (action.kind === "repaint") {
           handle.clear();
+          // Modes first: they decide which buffer the screen below lands in.
+          if (action.modes !== undefined) handle.write(action.modes);
           if (action.history !== undefined) handle.write(action.history);
         }
         handle.write(action.data);

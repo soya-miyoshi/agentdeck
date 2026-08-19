@@ -47,6 +47,7 @@ before(async () => {
       return "scrollback\n";
     },
     isAlternateScreen: async () => await Promise.resolve(false),
+    paneModes: async () => await Promise.resolve(""),
     repaint: async () => await Promise.resolve({ data: "screen", seq: stream.buffer.headSeq }),
     sendInput: () => undefined,
     applyPaneRows: () => undefined,

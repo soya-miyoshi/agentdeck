@@ -372,6 +372,7 @@ export const main = async (): Promise<void> => {
     listSessions: async () => await registry.list(),
     captureHistory: async (id) => await hub.captureHistory(id, HISTORY_LINES),
     isAlternateScreen: async (id) => await hub.isAlternateScreen(id),
+    paneModes: async (id) => await hub.paneModes(id),
     repaint: async (id) => await hub.repaint(id),
     sendInput: (id, data) => hub.sendInput(id, data),
     applyPaneRows: (id, rows) => hub.applyPaneRows(id, rows),

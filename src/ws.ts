@@ -57,6 +57,8 @@ export interface WsDeps {
   captureHistory: (sessionId: string) => Promise<string>;
   /** Whether the pane is on the alternate screen, where there is no scrollback to show. */
   isAlternateScreen: (sessionId: string) => Promise<boolean>;
+  /** The pane's terminal modes as the bytes that set them, since a repaint states none of them. */
+  paneModes: (sessionId: string) => Promise<string>;
   /** The live screen for a cold snapshot, and the seq the bytes of it end at. */
   repaint: (sessionId: string) => Promise<{ data: string; seq: number }>;
   /**
@@ -420,6 +422,7 @@ export const attachWebSocketServer = (server: Server, deps: WsDeps): WsHandle =>
       buffer: stream.buffer,
       captureHistory: async () => await deps.captureHistory(sessionId),
       alternateScreen: async () => await deps.isAlternateScreen(sessionId),
+      paneModes: async () => await deps.paneModes(sessionId),
       repaint: async () => await deps.repaint(sessionId),
     });
     const limit = deps.snapshotTimeoutMs ?? SNAPSHOT_TIMEOUT_MS;

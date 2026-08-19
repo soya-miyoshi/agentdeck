@@ -42,6 +42,7 @@ before(async () => {
     listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve(""),
     isAlternateScreen: async () => await Promise.resolve(false),
+    paneModes: async () => await Promise.resolve(""),
     repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
     sendInput: (_id, data) => input.push(data),
     applyPaneRows: () => undefined,

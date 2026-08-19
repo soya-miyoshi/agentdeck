@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { NO_PANE_MODES, type PaneModes, readPaneModes } from "./pane-modes.ts";
 import { endTree, readProcessTable, treeOf } from "./processes.ts";
 
 const run = promisify(execFile);
@@ -512,6 +513,28 @@ export class Tmux {
       // A session that has gone has no alternate screen and no history either, so the answer the
       // caller acts on is the same one it would get from the capture that follows.
       if (isMissingSession(error) || isEmptyTmux(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * The pane's terminal MODES, which a repaint does not carry: `refresh-client -R` emits cells and
+   * nothing else, so a client rebuilt from a snapshot believes the normal screen and no mouse.
+   */
+  async paneModes(id: string): Promise<PaneModes> {
+    try {
+      const stdout = await this.#tmux([
+        "display-message",
+        "-p",
+        "-t",
+        exactWindowTarget(id),
+        // Five 0/1 digits, so no separator can be forged and no locale can mangle them.
+        "#{alternate_on}#{mouse_standard_flag}#{mouse_button_flag}#{mouse_all_flag}#{mouse_sgr_flag}",
+      ]);
+      return readPaneModes(stdout);
+    } catch (error) {
+      // A session that has gone has no modes to state, and the empty answer sets none.
+      if (isMissingSession(error) || isEmptyTmux(error)) return NO_PANE_MODES;
       throw error;
     }
   }

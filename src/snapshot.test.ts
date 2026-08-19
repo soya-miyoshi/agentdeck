@@ -75,6 +75,7 @@ const coldSnapshot = async (id: string, stream: SessionStream) =>
     buffer: stream.buffer,
     captureHistory: async () => await hub.captureHistory(id, 2000),
     alternateScreen: async () => await hub.isAlternateScreen(id),
+    paneModes: async () => await Promise.resolve(""),
     repaint: async () => await hub.repaint(id),
   });
 

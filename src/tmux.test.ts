@@ -501,6 +501,22 @@ void describe("alternate screen", () => {
   });
 });
 
+void describe("the pane's modes", () => {
+  void test("reads the five flags in one call", async () => {
+    // Verified by hand against a live Claude Code 2.1 pane on the deck's socket: `10011`, which is
+    // the alternate screen with all-motion tracking in SGR.
+    const { tmux, calls } = fake({ "display-message": "10011\n" });
+    assert.deepEqual(await tmux.paneModes("s"), { alternate: true, tracking: 1003, sgr: true });
+    assert.ok(calls[0]?.some((arg) => arg.includes("#{mouse_all_flag}")));
+  });
+
+  void test("a session that has gone has no modes to state", async () => {
+    const error = Object.assign(new Error("exited"), { stderr: "can't find session: s" });
+    const { tmux } = fake({ "display-message": error });
+    assert.deepEqual(await tmux.paneModes("s"), { alternate: false, tracking: 0, sgr: false });
+  });
+});
+
 void describe("error classification", () => {
   void test("distinguishes an empty server from a missing session", () => {
     const empty = { stderr: "no server running on /tmp/x" };

@@ -34,6 +34,8 @@ export interface Snapshot {
   history?: string;
   /** The live screen, as a repaint that IS the stream, so `seq` is answerable. */
   data: string;
+  /** The pane's terminal modes, which the repaint's cells do not carry. Absent when none are set. */
+  modes?: string;
 }
 
 export interface SnapshotSources {
@@ -49,6 +51,11 @@ export interface SnapshotSources {
    */
   alternateScreen: () => Promise<boolean>;
   /**
+   * The modes tmux holds for the pane, as the bytes that set them. A repaint states cells and not
+   * one mode, so without this a client rebuilt from a snapshot has a freshly opened terminal's.
+   */
+  paneModes: () => Promise<string>;
+  /**
    * `refresh-client -R`: the live screen as bytes that ARE the stream, with the byte count after
    * the repaint's last byte - the only `seq` a snapshot's `data` can honestly carry.
    */
@@ -61,6 +68,7 @@ export interface SnapshotSources {
  */
 export const buildSnapshot = async (sources: SnapshotSources): Promise<Snapshot> => {
   const history = (await sources.alternateScreen()) ? "" : await sources.captureHistory();
+  const modes = await sources.paneModes();
   // Last, so nothing between the repaint and the seq it is stamped with can move the counter.
   const live = await sources.repaint();
   const snapshot: Snapshot = {
@@ -71,5 +79,7 @@ export const buildSnapshot = async (sources: SnapshotSources): Promise<Snapshot>
   // Absent rather than empty: on the alternate screen there is no scrollback at all, which is
   // correct rather than degraded.
   if (history !== "") snapshot.history = history;
+  // Absent rather than empty for an ordinary shell, which has set none of them.
+  if (modes !== "") snapshot.modes = modes;
   return snapshot;
 };

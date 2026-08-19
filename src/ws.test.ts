@@ -30,6 +30,7 @@ before(async () => {
     listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("scrollback\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
+    paneModes: async () => await Promise.resolve(""),
     repaint: async () =>
       await Promise.resolve({ data: "repainted screen", seq: stream.buffer.headSeq }),
     sendInput: (_id, data) => input.push(data),
@@ -122,6 +123,7 @@ const privateServer = async (
     listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("scrollback\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
+    paneModes: async () => await Promise.resolve(""),
     repaint,
     sendInput: () => undefined,
     applyPaneRows: () => undefined,
@@ -312,7 +314,7 @@ void describe("refusals", () => {
 
 // Three tests about the cold snapshot on the wire, each needing its own server because it varies a
 // dep the shared fixture fixes. One helper, since they differ only in which source they replace.
-type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "repaint">;
+type SnapshotDeps = Pick<WsDeps, "captureHistory" | "isAlternateScreen" | "paneModes" | "repaint">;
 
 const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapshotTimeoutMs">>) => {
   const own = createServer();
@@ -324,6 +326,7 @@ const ownServer = async (overrides: Partial<SnapshotDeps & Pick<WsDeps, "snapsho
     listSessions: async () => await Promise.resolve([]),
     captureHistory: async () => await Promise.resolve("what vim currently looks like\n"),
     isAlternateScreen: async () => await Promise.resolve(false),
+    paneModes: async () => await Promise.resolve(""),
     repaint: async () => await Promise.resolve({ data: "", seq: ownStream.buffer.headSeq }),
     sendInput: () => undefined,
     applyPaneRows: () => undefined,
@@ -387,6 +390,7 @@ void describe("the snapshot frame on the wire", () => {
     // above the live screen, and on the alternate screen it would be the TUI's own frame.
     const tui = await ownServer({
       isAlternateScreen: async () => await Promise.resolve(true),
+      paneModes: async () => await Promise.resolve(""),
       repaint: async () => await Promise.resolve({ data: "vim, repainted", seq: 7 }),
     });
     tui.attach();
@@ -829,6 +833,7 @@ void describe("a state change goes to every open socket, not only the attached o
       listSessions: async () => await Promise.resolve([]),
       captureHistory: async () => await Promise.resolve("scrollback\n"),
       isAlternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
       sendInput: () => undefined,
       applyPaneRows: () => undefined,
@@ -927,6 +932,7 @@ void describe("a socket is given the session list the moment it opens", () => {
       listSessions: async () => await Promise.resolve(listed),
       captureHistory: async () => await Promise.resolve("scrollback\n"),
       isAlternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: async () => await Promise.resolve({ data: "", seq: s1.buffer.headSeq }),
       sendInput: () => undefined,
       applyPaneRows: () => undefined,
@@ -969,6 +975,7 @@ void describe("a socket is given the session list the moment it opens", () => {
       listSessions: () => Promise.reject(new Error("tmux did not answer")),
       captureHistory: async () => await Promise.resolve(""),
       isAlternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: async () => await Promise.resolve({ data: "", seq: 0 }),
       sendInput: () => undefined,
       applyPaneRows: () => undefined,

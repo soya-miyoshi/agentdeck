@@ -1,3 +1,4 @@
+import { modeBytes } from "./pane-modes.ts";
 import { PANE_COLS } from "./protocol.ts";
 import { SessionPty } from "./pty.ts";
 import type { Registry } from "./registry.ts";
@@ -157,6 +158,11 @@ export class Hub {
 
   async captureHistory(sessionId: string, lines: number): Promise<string> {
     return await this.#tmux.captureHistory(sessionId, lines);
+  }
+
+  /** The pane's modes as the bytes that set them, for a snapshot to restate. */
+  async paneModes(sessionId: string): Promise<string> {
+    return modeBytes(await this.#tmux.paneModes(sessionId));
   }
 
   async isAlternateScreen(sessionId: string): Promise<boolean> {

@@ -23,6 +23,26 @@ void describe("a snapshot supersedes everything before it", () => {
     });
   });
 
+  void test("the pane's modes ride with it, since a repaint states none of them", () => {
+    const action = receiveSnapshot({
+      epoch: "e1",
+      seq: 12,
+      data: "the agent",
+      modes: "\u001b[?1049h\u001b[?1003h",
+    });
+    assert.deepEqual(action, {
+      kind: "repaint",
+      modes: "\u001b[?1049h\u001b[?1003h",
+      data: "the agent",
+      position: { epoch: "e1", seq: 12 },
+    });
+  });
+
+  void test("a shell's snapshot sets no modes rather than an empty string", () => {
+    const action = receiveSnapshot({ epoch: "e1", seq: 3, data: "prompt$ " });
+    assert.equal("modes" in action, false);
+  });
+
   void test("no history at all is absent rather than empty", () => {
     // Alternate-screen mode: a full-screen TUI has no scrollback to show, which is correct rather
     // than degraded.

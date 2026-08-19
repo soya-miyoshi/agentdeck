@@ -77,6 +77,7 @@ void describe("building a cold snapshot", () => {
       buffer,
       captureHistory: async () => await Promise.resolve("older lines\n"),
       alternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: repainting(buffer, "live screen"),
     });
     assert.equal(snapshot.epoch, "e1");
@@ -93,6 +94,7 @@ void describe("building a cold snapshot", () => {
       buffer,
       captureHistory: async () => await Promise.resolve(""),
       alternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: repainting(buffer, "[H[2Jprompt$ "),
     });
     assert.equal(snapshot.data, "[H[2Jprompt$ ");
@@ -111,11 +113,38 @@ void describe("building a cold snapshot", () => {
         return await Promise.resolve("what vim currently looks like\n");
       },
       alternateScreen: async () => await Promise.resolve(true),
+      paneModes: async () => await Promise.resolve(""),
       repaint: repainting(buffer, "vim, repainted"),
     });
     assert.equal("history" in snapshot, false);
     assert.equal(captured, false);
     assert.equal(snapshot.data, "vim, repainted");
+  });
+
+  void test("carries the modes a repaint does not, so the client is not a fresh terminal", async () => {
+    // `refresh-client -R` emits cells and not one DECSET, so a client rebuilt from a snapshot
+    // believed the normal screen with no mouse tracking whatever the agent had set.
+    const buffer = filled("e1", "");
+    const snapshot = await buildSnapshot({
+      buffer,
+      captureHistory: async () => await Promise.resolve(""),
+      alternateScreen: async () => await Promise.resolve(true),
+      paneModes: async () => await Promise.resolve("\u001b[?1049h\u001b[?1003h"),
+      repaint: repainting(buffer, "the agent, repainted"),
+    });
+    assert.equal(snapshot.modes, "\u001b[?1049h\u001b[?1003h");
+  });
+
+  void test("a shell's snapshot carries no modes rather than an empty string", async () => {
+    const buffer = filled("e1", "");
+    const snapshot = await buildSnapshot({
+      buffer,
+      captureHistory: async () => await Promise.resolve(""),
+      alternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
+      repaint: repainting(buffer, "prompt$ "),
+    });
+    assert.equal("modes" in snapshot, false);
   });
 
   void test("history is absent rather than empty when there is none", async () => {
@@ -125,6 +154,7 @@ void describe("building a cold snapshot", () => {
       buffer,
       captureHistory: async () => await Promise.resolve(""),
       alternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: repainting(buffer, "screen"),
     });
     assert.equal("history" in snapshot, false);
@@ -136,6 +166,7 @@ void describe("building a cold snapshot", () => {
       buffer,
       captureHistory: async () => await Promise.resolve(""),
       alternateScreen: async () => await Promise.resolve(false),
+      paneModes: async () => await Promise.resolve(""),
       repaint: repainting(buffer, "0123"),
     });
     assert.equal(snapshot.seq, 10);

@@ -55,7 +55,16 @@ export type ServerMessage =
   // The pane's width, stated on connect: what it is actually wrapped to is decided by the PTY this
   // server attached with, and a rebuilt client meets an unrestarted server every time.
   | { t: "hello"; cols: number }
-  | { t: "snapshot"; sessionId: string; epoch: string; seq: number; history?: string; data: string }
+  | {
+      t: "snapshot";
+      sessionId: string;
+      epoch: string;
+      seq: number;
+      history?: string;
+      data: string;
+      // The pane's terminal modes, which a repaint does not carry. Absent when none are set.
+      modes?: string;
+    }
   | { t: "chunk"; sessionId: string; epoch: string; seq: number; data: string }
   | { t: "state"; sessionId: string; state: SessionState; exitCode?: number }
   | { t: "sessions"; sessions: Session[] }
