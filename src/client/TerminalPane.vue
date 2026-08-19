@@ -5,6 +5,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
+import { scrollTarget, wheelDrag } from "./wheel.ts";
 
 // The deck's width is the SERVER's number, arriving as a prop: the agent lays its output out at the
 // width the PTY reports, and rendering at another leaves the difference as dead margin.
@@ -70,6 +71,21 @@ const rowHeight = (): number => {
   return host.value.clientHeight / term.rows;
 };
 
+/** The cell a touch is over, 1-based, for a wheel report the application can place. */
+const cellAt = (clientX: number, clientY: number): { col: number; row: number } => {
+  const term = terminal;
+  const box = host.value?.getBoundingClientRect();
+  if (term === undefined || box === undefined || term.cols === 0 || term.rows === 0) {
+    return { col: 1, row: 1 };
+  }
+  const col = Math.trunc(((clientX - box.left) / box.width) * term.cols) + 1;
+  const row = Math.trunc(((clientY - box.top) / box.height) * term.rows) + 1;
+  return {
+    col: Math.min(term.cols, Math.max(1, col)),
+    row: Math.min(term.rows, Math.max(1, row)),
+  };
+};
+
 const onTouchStart = (event: TouchEvent): void => {
   const point = event.touches[0];
   // Never preventDefault here: that is what makes a tap dead, keyboard and all.
@@ -88,8 +104,17 @@ const onTouchMove = (event: TouchEvent): void => {
   carry += moved / height;
   const lines = Math.trunc(carry);
   carry -= lines;
-  // Dragging down shows earlier output, which is a negative line delta.
-  if (lines !== 0) term.scrollLines(-lines);
+  // Dragging down shows earlier output, which is a negative line delta. An app tracking the mouse
+  // owns its own transcript - Claude Code holds all of it on the alternate screen, where the
+  // terminal has no scrollback - so the drag goes to it as wheel reports rather than scrolling here.
+  if (lines !== 0) {
+    if (scrollTarget(term.modes.mouseTrackingMode) === "application") {
+      const cell = cellAt(point.clientX, point.clientY);
+      emit("input", props.sessionId, wheelDrag(-lines, cell.col, cell.row));
+    } else {
+      term.scrollLines(-lines);
+    }
+  }
   event.preventDefault();
 };
 
