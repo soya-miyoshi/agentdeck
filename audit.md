@@ -2850,3 +2850,28 @@ before and after, and are about CI workflow files and the reconnection ladder, n
 
 **Not demonstrated: the phone.** Serve was re-applied and probed end to end over the `ts.net` name
 from the Mac, but no phone opened the deck in the course of this work.
+
+## Touch scrolling reaches the application (2026-08-19)
+
+The report: after a reload in the PWA, Claude's earlier output cannot be scrolled to.
+
+The cause is not the snapshot. Claude Code 2.1 stays on the alternate screen for the life of a
+session - `#{alternate_on}` was 1 and `#{history_size}` 0 for both live sessions when this was
+written - so `capture-pane` has nothing to return and `buildSnapshot` correctly omits history. The
+transcript exists only inside the agent, which tracks the mouse (all-motion 1003 with SGR 1006) in
+order to scroll it. The pane's drag handler was calling `scrollLines` on an alt buffer, which holds
+one frame and nothing before it.
+
+Fixed: `src/client/wheel.ts` decides where a drag goes from `term.modes.mouseTrackingMode`, and the
+pane sends SGR wheel reports when an application is tracking. A shell on the normal screen is
+unaffected and still scrolls xterm's own buffer.
+
+Accepted, with the reason:
+
+- **SGR encoding is assumed.** xterm's public `IModes` exposes the tracking mode but not the
+  encoding, so an app that enables 1000/1002/1003 WITHOUT 1006 would read these reports as typed
+  text. Every current TUI that tracks the mouse enables 1006; there is no API to check it.
+- **`x10` stays local** because that mode reports button presses only and has no wheel at all.
+- **The phone half is not demonstrated.** The escape sequence was verified by hand against a live
+  session on the deck's tmux socket (wheel-ups moved Claude's transcript, wheel-downs restored it);
+  the touch drag that produces it has only been checked on the Mac.
