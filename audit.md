@@ -2875,3 +2875,30 @@ Accepted, with the reason:
 - **The phone half is not demonstrated.** The escape sequence was verified by hand against a live
   session on the deck's tmux socket (wheel-ups moved Claude's transcript, wheel-downs restored it);
   the touch drag that produces it has only been checked on the Mac.
+
+## The modes a repaint does not carry (2026-08-19)
+
+The follow-up to the section above: wheel forwarding worked, then stopped, then worked again.
+
+Measured, not inferred. A pty was driven the way the server drives one, against a pane that had set
+`1049h`, `1003h` and `1006h`: `refresh-client -R` emitted cells, a cursor hide and a cursor show,
+and NOT ONE of the three modes. So every client rebuilt from a snapshot - a PWA reload, a
+reconnect, a rolled ring buffer - had a terminal in the state the browser had just opened it in,
+and `term.modes.mouseTrackingMode` said `none` for a pane whose agent was tracking every motion.
+Whether a drag worked came down to whether that client happened to be connected when the agent
+first sent the DECSET, which is exactly the reported intermittency.
+
+Fixed: `Tmux.paneModes` reads `#{alternate_on}` and the four mouse flags in one `display-message`,
+`src/pane-modes.ts` renders them as the bytes that set them, and the snapshot carries them. The
+client writes them between the clear and the screen.
+
+Also measured: with tmux `mouse off`, tmux passes SGR wheel bytes through to the pane verbatim - it
+neither claims them nor drops them - so the input path was never in question.
+
+Accepted, with the reason:
+
+- **The ring-buffer fallback snapshot carries no modes.** `ws.ts` has a degraded path that sends
+  the raw buffer when a queue was dropped and the buffer no longer covers the position. What that
+  path holds depends on the window; it is rare and it self-corrects on the next real snapshot.
+- **The modes are read once, at snapshot time.** An agent that changes them afterwards is followed
+  through the live stream, which is where xterm has always tracked them correctly.
