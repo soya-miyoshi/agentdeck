@@ -591,8 +591,10 @@ const messageOf = (error: unknown): string => {
 
 // Three sentences that all mean "nothing here to list", picked between by version and platform.
 // Observed on tmux 3.7b rather than assumed, so a fourth wording is likelier than not.
+// "no current target" is `list-panes -a` on a live server holding no sessions - normal here,
+// because `exit-empty off` keeps the server up after the last session goes.
 export const isEmptyTmux = (error: unknown): boolean =>
-  /no server running|no sessions|error connecting to/i.test(messageOf(error));
+  /no server running|no sessions|no current target|error connecting to/i.test(messageOf(error));
 
 export const isMissingSession = (error: unknown): boolean =>
   /can't find session|session not found/i.test(messageOf(error));

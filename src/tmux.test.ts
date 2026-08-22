@@ -531,6 +531,16 @@ void describe("error classification", () => {
     assert.equal(isEmptyTmux("boom"), false);
     assert.equal(isMissingSession(undefined), false);
   });
+
+  // `exit-empty off` leaves the server up with no sessions, and `list-panes -a` calls that
+  // "no current target". Read as a failure it made GET /api/processes a 500 whenever the deck
+  // had no session open, which is the state it boots in.
+  void test("an empty pane list is not an error", async () => {
+    assert.equal(isEmptyTmux({ stderr: "no current target" }), true);
+    assert.equal(isMissingSession({ stderr: "no current target" }), false);
+    const { tmux } = fake({ "list-panes": new Error("no current target") });
+    assert.deepEqual(await tmux.panePids(), []);
+  });
 });
 
 // --- Against a real tmux server ---
