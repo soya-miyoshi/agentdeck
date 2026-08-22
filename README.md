@@ -44,16 +44,73 @@ with a real TLS certificate — nothing is exposed to the public internet.
 
 ## Requirements
 
-- **macOS**, with **tmux** installed.
-- **Node 22.18+** and **pnpm 9** (both pinned in `mise.toml` — `mise install` gets them).
-- **[ghq](https://github.com/x-motemen/ghq)**. agentdeck's default launch path derives its allowlist
-  from `ghq root --all`, so your repositories are expected to live under a ghq root. Without ghq,
-  set `AGENTDECK_MOUNTS` by hand instead (see [Environment](#environment)).
-- **[Tailscale](https://tailscale.com/)** on both the Mac and the phone, and on the Mac the
-  **standalone** build from <https://pkgs.tailscale.com/stable/> rather than the Mac App Store one
-  (see [`docs/setup.md`](docs/setup.md#2-tailscale-on-the-mac)). This is not optional for phone
-  access: the server listens on `127.0.0.1` and never on a LAN address.
-- At least one agent CLI you want to run — Claude Code, Gemini CLI, or just a shell.
+macOS, and five things: **tmux**, **[ghq](https://github.com/x-motemen/ghq)**,
+**[Tailscale](https://tailscale.com/)** (on the Mac and on the phone), **Node 22.18+** with
+**pnpm 9**, and at least one agent CLI to run — Claude Code, Gemini CLI, or just a shell.
+
+Homebrew is the shortest way to tmux and ghq. If you do not have it, install it from
+<https://brew.sh> — and put it on your `PATH`, because on Apple Silicon it lands in
+`/opt/homebrew/bin`, which is **not** in macOS's default `PATH`:
+
+```sh
+eval "$(/opt/homebrew/bin/brew shellenv)"   # in ~/.zshrc; /usr/local on Intel
+brew install tmux ghq
+```
+
+Tailscale on the Mac should be the **standalone** build from <https://pkgs.tailscale.com/stable/>,
+not the Mac App Store one (see [`docs/setup.md`](docs/setup.md#2-tailscale-on-the-mac)).
+
+Node and pnpm are pinned in `mise.toml`, so `mise install` gets the versions this repo is tested
+against. mise needs its activation line in the same rc file, or `node` stays whatever macOS has:
+
+```sh
+curl https://mise.run | sh
+eval "$(mise activate zsh)"                 # in ~/.zshrc, after brew shellenv
+mise install                                # node 22, pnpm 9
+```
+
+Why each one is there:
+
+- **tmux** — the sessions _are_ tmux sessions, one per repository. The server shells out to `tmux`.
+- **ghq** — `make start` fills the allowlist from `ghq root --all`, so every repository you have
+  cloned is startable and a new clone needs no restart. Nothing inside the server knows about ghq:
+  without it, skip `make` and set `AGENTDECK_MOUNTS` by hand (see [Environment](#environment)).
+- **Tailscale** — not optional for phone access. The server listens on `127.0.0.1` and never on a
+  LAN address, so the tailnet is the only route in.
+- **Node 22.18+ and pnpm 9** — the server runs from its TypeScript sources with no build step, which
+  is what needs 22.18 rather than any Node 22.
+
+### PATH
+
+Three different processes go looking for these, and they do not share a `PATH`.
+
+**The shell you run `make` in** needs `ghq` and `node`. The Makefile calls `ghq root --all` and
+refuses to start rather than boot with an empty allowlist, which is a server that runs fine and can
+start nothing.
+
+**The server** needs `tmux`, and needs each agent profile's command. With `tmux` missing the boot
+prints its warnings and then dies on `Error: spawn tmux ENOENT`. An agent command that does not
+resolve is not fatal — it is greyed out in the phone's picker as "not on PATH on the Mac; it cannot
+be started", checked when the list is served rather than at spawn.
+
+**Every session** gets the server's `PATH`, verbatim. A session's environment is built rather than
+inherited — `PATH`, `HOME`, `SHELL`, `TERM`, the locale, `TMPDIR`, `USER`, `LOGNAME`, plus whatever
+the profile lists, and nothing else (`baseEnv` in `src/tmux.ts`). So the `PATH` of the shell you ran
+`make start` in is the `PATH` your agents have, and a tool missing there is missing inside every
+session on the phone.
+
+`tailscale` is the exception: **it does not have to be on `PATH` at all.**
+`scripts/tailscale-serve.mjs` and the watchdog try three absolute locations and never consult
+`PATH` — `/opt/homebrew/bin/tailscale`, `/usr/local/bin/tailscale`, and
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale` — with `AGENTDECK_TAILSCALE` overriding all
+three. The Mac App Store build only has the third of those; its **Install CLI** menu item is what
+creates the second, as a symlink. Typing `tailscale ...` by hand, as [Tailscale](#tailscale) below
+does, needs it on `PATH` like anything else.
+
+None of this carries over to `launchd`, if you get as far as installing the watchdog: launchd
+expands nothing — no `~`, no login shell — and hands a job a minimal `PATH` with neither Homebrew
+nor mise on it. `scripts/com.agentdeck.watchdog.plist` therefore sets `PATH` itself, absolute and
+system directories first.
 
 ## Setup
 
