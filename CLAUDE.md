@@ -92,8 +92,9 @@ separating them - so an orphan that changed directory elsewhere is missed on pur
   `.prettierrc*`, `mise.toml`, `mise-tasks/`, `scripts/`, `.claude/`, `.github/workflows/`,
   `.git/config`, `.git/hooks/`, `src/client/public/` (published unauthenticated). Test files under
   `src/**/*.test.ts` are host-executed too but writing them is expected.
-- **Commit, do not push.** `origin` is GitHub (`soya-miyoshi/agentdeck`) and Soya pushes. It can
-  move ahead of local `main`: fetch and rebase onto it before assuming `main` is current.
+- **Commit, then push `main` to `origin`** (GitHub, `soya-miyoshi/agentdeck`, a PUBLIC repo). Before
+  pushing, read the outgoing diff for tokens, tailnet names, personal paths and emails. Fetch and
+  rebase onto `origin/main` first; never force-push.
 
 ## What this thing is, in one paragraph
 
