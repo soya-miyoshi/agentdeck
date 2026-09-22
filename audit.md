@@ -2917,3 +2917,9 @@ Accepted, with the reason:
 - **An agent in the pane can still print a Claude-hosted URL of its choosing.** The allowlist stops a
   foreign host, not a crafted path on a real one. The same agent could already type into anything.
 - **The panel polls the buffer every second while open**, scanning scrollback. Only while open.
+
+Reported from the phone after the above: tapping the code field made the panel jump and nothing
+could be typed. Inferred, not reproduced: the keyboard resizes the pane, the repaint clears it, a
+re-read in that gap finds no URL, and the panel flipped branches and remounted the field - blur,
+keyboard closes, pane resizes back, URL found, repeat. Fixed by keeping the last URL on a miss and
+mounting the field outside the branch. Whether that was the whole cause is for the phone to say.

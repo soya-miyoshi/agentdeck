@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { codeBytes, loginUrl } from "./login.ts";
+import { codeBytes, keptUrl, loginUrl } from "./login.ts";
 
 const URL =
   "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&code_challenge=ep6XleOSvoieJYD&code_challenge_method=S256&state=1r8WIfut-sNJJ6UxGFXf";
@@ -63,6 +63,17 @@ void describe("the login URL", () => {
 
   void test("is absent when nothing on the pane is a login", () => {
     assert.equal(loginUrl(["see https://example.com/docs", "$ ls"], 60), undefined);
+  });
+});
+
+void describe("the URL the panel keeps", () => {
+  void test("survives a re-read that finds nothing, as a repaint mid-clear does", () => {
+    assert.equal(keptUrl(URL, undefined), URL);
+  });
+
+  void test("moves to a newer attempt's URL", () => {
+    const newer = URL.replace("state=1r8", "state=NEW");
+    assert.equal(keptUrl(URL, newer), newer);
   });
 });
 

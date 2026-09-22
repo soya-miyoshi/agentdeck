@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from "vue";
 
-import { codeBytes } from "./login.ts";
+import { codeBytes, keptUrl } from "./login.ts";
 
 // `/login` for a phone: the URL the pane split across rows as one link, and a field for the code.
 // Reads the pane on a timer while open, because the URL appears only after a method is chosen.
@@ -14,7 +14,7 @@ const code = ref("");
 const copyLabel = ref("Copy URL");
 
 const timer = setInterval(() => {
-  url.value = props.find();
+  url.value = keptUrl(url.value, props.find());
 }, 1000);
 onBeforeUnmount(() => {
   clearInterval(timer);
@@ -59,20 +59,21 @@ const submit = (): void => {
         <button class="act" type="button" @click="emit('close')">Close</button>
       </div>
       <p class="url">{{ url }}</p>
-      <form class="row" @submit.prevent="submit">
-        <input
-          v-model="code"
-          class="code"
-          type="text"
-          placeholder="Paste the code from the browser"
-          autocapitalize="off"
-          autocomplete="off"
-          autocorrect="off"
-          spellcheck="false"
-        />
-        <button class="act send" type="submit" :disabled="code.trim() === ''">Send code</button>
-      </form>
     </template>
+    <!-- Outside the branches, so nothing that happens to the URL can remount it while typed in. -->
+    <form class="row" @submit.prevent="submit">
+      <input
+        v-model="code"
+        class="code"
+        type="text"
+        placeholder="Paste the code from the browser"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+      />
+      <button class="act send" type="submit" :disabled="code.trim() === ''">Send code</button>
+    </form>
   </section>
 </template>
 

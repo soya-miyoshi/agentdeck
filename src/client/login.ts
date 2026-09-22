@@ -39,6 +39,13 @@ const trusted = (url: string): boolean => {
 };
 
 /**
+ * The URL the panel shows after a re-read. A miss keeps the last one: a repaint clears the pane for a
+ * moment, and flipping the panel then remounts the code field under the thumb typing into it.
+ */
+export const keptUrl = (shown: string | undefined, found: string | undefined): string | undefined =>
+  found ?? shown;
+
+/**
  * The bytes that hand a pasted code to the prompt. Whitespace is dropped everywhere, not only at the
  * ends: a code has none, and a phone's paste brings a trailing newline that would reach the prompt.
  */
