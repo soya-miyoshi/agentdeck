@@ -149,6 +149,7 @@ const paintedTerminal = (): TerminalHandle & { text: () => string } => {
     size: () => ({ cols: 80, rows: 24 }),
     copyText: () => painted,
     applicationCursorKeys: () => false,
+    rows: () => ({ cols: 80, rows: painted.split("\n") }),
     text: () => painted,
   };
 };

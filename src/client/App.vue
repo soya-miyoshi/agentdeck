@@ -22,6 +22,8 @@ import { Connection, type ConnectionStatus } from "./connection.ts";
 import { downscale } from "./image.ts";
 import { type KeyName, keyBytes, spendable, withCtrl } from "./key-row.ts";
 import KeyRow from "./KeyRow.vue";
+import { loginUrl } from "./login.ts";
+import LoginPanel from "./LoginPanel.vue";
 import NewSession from "./NewSession.vue";
 import ProcessList from "./ProcessList.vue";
 import TabStrip from "./TabStrip.vue";
@@ -298,7 +300,9 @@ const copyScreen = async (): Promise<void> => {
   } catch {
     // Refused rather than failed: a browser only allows this from a user gesture and a secure
     // origin, and saying "copied" when it did not is the confidently-wrong result this app refuses.
-    note("the browser refused the clipboard - copy needs an https address, which the tailnet gives");
+    note(
+      "the browser refused the clipboard - copy needs an https address, which the tailnet gives",
+    );
     return;
   }
   copyLabel.value = "Copied";
@@ -311,6 +315,18 @@ const copyScreen = async (): Promise<void> => {
 // Open state lives here because the control is in the New session bar and the list hangs below it.
 // Unmounted while closed, so the `ps` of the whole machine runs only when someone asks.
 const processesOpen = ref(false);
+
+// The sign-in helper for the active pane. Closed on a tab change: its link belongs to one session.
+const loginOpen = ref(false);
+watch(active, () => {
+  loginOpen.value = false;
+});
+
+const findLoginUrl = (): string | undefined => {
+  const id = active.value;
+  const screen = id === undefined ? undefined : handles.get(id)?.rows();
+  return screen === undefined ? undefined : loginUrl(screen.rows, screen.cols);
+};
 
 const uploading = ref(false);
 
@@ -407,6 +423,16 @@ if (token.value !== undefined) start(token.value);
         >
           {{ copyLabel }}
         </button>
+        <!-- `/login` prints a URL a phone cannot select and asks for a code it cannot easily paste. -->
+        <button
+          v-if="active !== undefined"
+          class="beside"
+          type="button"
+          :aria-expanded="loginOpen"
+          @click="loginOpen = !loginOpen"
+        >
+          Login
+        </button>
         <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
         <UploadImage
           v-if="active !== undefined"
@@ -416,6 +442,12 @@ if (token.value !== undefined) start(token.value);
       </template>
     </NewSession>
     <ProcessList v-if="processesOpen" :token="token" />
+    <LoginPanel
+      v-if="loginOpen && active !== undefined"
+      :find="findLoginUrl"
+      @send="(bytes) => active !== undefined && connection?.input(active, bytes)"
+      @close="loginOpen = false"
+    />
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
     <p v-for="message in errors" :key="message" class="banner error">{{ message }}</p>

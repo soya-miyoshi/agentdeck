@@ -217,6 +217,14 @@ onMounted(() => {
     // xterm tracks DECCKM as the application sets and clears it, so the key row's arrows take
     // their form from the terminal rather than from a guess about what is running.
     applicationCursorKeys: () => term.modes.applicationCursorKeysMode,
+    rows: () => {
+      const buffer = term.buffer.active;
+      const rows: string[] = [];
+      for (let row = 0; row < buffer.length; row += 1) {
+        rows.push(buffer.getLine(row)?.translateToString(true) ?? "");
+      }
+      return { cols: term.cols, rows };
+    },
   });
   passes = 4;
   refit();

@@ -201,6 +201,7 @@ const paintedTerminal = (): TerminalHandle & { text: () => string; clears: () =>
     // The real one reads xterm's DECCKM. Nothing here paints, so it is stated: the key row's
     // arrows are tested against both answers below rather than against whichever one is baked in.
     applicationCursorKeys: () => false,
+    rows: () => ({ cols: 80, rows: painted.split("\n") }),
     text: () => painted,
   };
 };

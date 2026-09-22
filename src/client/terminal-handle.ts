@@ -1,5 +1,5 @@
 // What the rest of the client may do to an xterm instance: narrow on purpose, so the component owns
-// the Terminal and everything outside deals in these five verbs.
+// the Terminal and everything outside deals in these six verbs.
 
 export interface TerminalHandle {
   write: (data: string) => void;
@@ -16,4 +16,6 @@ export interface TerminalHandle {
    * knows which of `ESC [ A` and `ESC O A` the application in the pane expects.
    */
   applicationCursorKeys: () => boolean;
+  /** Every row in the buffer, scrollback included, right-trimmed, with the width they were drawn at. */
+  rows: () => { cols: number; rows: string[] };
 }

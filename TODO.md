@@ -570,6 +570,20 @@ not support getting TLS certs`. Both switches are at
       no-zoom-on-tap guard, nor that the pane has stopped opening the keyboard. What IS proven is
       what the bytes do: two end-to-end cases against a real server, tmux, pty and shell.
 
+- [x] **`m4/login-panel`** — `/login` from the phone. Reported: the URL could not be copied, and
+      the code could not be handed to Claude. `/login` draws its URL across as many rows as the pane
+      is wide, tmux redraws them as separate rows, and Copy took them with newlines in. A Login
+      button in the New session bar opens a panel that rejoins the newest authorize URL from the
+      pane (a row continues it only when the one before reached the right edge), offers it as a link
+      and a Copy, and sends a pasted code with every whitespace dropped and a CR. Only claude.com,
+      claude.ai and anthropic.com hosts are offered: anything in a pane can print that shape.
+      *Not demonstrated: the panel itself, in any browser.* Claude in Chrome was not connected.
+      What was shown: against a throwaway deck on its own socket, a real Claude session at `/login`
+      at 60 columns gave rows that `loginUrl` rejoined to the full 465-character URL with all eight
+      parameters, and `codeBytes` sent over the real WebSocket was submitted at Claude's prompt
+      (a 400 for the fake code). Why the code failed on the phone before is NOT established: the
+      same bytes through the Composer path also submit, so the likely cause was the mangled URL.
+
 ---
 
 ## M5 — Push (optional)

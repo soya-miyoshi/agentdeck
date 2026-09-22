@@ -2902,3 +2902,18 @@ Accepted, with the reason:
   path holds depends on the window; it is rare and it self-corrects on the next real snapshot.
 - **The modes are read once, at snapshot time.** An agent that changes them afterwards is followed
   through the live stream, which is where xterm has always tracked them correctly.
+
+## The login panel (2026-09-22)
+
+Measured: `code\r` in one pty write submits at Claude's "Paste code here" prompt, as does the text
+then CR separately. So the pty path was never the fault for the code; the URL was.
+
+Accepted, with the reason:
+
+- **The URL is read off the rendered pane, a heuristic.** A future `/login` layout that indents the
+  continuation differently or puts text beside the URL on its rows would defeat it; the panel then
+  says no URL is on the pane rather than offering a wrong one, and the host allowlist bounds what a
+  wrong one could be.
+- **An agent in the pane can still print a Claude-hosted URL of its choosing.** The allowlist stops a
+  foreign host, not a crafted path on a real one. The same agent could already type into anything.
+- **The panel polls the buffer every second while open**, scanning scrollback. Only while open.
