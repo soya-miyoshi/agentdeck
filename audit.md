@@ -2923,3 +2923,22 @@ could be typed. Inferred, not reproduced: the keyboard resizes the pane, the rep
 re-read in that gap finds no URL, and the panel flipped branches and remounted the field - blur,
 keyboard closes, pane resizes back, URL found, repeat. Fixed by keeping the last URL on a miss and
 mounting the field outside the branch. Whether that was the whole cause is for the phone to say.
+
+## Remembered tab, and the stale `no session` banner (2026-09-25)
+
+The selected tab is kept in `localStorage` (`agentdeck.activeTab`) and preferred whenever nothing is
+selected yet; a remembered tab whose session is gone falls back to the first, as before.
+
+Closing a tab left `no session <id>` in the error banner until a reload. Cause read from the code,
+not captured on the wire: the pane unmounts after the kill and detaches from a session the server
+has already dropped. Fixed on the client: a session-scoped error for a session not in the list is
+not shown, and one already shown goes when its session leaves the list.
+
+Accepted, with the reason:
+
+- **Every error about a session absent from the list is suppressed, not only the detach one.** A
+  session with no tab has nothing to act on. Only session-scoped errors; the rest still show.
+- **The detach itself is still sent**, and the server still answers it. Harmless, and changing
+  `Connection` to forget silently was more than the symptom needed.
+- **Not demonstrated in a browser or on the phone.** The deck already serves the rebuilt bundle; the
+  agent does not hold the token, so a reload on the phone is the check.

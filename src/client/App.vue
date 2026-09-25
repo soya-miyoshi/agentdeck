@@ -29,6 +29,7 @@ import ProcessList from "./ProcessList.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
+import { loadTab, saveTab } from "./tab-store.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 import { clearToken, loadToken, saveToken } from "./token-store.ts";
 import TokenGate from "./TokenGate.vue";
@@ -43,7 +44,7 @@ const cwds = ref<Cwd[]>([]);
 const starting = ref(false);
 const active = ref<string>();
 const status = ref<ConnectionStatus>("closed");
-const errors = ref<string[]>([]);
+const errors = ref<{ sessionId?: string; message: string }[]>([]);
 const connection = shallowRef<Connection>();
 
 // The width every pane renders at: this bundle's constant only until a socket says otherwise. The
@@ -58,9 +59,10 @@ const handles = new Map<string, TerminalHandle>();
 const tabs = computed(() => toTabs(sessions.value, agents.value));
 const reconnecting = computed(() => status.value === "reconnecting");
 
-const note = (message: string): void => {
+const note = (message: string, sessionId?: string): void => {
   // Newest first, and bounded: an error surface that grows without limit becomes the page.
-  errors.value = [message, ...errors.value].slice(0, 3);
+  const entry = sessionId === undefined ? { message } : { sessionId, message };
+  errors.value = [entry, ...errors.value].slice(0, 3);
 };
 
 const signOut = (message: string): void => {
@@ -80,11 +82,14 @@ const signOut = (message: string): void => {
  * session takes its terminal: a pane attached to nothing looks exactly like one that might change.
  */
 const settle = (): void => {
-  active.value = selectTab(tabs.value, active.value);
+  // With nothing selected yet, the tab remembered from the last page load is the one to prefer.
+  active.value = selectTab(tabs.value, active.value ?? loadTab(window.localStorage));
   const live = new Set(tabs.value.map((tab) => tab.id));
   const kept = [...opened.value].filter((id) => live.has(id));
   if (active.value !== undefined) kept.push(active.value);
   opened.value = new Set(kept);
+  // An error about a session that no longer exists has nothing left to act on, so it goes with it.
+  errors.value = errors.value.filter((e) => e.sessionId === undefined || live.has(e.sessionId));
 };
 
 const refresh = async (current: string): Promise<void> => {
@@ -198,8 +203,10 @@ const start = (current: string): void => {
       paneCols: (cols) => {
         paneCols.value = cols;
       },
-      error: (_sessionId, message) => {
-        note(message);
+      error: (sessionId, message) => {
+        // A closed tab's pane detaches after the server already dropped it, and earns `no session`.
+        if (sessionId !== undefined && !sessions.value.some((s) => s.id === sessionId)) return;
+        note(message, sessionId);
       },
       status: (next) => {
         status.value = next;
@@ -236,6 +243,11 @@ const ctrlLatched = ref(false);
 // the wrong agent is unnoticeable. Disarming on any tab change costs one tap when it was meant.
 watch(active, () => {
   ctrlLatched.value = false;
+});
+
+// Remember the selection for the next page load. An empty strip keeps the last one: nothing replaced it.
+watch(active, (id) => {
+  if (id !== undefined) saveTab(window.localStorage, id);
 });
 
 const send = (data: string): void => {
@@ -450,7 +462,7 @@ if (token.value !== undefined) start(token.value);
     />
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
-    <p v-for="message in errors" :key="message" class="banner error">{{ message }}</p>
+    <p v-for="error in errors" :key="error.message" class="banner error">{{ error.message }}</p>
     <main class="panes">
       <TerminalPane
         v-for="id in [...opened]"
