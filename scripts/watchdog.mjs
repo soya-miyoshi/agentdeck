@@ -26,6 +26,9 @@ const SLOW_MS = ms("AGENTDECK_WATCHDOG_SLOW_MS", 3_000);
 const TOOL_TIMEOUT_MS = ms("AGENTDECK_WATCHDOG_TOOL_TIMEOUT_MS", 5_000);
 const STOP_GRACE_MS = ms("AGENTDECK_WATCHDOG_STOP_GRACE_MS", 10_000);
 const GIVE_UP_REALERT_MS = ms("AGENTDECK_WATCHDOG_REALERT_MS", 3_600_000);
+// Every run of the macOS Tailscale CLI re-saves the VPN configuration, which macOS answers with a
+// network change and a preboot-volume rewrite; every pass made that 120 times an hour (audit.md).
+const SERVE_CHECK_EVERY_MS = ms("AGENTDECK_WATCHDOG_SERVE_EVERY_MS", 900_000);
 
 // Absolute, and both in directories this user cannot write: PATH order does nothing for a command
 // whose only copy lives in a user-writable directory (audit.md). `osascript` stays on PATH.
@@ -60,6 +63,8 @@ const emptyState = {
   gaveUpAlertedAt: 0,
   pid: null,
   serveConfigured: false,
+  serveCheckedAt: 0,
+  serveFunnel: false,
   startRefused: false,
 };
 
@@ -346,6 +351,11 @@ const serveState = async () => {
 /** Reports it, and only notifies for "was configured last pass and is gone" - never configured is
  *  the expected state of an unbuilt milestone (plan 006). */
 const checkServe = async (state) => {
+  // Throttled, except while Funnel was on: that alert repeats every pass. A stamp that is unusable
+  // or in the future counts as never checked, so a planted one cannot buy silence.
+  const last = Number(state.serveCheckedAt);
+  const usable = Number.isFinite(last) && last > 0 && last <= Date.now();
+  if (usable && state.serveFunnel !== true && Date.now() - last < SERVE_CHECK_EVERY_MS) return;
   const serve = await serveState();
   if (serve === null) {
     // No fall back to PATH: the writable copy is exactly what must not be executed here. The
@@ -358,6 +368,8 @@ const checkServe = async (state) => {
     return;
   }
   const { configured, funnel } = serve;
+  state.serveCheckedAt = Date.now();
+  state.serveFunnel = funnel;
 
   // Funnel is the public internet. The install script refuses to run under it, but that check
   // happens once and this is the only thing that looks again - so exposure widening after the

@@ -71,6 +71,8 @@ interface State {
   gaveUpAlertedAt: number;
   pid: number | null;
   serveConfigured: boolean;
+  serveCheckedAt?: number;
+  serveFunnel?: boolean;
   startRefused: boolean;
 }
 
@@ -855,6 +857,8 @@ void describe("the watchdog survives its own surroundings", () => {
       gaveUpAlertedAt: 0,
       pid: listenerPid(port),
       serveConfigured: false,
+      serveCheckedAt: 0,
+      serveFunnel: false,
       startRefused: false,
     });
   });
@@ -1209,6 +1213,85 @@ void describe("exposure is watched, not just availability", () => {
     const outcome = pass(port, asStubRepo);
     assert.match(outcome.stdout, /tailscale serve is configured for the port/);
     assert.match(notified(), /now publishes port/, "exposure appeared silently");
+  });
+});
+
+void describe("the serve check runs every fifteen minutes, not every pass", () => {
+  // Each run of the macOS Tailscale CLI re-saves the VPN configuration, and macOS answers every
+  // save with a network change and a preboot rewrite. The stub counts runs, so "asked" is a fact.
+  const MINUTE = 60_000;
+  let port = "";
+  let healthy: ReturnType<typeof spawn>;
+  const runs = join(conf, "tailscale-runs.txt");
+
+  const stubTailscale = (output: string): void => {
+    putStub("tailscale", `#!/bin/sh\necho run >> '${runs}'\ncat <<'EOF'\n${output}\nEOF\nexit 0\n`);
+  };
+  const asked = (): number =>
+    existsSync(runs) ? readFileSync(runs, "utf8").split("\n").filter(Boolean).length : 0;
+  const configured = (): string => `|-- / proxy http://127.0.0.1:${port}`;
+
+  before(async () => {
+    port = await freePort();
+    freshTranscript("serve-throttle");
+    healthy = await startStub("stub health server", port, healthyStub(port));
+  });
+
+  after(() => {
+    healthy.kill("SIGKILL");
+    rmSync(join(stubs, "tailscale"), { force: true });
+  });
+
+  void test("checked fourteen minutes ago: not asked again, and what it knew is kept", () => {
+    stubTailscale("no serve config");
+    rmSync(runs, { force: true });
+    const stamp = Date.now() - 14 * MINUTE;
+    seedState({ serveConfigured: true, serveCheckedAt: stamp });
+    const outcome = pass(port, asStubRepo);
+    assert.equal(outcome.status, 0, outcome.stdout);
+    assert.equal(asked(), 0, "tailscale was run inside the interval");
+    assert.equal(state().serveConfigured, true);
+    assert.equal(state().serveCheckedAt, stamp);
+    assert.doesNotMatch(notified(), /no longer configured/);
+  });
+
+  void test("checked sixteen minutes ago: asked, and the stamp moves", () => {
+    stubTailscale(configured());
+    rmSync(runs, { force: true });
+    seedState({ serveConfigured: true, serveCheckedAt: Date.now() - 16 * MINUTE });
+    const before = Date.now();
+    const outcome = pass(port, asStubRepo);
+    assert.equal(asked(), 1);
+    assert.match(outcome.stdout, /tailscale serve is configured for the port/);
+    assert.ok((state().serveCheckedAt ?? 0) >= before, "the stamp did not move");
+  });
+
+  void test("a planted future stamp is never-checked, not fifteen minutes of silence", () => {
+    stubTailscale("no serve config");
+    rmSync(runs, { force: true });
+    seedState({ serveConfigured: true, serveCheckedAt: Date.now() + 365 * 24 * 60 * MINUTE });
+    pass(port, asStubRepo);
+    assert.equal(asked(), 1, "a future stamp suppressed the check");
+    assert.match(notified(), /no longer configured/);
+  });
+
+  void test("while Funnel was on, every pass asks and alerts again", () => {
+    stubTailscale(`https://host.tail0.ts.net (Funnel on)\n${configured()}`);
+    rmSync(runs, { force: true });
+    seedState({ serveConfigured: true, serveCheckedAt: Date.now() - MINUTE, serveFunnel: true });
+    const outcome = pass(port, asStubRepo);
+    assert.equal(asked(), 1, "a recent check silenced a public exposure");
+    assert.match(outcome.stdout, /FUNNEL IS ON/);
+    assert.equal(state().serveFunnel, true);
+  });
+
+  void test("a check that could not ask leaves the stamp alone, so the next pass retries", () => {
+    stubTailscale("The Tailscale GUI failed to start (Tailscale.CLIError error 3.)");
+    rmSync(runs, { force: true });
+    seedState({ serveConfigured: true, serveCheckedAt: 0 });
+    pass(port, asStubRepo);
+    assert.equal(asked(), 1);
+    assert.equal(state().serveCheckedAt, 0);
   });
 });
 

@@ -2942,3 +2942,33 @@ Accepted, with the reason:
   `Connection` to forget silently was more than the symptom needed.
 - **Not demonstrated in a browser or on the phone.** The deck already serves the rebuilt bundle; the
   agent does not hold the token, so a reload on the phone is the check.
+
+## The serve check rewrote the network configuration every minute (2026-11-01)
+
+Found from the Mac, not from agentdeck: `efilogin-helper` was busy, rebuilding the EFI login artwork
+about 120 times an hour. The chain, read from the unified log with matching timestamps: each pass
+runs `Tailscale serve status`; that process logs `Saving configuration Tailscale` and re-saves the
+VPN configuration; macOS disposes and re-adds the Tailscale network service, `configd` syncs the
+network configuration to the preboot volume, `storagekitd` runs `updatePreboot`, and that rebuilds
+the artwork. It also kept `VPN.appex` and `nesessionmanager` busy. Only reachable since the `TERM`
+fix above, because before it the CLI failed before it got that far.
+
+Fixed by throttling the serve check, not removing it: at most every 15 minutes
+(`AGENTDECK_WATCHDOG_SERVE_EVERY_MS`), stamped in the state file as `serveCheckedAt`. The health
+probe still runs every pass. A stamp that is unusable or in the future counts as never checked, as
+`gaveUpAlertedAt` already does, so a planted one cannot buy silence; a check that could not ask
+leaves the stamp alone and retries on the next pass.
+
+Accepted, with the reason:
+
+- **Serve disappearing or appearing is now noticed up to 15 minutes late.** The reboot case it
+  watches for is not one a minute changes, and a check every minute cost a network reconfiguration
+  every minute.
+- **Funnel turning ON is noticed up to 15 minutes late too.** Once seen, it is checked and alerted
+  every pass (`serveFunnel`) until it is off. Catching it inside the minute would need the CLI every
+  pass, which is the defect.
+- **The squatter path still asks every time it fires.** It is rare and it is the one case where the
+  answer changes what the alert says.
+
+Verified: the five new tests count the stub CLI's runs, and the installed timer's effect is measured
+from the unified log after the copy. Not demonstrated: the phone.

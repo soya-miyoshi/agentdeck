@@ -12,6 +12,11 @@ person opening a terminal. `scripts/watchdog.mjs` is one supervision pass;
 It finds the node process holding the port, probes `http://127.0.0.1:<port>/api/health`, and checks
 whether `tailscale serve` is still configured for it.
 
+The serve check runs at most every 15 minutes (`AGENTDECK_WATCHDOG_SERVE_EVERY_MS`), not every pass:
+each run of the macOS Tailscale CLI re-saves the VPN configuration, and macOS answers every save
+with a network change and a preboot-volume rewrite. While the last check saw Funnel on, it runs, and
+alerts, every pass.
+
 | It sees                                             | It does                                                                                                                                                  |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A 200, however slow                                 | Nothing. An answer at all proves the event loop turned, and latency is not a health verdict.                                                             |
