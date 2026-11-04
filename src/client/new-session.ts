@@ -1,5 +1,4 @@
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Cwd } from "../cwds.ts";
+import type { AgentSummary, Cwd } from "./wire.ts";
 
 // The new-session picker, as data. Plan 002: the client cannot construct a valid `cwd` on its own,
 // so a directory and an agent are both chosen from what the server reported and neither is typed.

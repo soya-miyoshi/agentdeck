@@ -35,7 +35,7 @@ const SERVE_CHECK_EVERY_MS = ms("AGENTDECK_WATCHDOG_SERVE_EVERY_MS", 900_000);
 const LSOF = "/usr/sbin/lsof";
 const TAILSCALE = process.env.AGENTDECK_TAILSCALE ?? "/usr/local/bin/tailscale";
 
-// The checkout holding src/server.ts: the script's parent, or AGENTDECK_REPO once the script has
+// The checkout holding bin/agentdeck: the script's parent, or AGENTDECK_REPO once the script has
 // been copied out of it, which is the supported install.
 const repoRoot = process.env.AGENTDECK_REPO ?? fileURLToPath(new URL("..", import.meta.url));
 const port = process.env.AGENTDECK_PORT ?? "7777";
@@ -187,30 +187,32 @@ const cwdOf = async (pid) =>
     );
   });
 
-const SERVER_SCRIPT = join("src", "server.ts");
+const SERVER_BINARY = join("bin", "agentdeck");
+// The TypeScript server this binary replaced. Still recognised as ours, so a pass straddling the
+// switch supervises it rather than calling it a squatter; it is never STARTED any more.
+const LEGACY_SCRIPT = join("src", "server.ts");
 
 /**
- * Whether a pid is OUR server: a node running THIS checkout's src/server.ts.
+ * Whether a pid is OUR server: this checkout's bin/agentdeck, or the legacy node src/server.ts.
  *
- * Two shapes, because two things start it. The watchdog's own spawn is absolute on both counts.
- * `make start`, `make restart` and `pnpm start` are not - `ps` reports them as
- * `node --env-file-if-exists=.env src/server.ts` - so for those the checkout is decided by the
- * process's working directory. Matching only the absolute shape made every server an operator
- * ever started unrecognisable: the watchdog called it a squatter, alerted, and supervised nothing.
+ * Absolute or relative, because two things start it: the watchdog's own spawn is absolute, and
+ * `make restart` runs `./bin/agentdeck` from the checkout, which only the process's working
+ * directory resolves. A stub run through an interpreter (`node bin/agentdeck`) is matched the same.
  */
 const isOurServer = async (pid) => {
   const command = await commandOf(pid);
   if (command === "") return false;
-  const target = join(repoRoot, SERVER_SCRIPT);
-  if (command.includes(process.execPath) && command.includes(target)) return true;
   const tokens = command.split(" ").filter((token) => token !== "");
-  if (basename(tokens[0] ?? "") !== "node") return false;
-  const script = tokens.find(
-    (token) => token === SERVER_SCRIPT || token.endsWith(`/${SERVER_SCRIPT}`),
-  );
-  if (script === undefined) return false;
+  const named = (rel) =>
+    tokens.slice(0, 3).find((token) => token === rel || token.endsWith(`/${rel}`));
+  const binary = named(SERVER_BINARY);
+  const legacy = basename(tokens[0] ?? "") === "node" ? named(LEGACY_SCRIPT) : undefined;
+  const found = binary ?? legacy;
+  if (found === undefined) return false;
+  const target = join(repoRoot, binary === undefined ? LEGACY_SCRIPT : SERVER_BINARY);
+  if (found === target) return true;
   const cwd = await cwdOf(pid);
-  return cwd !== "" && resolvePath(cwd, script) === target;
+  return cwd !== "" && resolvePath(cwd, found) === target;
 };
 
 /** The pid holding the port, only if it is our server. Anything else is reported as a squatter:
@@ -281,7 +283,7 @@ const startServer = () => {
   } catch (error) {
     log(`could not open ${serverLogPath} (${String(error)}); the server's output is discarded`);
   }
-  const child = spawn(process.execPath, [join(repoRoot, "src", "server.ts")], {
+  const child = spawn(join(repoRoot, SERVER_BINARY), [], {
     cwd: repoRoot,
     detached: true,
     stdio: ["ignore", out, out],

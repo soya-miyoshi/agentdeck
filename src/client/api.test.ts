@@ -2,16 +2,10 @@
 // only place it is visible. Node sends no `Origin`, so the two halves are asserted separately.
 
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { after, describe, test } from "node:test";
 
-import { parseProfiles } from "../agent-profiles.ts";
-import { CwdAllowlist } from "../cwds.ts";
-import { createHandler } from "../http.ts";
-import { Registry } from "../registry.ts";
-import { Tmux } from "../tmux.ts";
 import { fetchSessions, ForbiddenError, UnauthorizedError, verifyToken } from "./api.ts";
+import { startGoServer } from "./go-server.ts";
 
 const token = "test-token-value";
 
@@ -33,48 +27,33 @@ const answerWith = (status: number, body: unknown): void => {
 
 void describe("the server's answer to a mismatched Origin", () => {
   void test("is 403 with a sentence, not 401 and not a socket that just closes", async () => {
-    const { profiles } = parseProfiles({});
-    const allowlist = new CwdAllowlist([]);
-    const server = createServer(
-      createHandler({
-        registry: new Registry(
-          new Tmux({
-            socket: "test",
-            exec: async () => await Promise.resolve({ stdout: "", stderr: "" }),
-          }),
-          profiles,
-          allowlist,
-          "test-secret-key",
-        ),
-        profiles,
-        allowlist,
-        token,
-        version: "0.0.0-test",
-        origin: "https://mac.tailnet.example",
-        probe: async () => await Promise.resolve(true),
-      }),
-    );
-    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-    const port = (server.address() as AddressInfo).port;
-    const response = await realFetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+    const server = await startGoServer({ AGENTDECK_ORIGIN: "https://mac.tailnet.example" });
+    const response = await realFetch(`${server.base}/api/probe`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, origin: "http://localhost:7778" },
+      headers: { authorization: `Bearer ${server.token}`, origin: "http://localhost:7778" },
     });
     assert.equal(response.status, 403);
     const body = (await response.json()) as { error?: string };
     assert.equal(typeof body.error, "string", "the refusal carried no sentence to render");
 
     // The same route, with the origin the server expects, is the plain `ok` the ladder reads.
-    const allowed = await realFetch(`http://127.0.0.1:${String(port)}/api/probe`, {
+    const allowed = await realFetch(`${server.base}/api/probe`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, origin: "https://mac.tailnet.example" },
+      headers: { authorization: `Bearer ${server.token}`, origin: "https://mac.tailnet.example" },
     });
     assert.equal(allowed.status, 200);
-    await new Promise<void>((done) =>
-      server.close(() => {
-        done();
-      }),
+
+    // The sentence `verifyToken` keys on is this server's own, not a proxy's.
+    const refused = await realFetch(`${server.base}/api/probe`, {
+      method: "POST",
+      headers: { authorization: "Bearer wrong" },
+    });
+    assert.equal(refused.status, 401);
+    assert.equal(
+      ((await refused.json()) as { error?: string }).error,
+      "missing or invalid bearer token",
     );
+    await server.stop();
   });
 });
 

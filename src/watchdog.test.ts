@@ -25,6 +25,10 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const watchdog = join(repoRoot, "scripts", "watchdog.mjs");
 const plist = join(repoRoot, "scripts", "com.agentdeck.watchdog.plist");
+// The passes that start a real server start this checkout's binary, so it is built from this code.
+execFileSync("go", ["build", "-o", join(repoRoot, "bin", "agentdeck"), "."], {
+  cwd: join(repoRoot, "server-go"),
+});
 
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
@@ -100,13 +104,16 @@ const notified = (): string =>
 const logged = (): string => (existsSync(serverLog) ? readFileSync(serverLog, "utf8") : "");
 
 /** Signal 0: does this pid exist. Only ever called here with a pid this file spawned. */
+/** Running, not merely unreaped: a killed child of this runner stays a zombie until the event loop
+ *  reaps it, and the passes here are synchronous, so `kill(pid, 0)` alone reads it as alive. */
 const alive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  const state = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  return !(state.stdout ?? "").trim().startsWith("Z");
 };
 
 /** The transcript, once it matches. The critical alert is detached, so it lands asynchronously
@@ -236,13 +243,21 @@ const startStub = async (
   port: string,
   source: string,
 ): Promise<ReturnType<typeof spawn>> => {
-  const dir = join(stubRepo, "src");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "server.ts"), source);
-  const child = spawn(process.execPath, [join(dir, "server.ts")], { stdio: "ignore" });
+  const binary = stubBinary(source);
+  const child = spawn(binary, [], { stdio: "ignore" });
   for (let i = 0; i < 80 && listenerPid(port) === null; i++) await sleep(50);
   assert.notEqual(listenerPid(port), null, `the ${what} never came up`);
   return child;
+};
+
+/** Write the stub as the checkout's `bin/agentdeck`: an executable script run by this node. */
+const stubBinary = (source: string): string => {
+  const dir = join(stubRepo, "bin");
+  mkdirSync(dir, { recursive: true });
+  const binary = join(dir, "agentdeck");
+  writeFileSync(binary, `#!${process.execPath}\n${source}\n`);
+  chmodSync(binary, 0o755);
+  return binary;
 };
 
 /** Answers /api/health healthily and at once, so the pass turns on whatever else is under test. */
@@ -705,7 +720,7 @@ void describe("the LaunchAgent exists, is valid, and is NOT installed", () => {
     assert.ok(program, "the plist declares no ProgramArguments");
     assert.doesNotMatch(program, /\/scripts\/watchdog\.mjs/, "launchd would run the checkout copy");
     assert.match(program, /\/\.agentdeck\/bin\/watchdog\.mjs/);
-    // A copy cannot find src/server.ts by sitting next to it, so the repo has to be named.
+    // A copy cannot find bin/agentdeck by sitting next to it, so the repo has to be named.
     assert.match(text, /<key>AGENTDECK_REPO<\/key>\s*<string>[^<]+<\/string>/);
   });
 
@@ -940,8 +955,8 @@ void describe("what the watchdog is forbidden to do", () => {
     assert.match(source, /PROBE_TIMEOUT_MS", 15_000\)/);
     assert.match(source, /const FAIL_THRESHOLD = 3;/);
     assert.match(source, /const MAX_RESTARTS = 2;/);
-    const health = readFileSync(join(repoRoot, "src", "server.ts"), "utf8");
-    const budget = /3_?000/.test(health) || /3000/.test(health);
+    const health = readFileSync(join(repoRoot, "server-go", "main.go"), "utf8");
+    const budget = /healthTimeout = 3 \* time\.Second/.test(health);
     assert.ok(
       budget,
       "the server's health round trip no longer has the 3s budget 15000ms is five times",
@@ -1060,7 +1075,7 @@ void describe("the server the watchdog starts logs somewhere", () => {
     assert.equal(outcome.status, 0, outcome.stderr);
     assert.match(outcome.stdout, /started the server/);
     assert.ok(await waitForHealth(port), "the server never became healthy");
-    // The boot lines src/server.ts prints, which are the sentences audit.md recorded as having
+    // The boot lines the server prints, which are the sentences audit.md recorded as having
     // no log destination at all.
     for (let i = 0; i < 40 && !/listening on/.test(logged()); i++) await sleep(50);
     assert.match(
@@ -1071,8 +1086,8 @@ void describe("the server the watchdog starts logs somewhere", () => {
   });
 
   void test("the log is 0600: a first run's token and QR can go through it", () => {
-    // stdout is not a TTY here, so src/qr.ts prints no QR - but it does print the token file's
-    // path, and the mode is what stops the next thing to change that branch from being a leak.
+    // The server prints the token file's path, and the mode is what stops the next thing to
+    // change what it prints from being a leak.
     assert.equal(statSync(serverLog).mode & 0o777, 0o600);
   });
 });
@@ -1308,10 +1323,8 @@ void describe("the server an operator started is recognised, not called a squatt
     strangerPort = await freePort();
     freshTranscript("identity");
     seedState();
-    const dir = join(stubRepo, "src");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "server.ts"), healthyStub(port));
-    ours = spawn(process.execPath, ["--env-file-if-exists=.env", "src/server.ts"], {
+    stubBinary(healthyStub(port));
+    ours = spawn(process.execPath, ["bin/agentdeck"], {
       cwd: stubRepo,
       stdio: "ignore",
     });

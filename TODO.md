@@ -89,9 +89,10 @@ Mark an item `[x]` when its branch is merged.
       never reports `waiting` again until the agent itself is restarted. True of a crash and of
       any deliberate restart (plan 006).
 
-- [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux 3.7b is
-      the one plans 001 and 002 already cite as verified, and `src/tmux.ts`'s error-wording set was
-      observed against it.
+- [x] ~~**`m0/tmux-version`**~~ — MOOT. There is no image shipping 3.3a. The host's tmux was 3.7b,
+      the one plans 001 and 002 cite as verified, and is now 3.8: plan 002's two defaults were
+      re-checked on it, and `server-go/tmux.go`'s error-wording set is exercised against it by
+      the Go suite, which runs on the real tmux.
 
 - [x] **`m0/host-boundary`** — what the container was doing that nothing does now. Filed from
       `m0/de-containerise`'s audit; the twelve findings are in `audit.md` under that heading and are

@@ -221,7 +221,9 @@ already prepends `node_modules/.bin` to `PATH`, so one more shell-out added to a
 is unremarkable in a diff nobody expects to contain an attack. `src/fixtures/` is the same surface
 one step out of sight: the glob matches test files only, but `node --test` executes what they
 import at module scope too, so a helper there runs on the host at every `pnpm test` while sitting
-outside the enumeration a reviewer is working from. `.mise*.toml` documents `mise install`
+outside the enumeration a reviewer is working from; `src/client/go-server.ts` is one such helper,
+and it runs `go build` on `server-go/`, whose `_test.go` files `go test` executes and whose binary
+every restart runs, so `server-go/` is agent-writable host code too. `.mise*.toml` documents `mise install`
 and mise executes `[env] _.source` and `[tasks]` entries on the host — note the glob, because mise
 auto-discovers `mise.toml`, `.mise.toml`, `mise.local.toml`, `.config/mise/config.toml` and file
 tasks under `mise-tasks/` or `.mise/tasks/`, so enumerating the one filename we happen to have

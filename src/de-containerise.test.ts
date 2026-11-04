@@ -3,26 +3,18 @@
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import {
   createServer as createSocketServer,
   type AddressInfo,
   type Server as NetServer,
   type Socket,
 } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
-
-import { parseProfiles } from "./agent-profiles.ts";
-import { CwdAllowlist } from "./cwds.ts";
-import { createHandler } from "./http.ts";
-import { Registry } from "./registry.ts";
-import { Tmux } from "./tmux.ts";
 
 const run = promisify(execFile);
 
@@ -130,17 +122,30 @@ void describe("the container is gone from everything that says how this runs", (
     }
   });
 
-  void test("nothing that runs describes a container: src/ and scripts/ are clean", async () => {
+  void test("nothing that runs describes a container: src/, scripts/ and server-go/ are clean", async () => {
     // Plans are prose a reader can discount. A refusal is what a person meets while confused, and
     // telling them to check a container they do not have is the worst place to be wrong.
-    for (const path of trackedFiles()) {
-      if (!path.startsWith("src/") && !path.startsWith("scripts/")) continue;
+    // server-go/ is where the server lives now; walked rather than listed, so the scan does not
+    // depend on whether git has been told about the tree yet.
+    const goFiles = (
+      await readdir(join(repoRoot, "server-go"), { recursive: true, withFileTypes: true })
+    )
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".go"))
+      .map((entry) => relative(repoRoot, join(entry.parentPath, entry.name)));
+    // Only its Go sources: the tree also holds the built binary, which is not prose.
+    const scanned = trackedFiles().filter(
+      // A tracked file already deleted from the tree has no text left to describe anything.
+      (path) =>
+        (path.startsWith("src/") || path.startsWith("scripts/")) &&
+        existsSync(join(repoRoot, path)),
+    );
+    for (const path of new Set([...scanned, ...goFiles])) {
       if (path === SELF) continue;
       const text = await readFile(`${repoRoot}${path}`, "utf8");
       assert.doesNotMatch(text, /docker/i, `${path} still describes Docker`);
       // `docker` was the only word scanned while the thing gone is the CONTAINER, which src/ named
       // four times. Test files are exempt here because their subject is partly its absence.
-      if (path.endsWith(".test.ts")) continue;
+      if (path.endsWith(".test.ts") || path.endsWith("_test.go")) continue;
       assert.doesNotMatch(text, /\bcontainers?\b/i, `${path} still describes a container`);
     }
   });
@@ -167,11 +172,11 @@ void describe("each plan states the post-container claim, not merely the absence
   });
 
   void test("plan 004 names the state directory the code actually writes to", async () => {
-    // The fragment used to land in a path that only existed inside the image. Checked against src
-    // rather than against the plan itself, because agreeing with the wrong thing is the failure.
+    // The fragment used to land in a path that only existed inside the image. Checked against the
+    // server's source rather than the plan itself, because agreeing with the wrong thing is the failure.
     const plan = await readDoc("plans/004-agent-profiles.md");
     assert.match(plan, /AGENTDECK_AGENT_STATE_DIR/);
-    const server = await readDoc("src/server.ts");
+    const server = await readDoc("server-go/main.go");
     assert.match(server, /AGENTDECK_AGENT_STATE_DIR/);
   });
 
@@ -256,12 +261,6 @@ const runHealthcheck = async (env: Readonly<Record<string, string>>): Promise<Ou
 // HTTP half is what varies. Without it every failure below passes for the wrong reason.
 const tmuxSocket = `agentdeck-health-${String(process.pid)}`;
 
-// A real /api/health, built from src/http.ts with the same handler the server uses, so the body
-// the check parses is the body the server produces rather than one written here to match.
-let health: Server;
-let healthPort: string;
-let probeOk = true;
-
 // A port nothing listens on. Bound and released rather than picked, because a hardcoded number
 // is a test that passes on the day something else happens to be listening there.
 let deadPort: string;
@@ -270,26 +269,6 @@ before(async () => {
   execFileSync("tmux", ["-L", tmuxSocket, "new-session", "-d", "-s", "probe", "sleep 600"], {
     encoding: "utf8",
   });
-
-  const { profiles } = parseProfiles({ claude: { command: "/bin/sh", name: "Claude Code" } });
-  const allowlist = new CwdAllowlist([repoRoot]);
-  const tmux = new Tmux({
-    socket: tmuxSocket,
-    exec: async () => await Promise.resolve({ stdout: "", stderr: "" }),
-  });
-  health = createServer(
-    createHandler({
-      registry: new Registry(tmux, profiles, allowlist, "test-secret-key"),
-      profiles,
-      allowlist,
-      token: "unused-by-health",
-      version: "0.0.0-test",
-      origin: undefined,
-      probe: async () => await Promise.resolve(probeOk),
-    }),
-  );
-  await new Promise<void>((done) => health.listen(0, "127.0.0.1", done));
-  healthPort = String((health.address() as AddressInfo).port);
 
   const scratch = createSocketServer();
   await new Promise<void>((done) => scratch.listen(0, "127.0.0.1", done));
@@ -301,12 +280,7 @@ before(async () => {
   );
 });
 
-after(async () => {
-  await new Promise<void>((done) =>
-    health.close(() => {
-      done();
-    }),
-  );
+after(() => {
   try {
     execFileSync("tmux", ["-L", tmuxSocket, "kill-server"], { stdio: "ignore" });
   } catch {
@@ -315,15 +289,6 @@ after(async () => {
 });
 
 void describe("scripts/healthcheck.mjs runs on the host and both halves can fail it", () => {
-  void test("a live tmux server and a live /api/health is healthy", async () => {
-    probeOk = true;
-    const outcome = await runHealthcheck({
-      TMUX_SOCKET: tmuxSocket,
-      AGENTDECK_PORT: healthPort,
-    });
-    assert.equal(outcome.code, 0, `expected healthy, got: ${outcome.stderr}`);
-  });
-
   void test("tmux alive and the server down is UNHEALTHY", async () => {
     // It must fail when the server is down - the case a tmux-only check missed entirely, since tmux
     // is a daemon of its own and stays up through a node crash.
@@ -365,57 +330,6 @@ void describe("scripts/healthcheck.mjs runs on the host and both halves can fail
         }),
       );
     }
-  });
-
-  void test("a 200 carrying ok:false is a different sentence from no answer at all", async () => {
-    // The server's own tmux probe failing is not the socket failing, and the check is read by a
-    // person at 2am. Same verdict, different sentence.
-    probeOk = false;
-    try {
-      const outcome = await runHealthcheck({
-        TMUX_SOCKET: tmuxSocket,
-        AGENTDECK_PORT: healthPort,
-      });
-      assert.equal(outcome.code, 1, "a server reporting its own probe failed passed the check");
-      assert.doesNotMatch(outcome.stderr, /no answer/);
-      assert.match(outcome.stderr, /returned 503|does not report ok/);
-    } finally {
-      probeOk = true;
-    }
-  });
-});
-
-// tmux's two non-zero exits mean opposite things and share an exit code. A real server cannot be
-// held in "no sessions", so a stub on PATH is the only way to reach the text this parses.
-void describe("the tmux half tells an empty server apart from a missing one", () => {
-  const stubbed = async (stderrText: string, exitCode: number): Promise<Outcome> => {
-    const dir = mkdtempSync(join(tmpdir(), "agentdeck-tmux-stub-"));
-    try {
-      const stub = join(dir, "tmux");
-      writeFileSync(stub, `#!/bin/sh\necho '${stderrText}' >&2\nexit ${String(exitCode)}\n`);
-      chmodSync(stub, 0o755);
-      return await runHealthcheck({
-        PATH: `${dir}:${process.env["PATH"] ?? ""}`,
-        TMUX_SOCKET: tmuxSocket,
-        AGENTDECK_PORT: healthPort,
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  };
-
-  void test("no sessions is a healthy server with nothing running in it yet", async () => {
-    // The normal state right after boot. Calling it unhealthy is how a watchdog restarts a
-    // perfectly good machine every time it comes up.
-    probeOk = true;
-    const outcome = await stubbed("no sessions", 1);
-    assert.equal(outcome.code, 0, `an empty tmux server was called unhealthy: ${outcome.stderr}`);
-  });
-
-  void test("no server running took every session with it and is unhealthy", async () => {
-    const outcome = await stubbed("no server running on /tmp/tmux-501/agentdeck", 1);
-    assert.equal(outcome.code, 1, "a missing tmux server passed the health check");
-    assert.match(outcome.stderr, /tmux server is not running/);
   });
 });
 

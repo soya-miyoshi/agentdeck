@@ -17,13 +17,18 @@ WATCHDOG_LOG := $(or $(AGENTDECK_WATCHDOG_LOG),$(HOME)/Library/Logs/agentdeck-wa
 # Seconds between passes. The plist uses 60; this matches it so the two behave the same.
 WATCHDOG_EVERY := $(or $(AGENTDECK_WATCHDOG_EVERY),60)
 
-.PHONY: start stop restart mounts check reap reap-kill up down
+.PHONY: build start stop restart mounts check reap reap-kill up down
+
+# The server is one Go binary, built from server-go/ into bin/ (gitignored). The watchdog and every
+# target below run this file, so a rebuild is what a restart picks up.
+build:
+	@cd server-go && go build -o ../bin/agentdeck .
 
 # Refuses rather than starting with an empty allowlist, which boots fine and then has no directory
 # to start a session in - a failure the phone reports as "no directories are allowlisted".
-start:
+start: build
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
-	AGENTDECK_ROOTS="$(ROOTS)" node --env-file-if-exists=.env src/server.ts
+	set -a; [ -f .env ] && . ./.env; set +a; AGENTDECK_ROOTS="$(ROOTS)" ./bin/agentdeck
 
 # Stops the server, not the work: tmux keeps the agents running and a restarted server adopts them
 # back, hook secret included - it is derived rather than minted, so `waiting` survives a restart.
@@ -36,7 +41,7 @@ stop:
 	for p in $$pid; do \
 	  cmd=$$(ps -p $$p -o command=); \
 	  case "$$cmd" in \
-	    *src/server.ts*) kill $$p && echo "make: stopped agentdeck (pid $$p) on $(PORT).";; \
+	    *bin/agentdeck*|*src/server.ts*) kill $$p && echo "make: stopped agentdeck (pid $$p) on $(PORT).";; \
 	    *) echo "make: pid $$p on $(PORT) is not agentdeck, refusing to kill it: $$cmd"; exit 1;; \
 	  esac; \
 	done
@@ -49,7 +54,7 @@ stop:
 # The agents are untouched. tmux holds the sessions, this process is only attached to them, and a
 # restarted server adopts them back - measured, not assumed - with their hook secret, which is
 # derived rather than minted and so survives this process going away.
-restart:
+restart: build
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
 	@$(MAKE) --no-print-directory stop
 	@# The old server closes its listener asynchronously. Starting into a port it still holds is
@@ -62,7 +67,7 @@ restart:
 	  echo "make: something still holds $(PORT) after 5s. Not starting a second server."; exit 1; \
 	fi
 	@mkdir -p $(dir $(LOG))
-	@AGENTDECK_ROOTS="$(ROOTS)" nohup node --env-file-if-exists=.env src/server.ts >> $(LOG) 2>&1 & \
+	@set -a; [ -f .env ] && . ./.env; set +a; AGENTDECK_ROOTS="$(ROOTS)" nohup ./bin/agentdeck >> $(LOG) 2>&1 & \
 	  echo "make: agentdeck restarting on $(PORT); its output is appended to $(LOG)."
 
 # The roots, then what the server would find under them right now. Kept as `mounts` because that is
@@ -80,15 +85,15 @@ mounts:
 #
 # No separate server start: a pass against a port with nothing on it starts one, so bringing up the
 # supervisor brings up the deck, through the same code path that will recover it later.
-up:
+up: build
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the allowlist would be empty. Is ghq installed?"; exit 1; }
 	@if [ -f "$(WATCHDOG_PID)" ] && kill -0 "$$(cat $(WATCHDOG_PID))" 2>/dev/null; then \
 	  echo "make: already supervising (pid $$(cat $(WATCHDOG_PID))). \`make down\` stops it."; exit 0; \
 	fi
 	@test -f .env || echo "make: there is no .env, so the watchdog has no AGENTDECK_PROFILES or AGENTDECK_ORIGIN and will REFUSE to start a server rather than start an emptier one."
 	@mkdir -p $(dir $(WATCHDOG_LOG)) $(dir $(WATCHDOG_PID))
-	@# .env is sourced into the LOOP, not just into a server: the watchdog spawns `src/server.ts`
-	@# itself with no --env-file, so a server it recovers inherits whatever this loop is holding.
+	@# .env is sourced into the LOOP, not just into a server: the watchdog spawns `bin/agentdeck`
+	@# itself with no .env, so a server it recovers inherits whatever this loop is holding.
 	@nohup sh -c 'set -a; [ -f .env ] && . ./.env; set +a; AGENTDECK_ROOTS="$(ROOTS)"; export AGENTDECK_ROOTS; while :; do node "$(CURDIR)/scripts/watchdog.mjs"; sleep $(WATCHDOG_EVERY); done' >> "$(WATCHDOG_LOG)" 2>&1 & \
 	  echo $$! > "$(WATCHDOG_PID)"
 	@echo "make: supervising every $(WATCHDOG_EVERY)s (pid $$(cat $(WATCHDOG_PID))). Its passes are appended to $(WATCHDOG_LOG)."
@@ -106,7 +111,7 @@ down:
 	@$(MAKE) --no-print-directory stop
 
 check:
-	pnpm typecheck && pnpm lint && pnpm test
+	pnpm typecheck && pnpm lint && pnpm test && cd server-go && gofmt -l . | (! grep .) && go vet ./... && go test -race ./...
 
 # What has been abandoned under the roots: orphaned processes, tmux servers holding no sessions, and
 # socket files with nothing behind them. Reports and kills nothing, which is the point - read it
@@ -114,10 +119,12 @@ check:
 # from every angle but one.
 reap:
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the reaper would have no boundary and refuses to run. Is ghq installed?"; exit 1; }
-	@AGENTDECK_ROOTS="$(ROOTS)" node scripts/reap.mjs
+	@$(MAKE) --no-print-directory build
+	@AGENTDECK_ROOTS="$(ROOTS)" ./bin/agentdeck reap
 
 # The same pass, acting. Kept as a separate target rather than a flag on `reap` so that killing is
 # always something typed on purpose.
 reap-kill:
 	@test -n "$(ROOTS)" || { echo "make: 'ghq root --all' returned nothing, so the reaper would have no boundary and refuses to run. Is ghq installed?"; exit 1; }
-	@AGENTDECK_ROOTS="$(ROOTS)" node scripts/reap.mjs --kill
+	@$(MAKE) --no-print-directory build
+	@AGENTDECK_ROOTS="$(ROOTS)" ./bin/agentdeck reap --kill

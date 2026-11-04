@@ -161,13 +161,15 @@ void describe("the suite does not leak tmux servers", () => {
   // A booted server turns `exit-empty off` on the tmux it starts, so that tmux outlives every process
   // the test kills - 236 servers had accumulated. Source-level: workers cannot count each other.
   void test("every test file that names a TMUX_SOCKET also kills that server", async () => {
+    // Any .ts under src, not only *.test.ts: a helper like client/go-server.ts boots servers too.
+    // `TMUX_SOCKET:` is a server being handed its socket; a bare mention in a list of docs is not.
     const testDir = join(repoRoot, "src");
     const names = await readdir(testDir, { recursive: true });
     const offenders: string[] = [];
     for (const name of names) {
-      if (!name.endsWith(".test.ts")) continue;
+      if (!name.endsWith(".ts")) continue;
       const source = await readFile(join(testDir, name), "utf8");
-      if (!source.includes("TMUX_SOCKET")) continue;
+      if (!/TMUX_SOCKET\s*:/.test(source)) continue;
       if (!source.includes("kill-server")) offenders.push(name);
     }
     assert.deepEqual(

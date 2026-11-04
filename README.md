@@ -21,8 +21,8 @@ with a real TLS certificate — nothing is exposed to the public internet.
  │  PWA          │                │  tailscaled                          │
  │  tab strip    │   HTTPS / WSS  │    └─ tailscale serve :443           │
  │  xterm.js     │◀──────────────▶│         └─▶ 127.0.0.1:7777           │
- │  status dots  │    tailnet     │              agentdeck (node)        │
- │  key row      │    only        │                ├─ node-pty           │
+ │  status dots  │    tailnet     │              agentdeck (Go)          │
+ │  key row      │    only        │                ├─ creack/pty         │
  └───────────────┘                │                ├─ session registry   │
    bearer token in                │                └─ ring buffer (RAM)  │
    localStorage                   │                       │              │
@@ -38,15 +38,16 @@ with a real TLS certificate — nothing is exposed to the public internet.
   `ghq root --all`, so every repository you have cloned with ghq is startable and a new clone needs
   no restart.
 - A **bearer token** guards every `/api` route and the WebSocket upgrade. It is generated on first
-  run and printed as a QR code for the phone.
+  run and written to `~/.agentdeck/token`, mode 0600, for you to copy to the phone.
 - **tmux owns the processes.** Stopping or restarting the server does not stop your agents; the
   restarted server adopts them back.
 
 ## Requirements
 
 macOS, and five things: **tmux**, **[ghq](https://github.com/x-motemen/ghq)**,
-**[Tailscale](https://tailscale.com/)** (on the Mac and on the phone), **Node 22.18+** with
-**pnpm 9**, and at least one agent CLI to run — Claude Code, Gemini CLI, or just a shell.
+**[Tailscale](https://tailscale.com/)** (on the Mac and on the phone), **Go 1.23+** for the server,
+**Node 22.18+** with **pnpm 9** for the phone client, and at least one agent CLI to run — Claude
+Code, Gemini CLI, or just a shell.
 
 Homebrew is the shortest way to tmux and ghq. If you do not have it, install it from
 <https://brew.sh> — and put it on your `PATH`, because on Apple Silicon it lands in
@@ -77,25 +78,27 @@ Why each one is there:
   without it, skip `make` and set `AGENTDECK_MOUNTS` by hand (see [Environment](#environment)).
 - **Tailscale** — not optional for phone access. The server listens on `127.0.0.1` and never on a
   LAN address, so the tailnet is the only route in.
-- **Node 22.18+ and pnpm 9** — the server runs from its TypeScript sources with no build step, which
-  is what needs 22.18 rather than any Node 22.
+- **Go** — the server is one binary, `bin/agentdeck`, built from `server-go/` by `make build` (and
+  by every `make` target that runs it). It needs no Node at runtime.
+- **Node 22.18+ and pnpm 9** — the phone client is built with Vite (`pnpm build`), and its tests and
+  the watchdog run on Node, from TypeScript sources with no build step.
 
 ### PATH
 
 Three different processes go looking for these, and they do not share a `PATH`.
 
-**The shell you run `make` in** needs `ghq` and `node`. The Makefile calls `ghq root --all` and
+**The shell you run `make` in** needs `ghq` and `go`. The Makefile calls `ghq root --all` and
 refuses to start rather than boot with an empty allowlist, which is a server that runs fine and can
 start nothing.
 
 **The server** needs `tmux`, and needs each agent profile's command. With `tmux` missing the boot
-prints its warnings and then dies on `Error: spawn tmux ENOENT`. An agent command that does not
+prints its warnings and then fails on `exec: "tmux": executable file not found in $PATH`. An agent command that does not
 resolve is not fatal — it is greyed out in the phone's picker as "not on PATH on the Mac; it cannot
 be started", checked when the list is served rather than at spawn.
 
 **Every session** gets the server's `PATH`, verbatim. A session's environment is built rather than
 inherited — `PATH`, `HOME`, `SHELL`, `TERM`, the locale, `TMPDIR`, `USER`, `LOGNAME`, plus whatever
-the profile lists, and nothing else (`baseEnv` in `src/tmux.ts`). So the `PATH` of the shell you ran
+the profile lists, and nothing else (`baseEnv` in `server-go/tmux.go`). So the `PATH` of the shell you ran
 `make start` in is the `PATH` your agents have, and a tool missing there is missing inside every
 session on the phone.
 
@@ -215,15 +218,16 @@ starts a second supervision loop against the same port and the two fight over re
 
 ### Getting the token onto the phone
 
-The first run — and any run after you delete `~/.agentdeck/token` — prints the token as a QR code
-with the URL beside it. Scan it with the phone's camera and paste the result into the app's token
-field. The QR carries the **token alone**, not a URL containing it, so it never lands in browser
-history or a `Referer` header. The token file must live outside every repository a session can start
-in, and the server refuses to start if that path resolves inside an allowlist entry.
+The first run — and any run after you delete `~/.agentdeck/token` — writes a new token to that file
+and prints nothing of it. Copy the file's contents to the phone (Universal Clipboard or AirDrop) and
+paste it into the app's token field. It travels as the **token alone**, never inside a URL, so it
+never lands in browser history or a `Referer` header. The token file must live outside every
+repository a session can start in, and the server refuses to start if that path resolves inside an
+allowlist entry.
 
-**Do not do the first run in a recorded pane.** tmux `capture-pane`, `script`, terminal session
+**Do not print the token in a recorded pane.** tmux `capture-pane`, `script`, terminal session
 logging and screen recordings all preserve it verbatim. If that happened, treat the token as
-disclosed: delete the file, restart, re-scan everywhere.
+disclosed: delete the file, restart, paste the new one everywhere.
 
 There is no expiry and no revocation list. The only way to invalidate a token is to delete the file
 and restart, which invalidates it for every device at once.
@@ -267,6 +271,8 @@ Everything is optional; the row says what leaving it unset means.
 | `AGENTDECK_TURNS_DIR`        | `~/.agentdeck/turns`       | One 0600 JSONL file per session, in plain text. It outlives the tmux session.                                                                   |
 | `AGENTDECK_UPLOAD_DIR`       | `~/.agentdeck/uploads`     | Where images sent from the phone are written, 0600, newest 20 per session.                                                                      |
 | `TMUX_SOCKET`                | `agentdeck`                | The `-L` name. Sessions are found on this socket and nowhere else.                                                                              |
+| `AGENTDECK_CLIENT_DIR`       | `<repo>/dist/client`       | The built client, served UNAUTHENTICATED. The token and profiles files may not be inside it - the server refuses to start. |
+| `AGENTDECK_REPO`             | the binary's `bin/..`      | The checkout whose `tmux.conf` and `dist/client` are used.                                                                       |
 | `AGENTDECK_REAP_INTERVAL_MS` | `3600000`                  | How often the server collects abandoned processes. **It kills things.** `0` turns it off; see [Housekeeping](#housekeeping).                    |
 
 A session's environment is **built, not inherited**: a pane gets `PATH`, `HOME`, `SHELL`, `TERM`,
@@ -312,13 +318,15 @@ No file browsing or editing, no git/GitHub integration, no MCP broker or plugin 
 multi-user access or public exposure, no persistence of terminal output beyond tmux's own lifetime,
 and no desktop UI — the desktop already has a terminal.
 
-Six runtime dependencies, and that is the budget: `node-pty`, `ws`, `vue`, `@xterm/xterm`,
-`@xterm/addon-fit`, `qrcode-generator`.
+The dependency budget is spent: the server's two Go modules, `github.com/creack/pty` and
+`github.com/coder/websocket`, and the client's three, `vue`, `@xterm/xterm` and `@xterm/addon-fit`.
 
 ## Development
 
 ```sh
-pnpm typecheck && pnpm lint && pnpm test   # ~40s
+pnpm typecheck && pnpm lint && pnpm test   # the client, the watchdog and the repo checks
+cd server-go && go vet ./... && go test -race ./...   # the server, against a real tmux
+make check                                 # both
 ```
 
 For iterating on the client, Vite's dev server proxies `/api` and `/ws` to the server on 7777:

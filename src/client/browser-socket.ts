@@ -28,11 +28,16 @@ export const browserSocket: SocketFactory = (token, handlers) => {
   socket.addEventListener("message", (event: MessageEvent<string>) => {
     handlers.message(event.data);
   });
-  // `close` fires for a failed handshake too, and a rejected token looks like a phone in a lift.
-  // `error` always precedes it, so only `close` is listened for and HTTP tells the two apart.
-  socket.addEventListener("close", () => {
+  // A rejected token looks like a phone in a lift either way; HTTP tells the two apart. `error` ends
+  // the socket too: Node's WebSocket fires it for a refused connection and then never fires `close`.
+  let ended = false;
+  const end = (): void => {
+    if (ended) return;
+    ended = true;
     handlers.closed();
-  });
+  };
+  socket.addEventListener("error", end);
+  socket.addEventListener("close", end);
   return {
     send: (raw) => {
       if (socket.readyState === WebSocket.OPEN) socket.send(raw);

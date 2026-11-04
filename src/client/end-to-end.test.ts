@@ -19,20 +19,16 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import type { AgentSummary } from "../agent-profiles.ts";
-import { hookCommand } from "../claude-hooks.ts";
-import { PANE_COLS } from "../protocol.ts";
-import type { Session } from "../registry.ts";
-import type { SessionState } from "../tmux.ts";
 import { browserSocket } from "./browser-socket.ts";
 import { submitBytes } from "./composer.ts";
 import { Connection, type SocketLike } from "./connection.ts";
 import { type KeyName, keyBytes, withCtrl } from "./key-row.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { type Tab, toTabs } from "./tabs.ts";
+import { PANE_COLS, type AgentSummary, type Session, type SessionState } from "./wire.ts";
 
 const run = promisify(execFile);
-const serverPath = fileURLToPath(new URL("../server.ts", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const socket = `agentdeck-e2e-${String(process.pid)}`;
 
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -61,6 +57,10 @@ const stripWork = [
   temp("agentdeck-e2e-strip-c-"),
 ];
 const conf = temp("agentdeck-e2e-conf-");
+
+// The Go server, built from this checkout into the test's own directory, so the run is of this code.
+const serverBinary = join(conf, "agentdeck");
+execFileSync("go", ["build", "-o", serverBinary, "."], { cwd: join(repoRoot, "server-go") });
 
 const profiles = join(conf, "agents.json");
 // A plain shell, whose replies a test can state exactly. `hooked` is the same shell with a waiting
@@ -96,8 +96,9 @@ const freePort = async (): Promise<number> =>
 
 /** Start the server the way a person does, and resolve once it is listening. */
 const startServer = async (): Promise<ChildProcess> => {
-  const started = spawn(process.execPath, [serverPath], {
+  const started = spawn(serverBinary, [], {
     env: {
+      AGENTDECK_REPO: repoRoot,
       PATH: process.env["PATH"] ?? "/usr/bin:/bin",
       HOME: home,
       TERM: "xterm-256color",
@@ -161,11 +162,17 @@ before(async () => {
 
 after(async () => {
   if (child !== undefined) child.kill("SIGKILL");
+  // Asked before the kill, because a server that is gone cannot say where its socket was.
+  const socketPath = await run("tmux", ["-L", socket, "display-message", "-p", "#{socket_path}"])
+    .then(({ stdout }) => stdout.trim())
+    .catch(() => "");
   try {
     await run("tmux", ["-L", socket, "kill-server"]);
   } catch {
     // Already gone: the desired end state.
   }
+  // kill-server leaves the socket file behind, and an accumulating pile of them is litter.
+  if (socketPath.endsWith(`/${socket}`)) rmSync(socketPath, { force: true });
   for (const dir of [
     home,
     work,
@@ -427,7 +434,13 @@ const buildStrip = async (): Promise<Strip> => {
   // The hook command as the agent gets it - the same string written into the settings file, run
   // with the session's own environment. Nothing about the transport is simulated.
   const hookScript = join(conf, "hook.sh");
-  writeFileSync(hookScript, `${hookCommand(port)}\n`);
+  const installed = JSON.parse(
+    readFileSync(join(conf, "agent-state", "hooked", "settings.json"), "utf8"),
+  ) as { hooks: Record<string, { hooks: { command: string }[] }[]> };
+  const stopHooks = installed.hooks["Stop"] ?? [];
+  const hookLine = stopHooks.at(-1)?.hooks[0]?.command ?? "";
+  assert.ok(hookLine.includes("AGENTDECK_SESSION_ID"), "the server installed no hook line");
+  writeFileSync(hookScript, `${hookLine}\n`);
 
   const state = {
     sessions: [] as Session[],

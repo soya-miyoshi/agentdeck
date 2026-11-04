@@ -2,7 +2,7 @@
 // missing picker survived every green milestone. NOT scriptable: the sheet's geometry on a device.
 
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -19,13 +19,17 @@ import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 
 const run = promisify(execFile);
-const serverPath = fileURLToPath(new URL("../server.ts", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const socket = `agentdeck-picker-${String(process.pid)}`;
 
 const temp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
 const home = temp("agentdeck-picker-home-");
 const conf = temp("agentdeck-picker-conf-");
+
+// The Go server, built from this checkout into the test's own directory, so the run is of this code.
+const serverBinary = join(conf, "agentdeck");
+execFileSync("go", ["build", "-o", serverBinary, "."], { cwd: join(repoRoot, "server-go") });
 // One tree per case: a session id is a pure function of (path, agent), so two cases naming the
 // same pair are handed the same tmux session by `new-session -A`.
 const pickWork = temp("agentdeck-picker-pick-");
@@ -62,8 +66,9 @@ const freePort = async (): Promise<number> =>
 
 /** Start the server the way a person does, and resolve once it is listening. */
 const startServer = async (): Promise<void> => {
-  const started = spawn(process.execPath, [serverPath], {
+  const started = spawn(serverBinary, [], {
     env: {
+      AGENTDECK_REPO: repoRoot,
       PATH: process.env["PATH"] ?? "/usr/bin:/bin",
       HOME: home,
       TERM: "xterm-256color",
@@ -118,11 +123,17 @@ before(async () => {
 after(async () => {
   globalThis.fetch = realFetch;
   if (child !== undefined) child.kill("SIGKILL");
+  // Asked before the kill, because a server that is gone cannot say where its socket was.
+  const socketPath = await run("tmux", ["-L", socket, "display-message", "-p", "#{socket_path}"])
+    .then(({ stdout }) => stdout.trim())
+    .catch(() => "");
   try {
     await run("tmux", ["-L", socket, "kill-server"]);
   } catch {
     // Already gone: the desired end state.
   }
+  // kill-server leaves the socket file behind, and an accumulating pile of them is litter.
+  if (socketPath.endsWith(`/${socket}`)) rmSync(socketPath, { force: true });
   for (const dir of [home, conf, pickWork, twoWork, offList]) {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Cwd } from "../cwds.ts";
-import { PANE_COLS } from "../protocol.ts";
-import type { Session } from "../registry.ts";
+import { PANE_COLS, type AgentSummary, type Cwd, type Session } from "./wire.ts";
 import {
   closeSession,
   createSession,

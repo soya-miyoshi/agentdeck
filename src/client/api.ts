@@ -1,6 +1,4 @@
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Cwd } from "../cwds.ts";
-import type { Session } from "../registry.ts";
+import type { AgentSummary, Cwd, Session } from "./wire.ts";
 // The REST half. Every request carries the bearer token, and a 401 is raised as its own type: the
 // caller drops the token and shows the paste field rather than retrying.
 

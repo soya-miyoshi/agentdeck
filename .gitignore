@@ -17,3 +17,7 @@ dist
 
 # Isolated checkouts for parallel agents. Whole copies of this repo; never committed.
 .claude/worktrees
+
+# The server binary, built from server-go/ by `make build`.
+/bin/
+/server-go/server-go

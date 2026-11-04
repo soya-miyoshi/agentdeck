@@ -99,7 +99,7 @@ separate cleanly:
   handing back the running one is the better failure.
 
 **`exited` needs `remain-on-exit on`.** By default tmux destroys a session when its command exits
-(verified: `remain-on-exit off` on tmux 3.7b), so an agent that finishes or crashes takes its own
+(verified: `remain-on-exit off` on tmux 3.7b, and again on 3.8), so an agent that finishes or crashes takes its own
 tab with it and `exitCode` can never be reported at all. Sessions are created with the option on;
 `state` comes from `#{pane_dead}` and the code from `#{pane_dead_status}`. A dead session is
 reaped by `DELETE` or at server start, never on a timer — "exited 1" in the strip is the answer to
@@ -392,7 +392,7 @@ sizes the pane to the minimum. A client detaching releases its constraint; the p
 with no clients attached the pane keeps the last size anyone asked for.
 
 This is our arithmetic, not tmux's — there is only ever one real tmux client here, and tmux's own
-default is the opposite (`window-size latest`, verified on 3.7b; it was smallest before 2.9). The
+default is the opposite (`window-size latest`, verified on 3.7b and again on 3.8; it was smallest before 2.9). The
 argument is that the two ways of being wrong are not equal: a pane smaller than the viewport wastes
 screen and is obvious, while a pane wider than the viewport wraps every line and is unreadable, and
 only the first is recoverable by looking at it.

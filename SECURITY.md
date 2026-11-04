@@ -30,18 +30,15 @@ The token starts sessions in every allowed repository, kills live ones, and atta
 agent's terminal. There is no expiry and no revocation list: invalidating it means deleting the file
 and restarting, which invalidates it for every device at once.
 
-First run prints it as a QR code carrying **the token alone**, never a URL containing it — a scanned
-`?token=…` would leave the credential in browser history, in the `Referer` header of every request
-the page makes, and in the log of anything sitting in front of the server.
+The server never prints it: first run writes it to the token file and nothing else, so no pane,
+pipe or launchd log ever holds it. It goes to the phone as **the token alone**, never a URL
+containing it — a `?token=…` would leave the credential in browser history, in the `Referer` header
+of every request the page makes, and in the log of anything sitting in front of the server.
 
-**That printed block is the credential, so do not do the first run in a pane that is being
-recorded.** `capture-pane -p -e` preserves the escape sequences the QR is made of, and agentdeck runs
-that on every cold attach; the same goes for `pipe-pane`, `script`, Terminal.app and iTerm2 session
-logging, and a screen recording. Starting the server inside tmux is the ordinary way to keep it alive
-on a Mac, which is exactly when this bites. agentdeck prints nothing when stdout is not a terminal,
-which covers a pipe and a launchd log file, but a TTY that is being recorded is still a TTY. If the
-first run happened somewhere that keeps a transcript, treat the token as disclosed: delete the file,
-restart, and re-scan on each device.
+**Do not `cat` the token file in a pane that is being recorded.** `capture-pane -p -e` preserves what
+a pane printed, and agentdeck runs that on every cold attach; the same goes for `pipe-pane`,
+`script`, Terminal.app and iTerm2 session logging, and a screen recording. If that happened, treat
+the token as disclosed: delete the file and restart.
 
 ## The allowlist is a boundary, not a check on one route
 
@@ -108,7 +105,10 @@ entry of its `plugins` array as JavaScript), `.mise*.toml` and `mise-tasks/` (mi
 _.source` and `[tasks]` on the host, and auto-discovers more filenames than the one we happen to
 have) — `src/**/*.test.ts` (`pnpm test` hands them to `node --test`, which executes them, and the
 suite already shells out), `src/fixtures/` (imported by test files, so `node --test` runs it too even
-though the glob above does not match it), `src/client/public/` (Vite copies it verbatim into
+though the glob above does not match it), `src/client/go-server.ts` (imported by a client test; it
+runs `go build` on `server-go/` and starts the result), `server-go/` (`go test` executes its
+`_test.go` files, and `make build` compiles it into `bin/agentdeck`, which every restart and every
+watchdog recovery runs), `src/client/public/` (Vite copies it verbatim into
 `dist/client`, which this server publishes with no bearer token — and that copy dereferences
 symlinks, so an entry there becomes a real file holding whatever it pointed at), `.claude/`,
 `.github/workflows/`, `.git/config`, `.git/hooks/` and everything under `node_modules` and
@@ -134,9 +134,10 @@ pnpm test
 ```
 
 **Every one of those lines is a review gate, not a convenience.** Each executes files listed above.
-`package.json` declares `"postinstall": "node scripts/fix-node-pty-permissions.mjs"`, and pnpm always
-runs the root project's own lifecycle scripts, so `pnpm install --frozen-lockfile` executes a file in
-this tree whatever the lockfile says. **If you install the LaunchAgent, `scripts/` stops being
+pnpm always runs the root project's own lifecycle scripts, so a `postinstall` added to
+`package.json` would make `pnpm install --frozen-lockfile` execute a file in this tree whatever the
+lockfile says; today there is none. `make build` compiles `server-go/` with `go build`, which runs no
+code from the tree at build time, but the binary it produces is what every restart executes. **If you install the LaunchAgent, `scripts/` stops being
 triggered only by a person**: launchd then runs `scripts/watchdog.mjs` unattended, as you, every
 60 seconds and again after every reboot, so an edit to it is executed within a minute with no human
 action and no chance to read a diff — and that same edit chooses the command line the watchdog spawns

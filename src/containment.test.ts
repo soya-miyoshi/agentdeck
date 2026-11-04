@@ -3,9 +3,9 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,10 @@ const hostExecutedFiles = [
   // A test file's imports run too, at module scope, and a fixture matches no test glob. Naming the
   // directory keeps this true for every future fixture rather than the one that exists.
   "src/fixtures/",
+  // Imported by a client test, and builds and runs the Go server from the tree.
+  "src/client/go-server.ts",
+  // `go test` executes its test files, and `make build` turns it into what every restart runs.
+  "server-go/",
   ".claude/",
   ".github/workflows/",
   ".git/config",
@@ -267,12 +271,12 @@ void describe("the user's bearer token is not at the root of a working tree", ()
 
   void test("neither .gitignore nor loadToken claims a container protects the placement", async () => {
     // The two places a reader meets the token's home both used to credit a bind mount that no
-    // longer exists. Scoped by NAME rather than a byte count: the file grew past the old slice.
-    const server = await readDoc("src/server.ts");
+    // longer exists. The token is loaded in server-go/main.go now, so that is the file read.
+    const server = await readDoc("server-go/main.go");
     const ignored = await readDoc(".gitignore");
     for (const [path, text] of [
       [".gitignore", ignored],
-      ["src/server.ts", server.slice(0, server.indexOf("export const main"))],
+      ["server-go/main.go", server],
     ] as const) {
       assert.doesNotMatch(text, /bind mount/i, `${path} still credits a bind mount`);
       assert.doesNotMatch(text, /container-local volume/i, `${path} still credits a volume`);
@@ -280,49 +284,6 @@ void describe("the user's bearer token is not at the root of a working tree", ()
     assert.match(ignored, /AGENTDECK_TOKEN_FILE/);
     assert.match(ignored, /~\/\.agentdeck\/token/, ".gitignore must name where the token now is");
     assert.match(ignored, /inside a tree a session is\s*#?\s*pointed at/);
-  });
-
-  void test("the default token home is one a clean Mac already has, and no session is pointed at", async () => {
-    // The old default was reasoned from a container volume no ordinary user on a Mac can create, so
-    // `pnpm start` failed before the port. The replacement must be writable with nothing set.
-    const { defaultTokenFile, tokenInsideAllowlist } = await import("./server.ts");
-    assert.equal(defaultTokenFile(), join(homedir(), ".agentdeck", "token"));
-    assert.equal(tokenInsideAllowlist(defaultTokenFile(), [repoRootPath]), undefined);
-  });
-
-  void test("a token inside an allowlisted tree is caught, at the root and below it", async () => {
-    // The rule plan 005 states in prose, as a check. Containment rather than membership: a token
-    // one directory down meets the same `grep -rn token .` as one at the root.
-    const { tokenInsideAllowlist } = await import("./server.ts");
-    const allowed = ["/workspace/web", "/workspace/agentdeck"];
-    assert.equal(tokenInsideAllowlist("/workspace/web/token", allowed), "/workspace/web");
-    assert.equal(tokenInsideAllowlist("/workspace/web/a/b/token", allowed), "/workspace/web");
-    assert.equal(tokenInsideAllowlist("/workspace/web", allowed), "/workspace/web");
-    // The neighbour whose name merely starts the same is not inside it, which is the mistake a
-    // string prefix without the separator makes.
-    assert.equal(tokenInsideAllowlist("/workspace/web-secrets/token", allowed), undefined);
-    assert.equal(tokenInsideAllowlist("/var/lib/agentdeck/token", allowed), undefined);
-  });
-
-  void test("an unwritable token path is a sentence naming AGENTDECK_TOKEN_FILE", async () => {
-    // An unhandled EACCES names no variable and the token then lands wherever happened to be
-    // writable - including the one place it must not be.
-    const { loadToken } = await import("./server.ts");
-    const dir = mkdtempSync(join(tmpdir(), "agentdeck-token-"));
-    try {
-      chmodSync(dir, 0o500);
-      assert.throws(
-        () => loadToken(join(dir, "nested", "token")),
-        (error: Error) => {
-          assert.match(error.message, /AGENTDECK_TOKEN_FILE/);
-          assert.match(error.message, /session is pointed at/);
-          return true;
-        },
-      );
-    } finally {
-      chmodSync(dir, 0o700);
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   void test("plan 005 lists the token in the blast radius with the same-uid caveat", async () => {

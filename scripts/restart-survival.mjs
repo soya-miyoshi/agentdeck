@@ -15,7 +15,8 @@ const env = { ...process.env, AGENTDECK_PORT: PORT };
 const log = (label, value) => console.log(`${label.padEnd(26)} ${value}`);
 
 const startServer = () => {
-  const child = spawn("node", ["src/server.ts"], { env, stdio: ["ignore", "pipe", "pipe"] });
+  // `make build` first: this restarts the binary the checkout builds, not a source file.
+  const child = spawn("./bin/agentdeck", [], { env, stdio: ["ignore", "pipe", "pipe"] });
   child.stderr.on("data", (d) => {
     const text = String(d);
     if (text.includes("Error")) console.error("server stderr:", text.trim());

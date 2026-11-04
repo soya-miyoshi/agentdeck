@@ -10,7 +10,7 @@ where the value is.
 The default is: write the code, run the checks, verify it by hand, commit, merge.
 
 ```
-pnpm typecheck && pnpm lint && pnpm test   # the whole suite is ~40s
+make check   # pnpm typecheck, lint and test, then gofmt, go vet and go test -race in server-go/
 ```
 
 If something genuinely warrants adversarial review, say so and let Soya decide. Do not start one.
@@ -82,8 +82,9 @@ separating them - so an orphan that changed directory elsewhere is missed on pur
 
 ## Guardrails that are not negotiable
 
-- **Six runtime dependencies, and the budget is SPENT** (`node-pty`, `ws`, `vue`, `@xterm/xterm`,
-  `@xterm/addon-fit`, `qrcode-generator`). Any new runtime dependency, or any `package.json` change,
+- **The dependency budget is SPENT**: two Go modules for the server (`github.com/creack/pty`,
+  `github.com/coder/websocket`) and three npm packages for the client (`vue`, `@xterm/xterm`,
+  `@xterm/addon-fit`). Any new dependency, or any `package.json` or `server-go/go.mod` change,
   is a stop-and-ask.
 - **No emojis anywhere** — code, comments, docs, commit messages, UI.
 - **Comments are one or two lines per function**: what it does and the one non-obvious constraint.

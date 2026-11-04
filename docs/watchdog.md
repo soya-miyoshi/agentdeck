@@ -55,8 +55,8 @@ without. Add `AGENTDECK_TOKEN_FILE` and `AGENTDECK_AGENT_STATE_DIR` if you moved
 defaults. `AGENTDECK_REPO` is already in the plist and has to stay, because `ProgramArguments` names
 a copy outside the checkout.
 
-**A `.env` is not part of this.** `make start` loads one; the watchdog spawns `node src/server.ts`
-with no `--env-file`, so the plist is the whole environment.
+**A `.env` is not part of this.** `make start` loads one; the watchdog spawns `bin/agentdeck`
+with no `.env`, so the plist is the whole environment.
 
 **Installing it makes `scripts/` unattended.** launchd runs `scripts/watchdog.mjs` — a file agents
 working here can write — as you, every 60 seconds, with no human action. Everywhere else `scripts/`
@@ -70,8 +70,8 @@ this uid — `~/.agentdeck/bin/watchdog.mjs` and the mise node named as `Program
 anything running as you can still rewrite the script and the interpreter, and because the copy lives
 outside the checkout that edit is one `git status` and `git diff` cannot see. Only a root-owned
 script and a root-owned interpreter would close it, and this repository installs neither. The
-watchdog also still spawns `src/server.ts` from the checkout, so a recovery executes agent-writable
-code as you either way.
+watchdog also spawns `bin/agentdeck` from the checkout, a binary `make build` compiles from
+agent-writable sources, so a recovery executes agent-writable code as you either way.
 
 ```sh
 mkdir -p ~/.agentdeck/bin && cp scripts/watchdog.mjs ~/.agentdeck/bin/watchdog.mjs

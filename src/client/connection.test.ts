@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { PANE_COLS, type ServerMessage } from "../protocol.ts";
-import { MAX_FRAME_BYTES, MAX_FRAMES_PER_WINDOW, PING_INTERVAL_MS } from "../ws.ts";
+import {
+  MAX_FRAME_BYTES,
+  MAX_FRAMES_PER_WINDOW,
+  PANE_COLS,
+  PING_INTERVAL_MS,
+  type ServerMessage,
+} from "./wire.ts";
 import type { TokenVerdict } from "./api.ts";
 import {
   Connection,

@@ -1,6 +1,4 @@
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Session } from "../registry.ts";
-import type { SessionState } from "../tmux.ts";
+import type { AgentSummary, Session, SessionState } from "./wire.ts";
 
 // The tab strip as data: one tab per session, and nothing the server did not say. The server's
 // types are imported rather than restated - they erase at build time, and a copy would drift.

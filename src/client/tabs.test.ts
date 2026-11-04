@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Session } from "../registry.ts";
-import type { SessionState } from "../tmux.ts";
+import type { AgentSummary, Session, SessionState } from "./wire.ts";
 import { selectTab, toTabs } from "./tabs.ts";
 
 const session = (

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { PANE_COLS } from "../protocol.ts";
+import { PANE_COLS } from "./wire.ts";
 import { cellRatio, fontSizeFor, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./pane-fit.ts";
 
 // A simulated terminal, so the property is "the columns fill the pane" rather than any arithmetic.

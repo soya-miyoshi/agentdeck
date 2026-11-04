@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
-import type { AgentSummary } from "../agent-profiles.ts";
-import type { Cwd } from "../cwds.ts";
+import type { AgentSummary, Cwd } from "./wire.ts";
 import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 
 // The picker: a directory and an agent, both from what the server reported. 44px targets, and the

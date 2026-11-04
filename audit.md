@@ -2998,3 +2998,71 @@ Accepted, with the reason:
 
 Verified: the leak measurement on both versions, typecheck, lint, tests (the 9 CI/M0 failures are
 the same on 1.1.0). Not demonstrated: the running server, until it restarts; the phone.
+
+## The server is Go: server-go/ replaces src/*.ts
+
+The TypeScript server (`src/*.ts` outside `src/client/`) and `scripts/reap.mjs` are replaced by one Go
+binary, `bin/agentdeck`, built from `server-go/` by `make build`. `agentdeck reap` is the reaper and
+`agentdeck hook` is the hook an agent runs. Every feature is kept except the first-run QR, which is
+dropped: the token is written to its file and nothing prints it. The client keeps its own copy of
+the wire shapes in `src/client/wire.ts`; `server-go/wire_test.go` fails if the two halves drift.
+
+Session ids and hook secrets are byte-identical to the TS server's (parity values computed from the
+TS code), so a Go server adopts the sessions a TS server left in tmux, hooks included. Measured
+against the live roots, `agentdeck reap --json` and `reap.mjs --json` classified the same orphan,
+the same empty server and the same 120 stale sockets.
+
+All 699 TS server tests were ported to Go property by property (`server-go/port_*_test.go`, plus
+`unit_test.go` and `e2e_test.go`), or kept in TS where they check repository files rather than the
+server. Runtime npm dependencies go from six to three; the server's are two Go modules,
+`creack/pty` and `coder/websocket`.
+
+Found by the port, all fixed:
+
+- [high] The PTY leak this whole effort started from: node-pty 1.1.0's spawn left one `/dev/ptmx`
+  per attach. The Go PTY closes the master and reaps the client; `TestReattachingLeaksNoPTYs`
+  counts this process's ptmx and ttys fds across 30 re-attaches and 10 natural exits.
+- [medium] A half-open socket was noticed at up to three ping intervals, not two: the pong deadline
+  ran from the tick after the freeze. It is now one interval, as `ws`'s isAlive check did.
+- [medium] A burst of attaches could start two snapshot builds: the lookup and the registration of
+  the in-flight build were two critical sections. They are one.
+- [medium] A hook that arrived before the hub attached a just-created session was overwritten by
+  the next sync's `idle`. The registry keeps what a hook declared and seeds the stream with it.
+- [medium] A wedged `tailscale` held the boot for 30s rather than 3s: `exec.CommandContext` killed
+  the CLI, but its child kept stdout open and `Output` waited for it. `WaitDelay` bounds that.
+- [low] A static file removed between locate and read was a 500; it is a 404, as under `pnpm build`.
+- [low] The hook line's marker comment sat before `>/dev/null 2>&1; exit 0` and commented them out.
+- [low] A UTF-8 character split across two PTY reads reached the phone as two U+FFFD; node-pty
+  decoded with a StringDecoder. The reader now holds an incomplete trailing sequence back.
+- [low] A timed reaper pass that panicked would have taken the server with it; it costs that pass.
+
+Found in the client while running it against Go, fixed:
+
+- [medium] `browserSocket` listened for `close` only, on the claim that `error` always precedes it.
+  Node 22's WebSocket fires `error` for a refused connection and then never fires `close`, so a
+  reconnect attempt that lands while the server is restarting hung until the 30s silence bound.
+  "the server process is restarted under an open client" failed 4 runs in 5 against the faster-
+  booting Go server; with `error` ending the socket too, 5 in 5 pass. Browsers fire both, and the
+  ladder handles one socket's end once, so a browser sees no change.
+
+Accepted, with the reason:
+
+- **`src/ci.test.ts` is deleted, not ported.** It asserted `.github/workflows/ci.yml`, which
+  `06fa0c7 remove CI` deleted on purpose; it had failed since then.
+- **The watchdog stays a Node script.** It now starts `bin/agentdeck` and recognises both it and a
+  legacy `node src/server.ts` as ours, so a pass straddling the switch supervises rather than
+  calling the old server a squatter. The installed copy at `~/.agentdeck/bin/watchdog.mjs` still
+  spawns `src/server.ts` until it is re-copied, and that file no longer exists.
+- **`make start` sources `.env` with `set -a` rather than `--env-file-if-exists`,** so a variable in
+  `.env` now overrides the same one set in the calling shell. `AGENTDECK_ROOTS` is still set after
+  it and still wins.
+- **`startPTY` is a package variable tests swap.** Safe while no test that spawns a PTY runs in
+  parallel; none uses `t.Parallel`.
+- **About 200 dead `agentdeck-*` socket files predate this work** in `/private/tmp/tmux-<uid>/`, from
+  TS-era test runs: `kill-server` does not remove the file. Both client suites that boot servers now
+  remove theirs; the existing ones are left for `make reap-kill`, which is the operator's to run.
+
+Verified: `make check` twice, exit 0 (435/435 TS, the Go suite under `-race`); the Go suite five
+times under `-race`; `scripts/e2e.mjs` and `scripts/restart-survival.mjs` against the binary; the
+real hook line end to end against a server booted with this machine's `.env` on a side port.
+Not demonstrated: the phone against the Go server.

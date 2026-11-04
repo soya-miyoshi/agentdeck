@@ -5,12 +5,39 @@
 // with Serve disabled `tailscale serve --bg` prints an enable link and then never exits.
 
 import { execFile } from "node:child_process";
-import {
-  ADMIN_DNS_PAGE,
-  parseTailnetStatus,
-  tailscaleBinary,
-  tailscaleEnv,
-} from "../src/tailnet.ts";
+import { existsSync } from "node:fs";
+
+// The same reading of tailscale as server-go/tailnet.go, which is the server's. This script is the
+// operator's, and runs with no server at all.
+const ADMIN_DNS_PAGE = "https://login.tailscale.com/admin/dns";
+const TAILSCALE_CANDIDATES = [
+  "/opt/homebrew/bin/tailscale",
+  "/usr/local/bin/tailscale",
+  "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+];
+
+/** `AGENTDECK_TAILSCALE` if set, else the first installed candidate; PATH is never consulted. */
+const tailscaleBinary = () => {
+  const named = process.env["AGENTDECK_TAILSCALE"];
+  if (named !== undefined && named !== "") return existsSync(named) ? named : undefined;
+  return TAILSCALE_CANDIDATES.find((path) => existsSync(path));
+};
+
+/** The macOS CLI prints an error on stdout WITH EXIT 0 when TERM is unset, as under launchd. */
+const tailscaleEnv = (env = process.env) => ({
+  ...env,
+  TERM: env["TERM"] === undefined || env["TERM"] === "" ? "dumb" : env["TERM"],
+});
+
+/** `Self.DNSName` carries a trailing dot an origin must not; `CertDomains` is null when HTTPS is off. */
+const parseTailnetStatus = (raw) => {
+  const dnsName = typeof raw?.Self?.DNSName === "string" ? raw.Self.DNSName : "";
+  const name = dnsName.replace(/\.$/, "");
+  return {
+    origin: name === "" ? undefined : `https://${name}`,
+    httpsCertificates: Array.isArray(raw?.CertDomains) && raw.CertDomains.length > 0,
+  };
+};
 
 const port = process.env.AGENTDECK_PORT ?? "7777";
 // Generous: `serve --bg` returns in well under a second when Serve is enabled, and this bound is

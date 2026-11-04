@@ -1,6 +1,10 @@
-import { usablePaneCols, type ClientMessage, type ServerMessage } from "../protocol.ts";
-import type { Session } from "../registry.ts";
-import type { SessionState } from "../tmux.ts";
+import {
+  usablePaneCols,
+  type ClientMessage,
+  type ServerMessage,
+  type Session,
+  type SessionState,
+} from "./wire.ts";
 import type { TokenVerdict } from "./api.ts";
 import { ReconnectPolicy } from "./backoff.ts";
 import {
