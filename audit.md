@@ -2972,3 +2972,29 @@ Accepted, with the reason:
 
 Verified: the five new tests count the stub CLI's runs, and the installed timer's effect is measured
 from the unified log after the copy. Not demonstrated: the phone.
+
+## PTY leak: node-pty 1.1.0 leaks one /dev/ptmx per spawn on macOS
+
+Every re-attach leaked a PTY until `kern.tty.ptmx_max` (511) was exhausted machine-wide, breaking
+mosh and every new attach with `posix_spawnp failed`. `f72f863` (destroy, not kill) was not the
+fix: measured with real tmux, it and its parent both leaked 30 PTYs over 30 attach/dispose cycles
+and 10 more over 10 natural exits.
+
+The cause is in node-pty's native `pty_posix_spawn`: it opens a throwaway `posix_openpt` to keep
+fds 0-2 occupied, then cleans up with `for (; count > 0; count--) close(low_fds[count])`, which
+never closes `low_fds[0]`. With stdio open that is the only one opened, so one master leaks per
+spawn, outside anything `destroy()` can reach.
+
+Fixed by pinning `node-pty` to `1.2.0-beta.18`, whose loop is `for (i = 0; i <= count; i++)`. The
+same measurement gives 0 leaked masters and 0 leaked slaves. `f72f863` stays: closing the fd on exit
+is still right.
+
+Accepted, with the reason:
+
+- **A beta is a runtime dependency.** It is pinned exactly, not a range. The alternative was a
+  `pnpm patch` rebuilt from source, or guessing the leaked fd number from JavaScript.
+- **No regression test pins the property.** It needs a real tmux and lsof, which the suite avoids;
+  the measurement script was run by hand.
+
+Verified: the leak measurement on both versions, typecheck, lint, tests (the 9 CI/M0 failures are
+the same on 1.1.0). Not demonstrated: the running server, until it restarts; the phone.
