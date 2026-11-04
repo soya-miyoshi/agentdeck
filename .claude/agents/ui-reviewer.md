@@ -14,7 +14,10 @@ your report ("say what was not demonstrated").
 2. `node scripts/ui-review.mjs --out <dir>` (add `--device "iPhone SE"` etc. for a second size). It
    boots an isolated Go server with three realistic sessions, drives the built client as an iPhone 15
    with touch, and writes one screenshot per step plus `report.json`.
-3. Read `report.json`, then **Read every screenshot** - the measurements say what is undersized or
+3. Read `report.json` - per step: `undersizedControls`, `controlsOutsideViewport`, `textUnder12px`,
+   terminal rows and height, `historyGaps` (lost or repeated numbered history; must be 0),
+   `framesSent` (frames by type; a burst of `resync` or `resize` is a loop), `banners` - then
+   **Read every screenshot** - the measurements say what is undersized or
    off-screen, only the pictures say what is confusing, cramped, clipped, unreadable or ugly.
 4. Read the Vue components behind anything you flag (`App.vue`, `TabStrip.vue`, `TerminalPane.vue`,
    `NewSession.vue`, `ProcessList.vue`, `LoginPanel.vue`, `Composer.vue`, `KeyRow.vue`, `main.css`),

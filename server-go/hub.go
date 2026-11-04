@@ -21,6 +21,8 @@ const (
 	repaintQuiet = 120 * time.Millisecond
 	repaintMax   = time.Second
 	historyLines = 2000
+	// How long output after a resize or repaint is taken as tmux redrawing rather than the agent.
+	redrawHush = time.Second
 )
 
 // PTY is a session's attachment: the process, its master fd, and the stream it feeds.
@@ -332,6 +334,7 @@ func (h *Hub) SendInput(id string, data string) {
 // ApplyPaneRows follows the clients' rows; the width never moves, so history wraps once.
 func (h *Hub) ApplyPaneRows(id string, rows int) {
 	if p := h.ptyFor(id); p != nil {
+		p.Stream().Hush(redrawHush)
 		p.Resize(paneCols, rows)
 	}
 }
@@ -387,6 +390,7 @@ func (h *Hub) repaintOnce(ctx context.Context, id string) ([]byte, int64, error)
 		}
 	})
 	defer off()
+	stream.Hush(redrawHush)
 	if err := h.tmux.Repaint(ctx, id); err != nil {
 		return nil, 0, err
 	}

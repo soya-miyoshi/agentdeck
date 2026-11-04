@@ -128,6 +128,18 @@ const browser = await chromium.launch();
 const context = await browser.newContext({ ...device, baseURL: base });
 await context.addInitScript((value) => {
   window.localStorage.setItem("agentdeck.token", value);
+  // Every frame the page sends, by type, so a send storm is a number rather than a banner.
+  window.__sent = {};
+  const send = window.WebSocket.prototype.send;
+  window.WebSocket.prototype.send = function (raw) {
+    try {
+      const type = JSON.parse(raw).t;
+      window.__sent[type] = (window.__sent[type] ?? 0) + 1;
+    } catch {
+      // Not JSON: counted as nothing, sent as is.
+    }
+    return send.call(this, raw);
+  };
 }, token);
 const page = await context.newPage();
 const consoleErrors = [];
@@ -209,6 +221,11 @@ const measure = async () =>
         t.innerText.replace(/\s+/g, " ").trim(),
       ),
       banners: [...document.querySelectorAll(".banner")].map((b) => b.innerText.trim()),
+      framesSent: (() => {
+        const counts = { ...window.__sent };
+        window.__sent = {};
+        return counts;
+      })(),
       focused: document.activeElement ? label(document.activeElement) : null,
     };
   });
@@ -252,6 +269,8 @@ const longPress = async (x, y) => {
 
 const tapText = async (text) =>
   await page.getByRole("button", { name: text, exact: false }).first().tap();
+const openSessions = async () => await page.getByRole("button", { name: "Sessions" }).tap();
+const openMore = async () => await page.getByRole("button", { name: "More", exact: true }).tap();
 const paneCenter = async () => {
   const box = await page.locator(".pane-wrap:visible .pane").first().boundingBox();
   return { x: box.x + box.width / 2, y: box.y + box.height / 2, box };
@@ -263,10 +282,12 @@ await page.waitForTimeout(1500);
 
 await step("first-load", "The app as it opens, with three sessions and the first one active.");
 await step("switch-tab", "Tap the second tab.", async () => {
+  await openSessions();
   await page.locator(".tab .pick").nth(1).tap();
 });
 await step("switch-back", "Tap the first tab again; its screen should be intact.", async () => {
   // The session with 200 lines of history, so the scroll steps below have something to scroll.
+  await openSessions();
   await page.locator(".tab .pick", { hasText: /^\s*agentdeck/ }).tap();
 });
 await step("scroll-up", "Drag down on the terminal to read earlier output.", async () => {
@@ -339,34 +360,34 @@ await step("keyboard-closed", "Keyboard dismissed: back to the full viewport.", 
 await step("key-row-esc", "Tap Esc on the key row.", async () => {
   await tapText("Esc");
 });
-await step("new-session-open", "Open the New session picker.", async () => {
+await step("new-session-open", "Open the session list, then New session.", async () => {
+  await openSessions();
   await tapText("New session");
 });
-await step("new-session-close", "Try to close the picker without starting anything.", async () => {
-  const close = page.getByRole("button", { name: /close|cancel|done|×/i });
-  if ((await close.count()) > 0) await close.first().tap();
-  else await tapText("New session");
-});
 await step(
-  "panels-exclusive",
-  "Open the picker, then Processes: only one panel should show.",
+  "new-session-close",
+  "Close the picker with Cancel, without starting anything.",
   async () => {
-    await tapText("New session");
-    await tapText("Processes");
+    await tapText("Cancel");
   },
 );
+await step(
+  "panels-exclusive",
+  "Open the picker, then More: only one panel should show.",
+  async () => {
+    await openSessions();
+    await tapText("New session");
+    await openMore();
+  },
+);
+await step("processes-open", "Open Processes from More.", async () => {
+  await tapText("Processes");
+});
 await step("processes-close-own", "Close Processes with its own Close button.", async () => {
   await page.locator(".processes").getByRole("button", { name: "Close" }).tap();
 });
-await step("processes-open", "Open Processes.", async () => {
-  await tapText("Processes");
-});
-await step("processes-close", "Try to close the Processes panel.", async () => {
-  const close = page.locator(".processes").getByRole("button", { name: /close|done|×/i });
-  if ((await close.count()) > 0) await close.first().tap();
-  else await tapText("Processes");
-});
-await step("login-open", "Open the Login helper.", async () => {
+await step("login-open", "Open the Login helper from More.", async () => {
+  await openMore();
   await tapText("Login");
 });
 await step("login-close", "Close the Login helper.", async () => {
@@ -376,8 +397,9 @@ await step("login-close", "Close the Login helper.", async () => {
 });
 await step(
   "end-disarms",
-  "Arm End on the active tab, then wait: it should disarm by itself.",
+  "Open the list, arm End on the active session, then wait: it should disarm.",
   async () => {
+    await openSessions();
     await page.locator(".tab.active .close").tap();
     await page.waitForTimeout(3500);
   },

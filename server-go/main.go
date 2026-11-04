@@ -328,7 +328,10 @@ func serve() error {
 		ListSessions:  registry.List,
 		SendInput:     hub.SendInput,
 		ApplyPaneRows: hub.ApplyPaneRows,
-		NotFound:      api,
+		SettleRows: func(ctx context.Context, id string, rows int) {
+			tmux.WaitForHeight(ctx, id, rows, 500*time.Millisecond)
+		},
+		NotFound: api,
 	})
 
 	if err := hub.Sync(ctx); err != nil {

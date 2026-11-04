@@ -58,7 +58,8 @@ onMounted(() => {
         {{ session.sessionId }}
         <!-- The count and size are of what is BELOW the pane, which is what the session has
              accumulated rather than what it is. -->
-        <span class="tally">
+        <!-- Only when the session has accumulated something: "0 child(ren), 0MB" is noise. -->
+        <span v-if="session.childCount > 0" class="tally">
           {{ session.childCount }} child(ren), {{ mb(session.childRssKb) }}
         </span>
       </h3>
@@ -97,8 +98,10 @@ onMounted(() => {
 }
 .refresh {
   min-height: var(--touch-target);
-  background: none;
-  border: none;
+  margin: 0.4rem 0;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  background: #1b1e24;
   color: inherit;
   font: inherit;
   padding: 0.4rem 0.6rem;

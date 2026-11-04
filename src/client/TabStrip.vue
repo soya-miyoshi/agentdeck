@@ -5,7 +5,7 @@ import { nextArm } from "./close-arm.ts";
 import type { Tab } from "./tabs.ts";
 
 const props = defineProps<{ tabs: Tab[]; active: string | undefined }>();
-const emit = defineEmits<{ select: [id: string]; close: [id: string] }>();
+const emit = defineEmits<{ select: [id: string]; close: [id: string]; new: [] }>();
 
 // Closing kills the agent, so it takes two taps rather than one: the first arms the cap and the
 // second acts. A single X beside a tab is a thumb's width from the control that switches tabs.
@@ -33,11 +33,8 @@ watch(
   () => props.active,
   () => {
     armed.value = undefined;
-    // The strip scrolls sideways, so the tab being looked at is brought into view.
     void nextTick(() => {
-      strip.value
-        ?.querySelector(".tab.active")
-        ?.scrollIntoView({ inline: "nearest", block: "nearest" });
+      strip.value?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest" });
     });
   },
 );
@@ -95,33 +92,38 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <p v-if="tabs.length === 0" class="empty">No sessions.</p>
+    <button class="new" type="button" @click="$emit('new')">New session</button>
   </nav>
 </template>
 
 <style scoped>
+/* The sessions as a list in a panel, one full-width row each: a strip of tabs ran off the side of a
+   phone at three sessions, and the off-screen one was the one waiting. */
 .strip {
   display: flex;
-  gap: 0.25rem;
-  overflow-x: auto;
-  /* Top edge of the app: the row is pushed clear of the notch and the status bar, while the
-     strip's own background still runs underneath them. */
-  padding: calc(0.25rem + var(--safe-top)) calc(0.25rem + var(--safe-right)) 0.25rem
-    calc(0.25rem + var(--safe-left));
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding: 0.5rem calc(0.5rem + var(--safe-right)) 0.5rem calc(0.5rem + var(--safe-left));
   background: #14161a;
   border-bottom: 1px solid #2a2e35;
 }
 .tab {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   flex: 0 0 auto;
   border: 1px solid #2a2e35;
   border-radius: 6px;
   background: #1b1e24;
 }
 .pick,
-.close {
-  /* Touch target rather than a pointer target: this is driven from a phone, one-handed, and a
-     mis-hit here switches which agent's terminal the next keystroke goes to. */
+.close,
+.new {
+  /* Touch target rather than a pointer target: a mis-hit here switches which agent's terminal the
+     next keystroke goes to. */
   min-height: var(--touch-target);
   min-width: var(--touch-target);
   border: 0;
@@ -130,21 +132,30 @@ onBeforeUnmount(() => {
   font: inherit;
 }
 .pick {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.75rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
 }
 .close {
-  padding: 0 0.6rem;
+  padding: 0 0.9rem;
   border-left: 1px solid #2a2e35;
   color: #8b9099;
-  font-size: 0.75rem;
+  font-size: 0.85rem;
 }
 .close.armed {
   /* The only red in the app, on the one control that destroys something. */
   background: #3a2226;
   color: #ff9d9d;
+}
+.new {
+  flex: 0 0 auto;
+  border: 1px dashed #3b4a63;
+  border-radius: 6px;
+  color: #a9c4ff;
 }
 .tab.active {
   border-color: #6aa2ff;
@@ -154,28 +165,30 @@ onBeforeUnmount(() => {
   opacity: 0.7;
 }
 .dot {
+  flex: 0 0 auto;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #ffb454;
 }
 .tab.deaf {
-  /* Dashed, so the difference survives a glance and does not depend on reading the pill. */
+  /* Dashed, so the difference survives a glance and does not depend on reading the word. */
   border-style: dashed;
 }
+.name {
+  /* The full name, wrapped: in a list there is room, and two sessions differing only in a suffix
+     must be told apart. */
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
 .lost {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: #c9a227;
 }
-.name {
-  /* One long repository name must not push every other session off the strip. */
-  max-width: 9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .status {
-  font-size: 0.75rem;
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 0.8rem;
   color: #8b9099;
 }
 .status.working {

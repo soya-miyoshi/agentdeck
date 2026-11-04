@@ -25,6 +25,7 @@ import NewSession from "./NewSession.vue";
 import ProcessList from "./ProcessList.vue";
 import { historyBytes } from "./repaint.ts";
 import SelectText from "./SelectText.vue";
+import SessionBar from "./SessionBar.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -231,6 +232,35 @@ const accept = (pasted: string): void => {
   start(pasted);
 };
 
+/** A session picked from the list: shown, and the list gets out of the way. */
+const pick = (id: string): void => {
+  select(id);
+  panel.value = undefined;
+};
+
+/**
+ * Whether the soft keyboard is up: something editable has focus and the visible height is short.
+ * The top row hides then, so the composer and the key row keep their room on a small phone.
+ */
+const editing = ref(false);
+const shortView = ref(false);
+const typing = computed(() => editing.value && shortView.value);
+const noteFocus = (): void => {
+  const el = document.activeElement;
+  editing.value = el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement;
+};
+const noteHeight = (): void => {
+  shortView.value = (window.visualViewport?.height ?? window.innerHeight) < 520;
+};
+document.addEventListener("focusin", noteFocus);
+document.addEventListener("focusout", () => {
+  // Focus moves to the next element after `focusout`, so read it once that has happened.
+  setTimeout(noteFocus, 0);
+});
+window.visualViewport?.addEventListener("resize", noteHeight);
+window.addEventListener("resize", noteHeight);
+noteHeight();
+
 const select = (id: string): void => {
   active.value = id;
   opened.value = new Set([...opened.value, id]);
@@ -304,7 +334,7 @@ const SELECT_LINES = 400;
  * once, which squeezed the terminal to nothing and pushed the tabs and keys off the screen.
  * Processes is unmounted while closed, so the `ps` of the whole machine runs only when asked.
  */
-type Panel = "new" | "processes" | "login" | "select";
+type Panel = "sessions" | "new" | "more" | "processes" | "login" | "select";
 const panel = ref<Panel>();
 const toggle = (which: Panel): void => {
   panel.value = panel.value === which ? undefined : which;
@@ -390,6 +420,9 @@ document.addEventListener("visibilitychange", wake);
 window.addEventListener("online", wake);
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", closePanel);
+  document.removeEventListener("focusin", noteFocus);
+  window.visualViewport?.removeEventListener("resize", noteHeight);
+  window.removeEventListener("resize", noteHeight);
   document.removeEventListener("visibilitychange", wake);
   window.removeEventListener("online", wake);
   unfollow?.();
@@ -402,59 +435,48 @@ if (token.value !== undefined) start(token.value);
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
-    <TabStrip :tabs="tabs" :active="active" @select="select" @close="(id) => void endSession(id)" />
-    <!-- Without this the deck can drive sessions but never start one. Image rides in the same bar
-         because it is the other thing done TO a session, not a mode of the terminal below. -->
+    <!-- One row: which session this is, Select, and More. A strip of tabs ran off the side of a
+         phone at three sessions, and the action bar beside it scrolled sideways on a small one. -->
+    <SessionBar
+      v-show="!typing"
+      :tabs="tabs"
+      :active="active"
+      :panel="panel"
+      @sessions="toggle('sessions')"
+      @select="openSelect"
+      @more="toggle('more')"
+    />
+    <TabStrip
+      v-if="panel === 'sessions'"
+      :tabs="tabs"
+      :active="active"
+      @select="pick"
+      @close="(id) => void endSession(id)"
+      @new="panel = 'new'"
+    />
     <NewSession
       :cwds="cwds"
       :agents="agents"
       :busy="starting"
       :open="panel === 'new'"
       @open="loadCwds"
-      @toggle="toggle('new')"
       @close="panel = undefined"
       @start="(cwd, agent) => void startSession(cwd, agent)"
-    >
-      <template #beside>
-        <!-- What each session has left running. In the bar because it is a question about the
-             machine the sessions run on, at the same level as starting one. -->
-        <button
-          class="beside"
-          type="button"
-          :aria-expanded="panel === 'processes'"
-          @click="toggle('processes')"
-        >
-          Processes
-        </button>
-        <!-- The way text on that screen leaves the phone: the pane owns every touch gesture, so the
-             text is shown again as plain text where the system's own selection works. -->
-        <button
-          v-if="active !== undefined"
-          class="beside"
-          type="button"
-          :aria-expanded="panel === 'select'"
-          @click="openSelect"
-        >
-          Select
-        </button>
-        <!-- `/login` prints a URL a phone cannot select and asks for a code it cannot easily paste. -->
-        <button
-          v-if="active !== undefined"
-          class="beside"
-          type="button"
-          :aria-expanded="panel === 'login'"
-          @click="toggle('login')"
-        >
-          Login
-        </button>
-        <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
-        <UploadImage
-          v-if="active !== undefined"
-          :busy="uploading"
-          @pick="(file) => void sendImage(file)"
-        />
-      </template>
-    </NewSession>
+    />
+    <!-- The rarer things done to a session or the machine, a tap further away than the common ones. -->
+    <nav v-if="panel === 'more'" class="more">
+      <button class="row" type="button" @click="panel = 'processes'">Processes</button>
+      <button v-if="active !== undefined" class="row" type="button" @click="panel = 'login'">
+        Login
+      </button>
+      <!-- Only with a session to send it to: an upload needs a session directory to land in. -->
+      <UploadImage
+        v-if="active !== undefined"
+        :busy="uploading"
+        @pick="(file) => void sendImage(file)"
+      />
+      <button class="row" type="button" @click="panel = undefined">Close</button>
+    </nav>
     <ProcessList v-if="panel === 'processes'" :token="token" @close="panel = undefined" />
     <LoginPanel
       v-if="panel === 'login' && active !== undefined"
@@ -472,6 +494,7 @@ if (token.value !== undefined) start(token.value);
         :session-id="id"
         :visible="id === active"
         :cols="paneCols"
+        :fit-rows="!typing"
         @ready="ready"
         @gone="gone"
         @input="typed"
@@ -517,9 +540,23 @@ if (token.value !== undefined) start(token.value);
   height: 100%;
   overflow: hidden;
 }
+/* The rows a thumb needs - the bar, the composer and the keys - keep their height; a panel is what
+   gives way on a short screen, scrolling inside itself, then the terminal down to its floor. */
+.app > * {
+  flex-shrink: 0;
+}
+.app > .strip,
+.app > .picker,
+.app > .processes,
+.app > .login,
+.app > .more {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 .panes {
   position: relative;
-  flex: 1;
+  flex: 1 1 0;
   /* The terminal keeps a few readable rows whatever is open above it: the panels scroll inside
      themselves, so they are what gives way, not the thing they are about. */
   min-height: 8rem;
@@ -530,17 +567,24 @@ if (token.value !== undefined) start(token.value);
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
 }
-/* Flush with the New session bar rather than a chip floating on it, same as UploadImage's button. */
-.beside {
-  flex: 0 0 auto;
+.more {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem calc(0.5rem + var(--safe-right)) 0.5rem calc(0.5rem + var(--safe-left));
+  background: #14161a;
+  border-bottom: 1px solid #2a2e35;
+}
+.more .row,
+.more :deep(.upload) {
   min-height: var(--touch-target);
-  padding: 0 0.9rem;
-  border: 0;
-  border-left: 1px solid #2a2e35;
+  padding: 0 0.75rem;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
   background: #1b1e24;
   color: #d7dae0;
   font: inherit;
-  font-size: 0.85rem;
+  text-align: left;
 }
 .banner {
   margin: 0;

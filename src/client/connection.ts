@@ -142,6 +142,9 @@ export type ConnectionStatus =
   | "forbidden"
   | "closed";
 
+/** How long the rows must hold still before a resize is repainted from a snapshot. */
+export const RESIZE_SETTLE_MS = 250;
+
 interface Attachment {
   cols: number;
   rows: number;
@@ -385,9 +388,34 @@ export class Connection {
   resize(sessionId: string, cols: number, rows: number): void {
     const attachment = this.#attachments.get(sessionId);
     if (attachment === undefined) return;
+    const rowsChanged = attachment.rows !== rows;
     attachment.cols = cols;
     attachment.rows = rows;
     this.#send({ t: "resize", sessionId, cols, rows });
+    if (rowsChanged) this.#repaintAfterResize(sessionId);
+  }
+
+  // One pending repaint per session: a keyboard animating in is a burst of resizes, and only the
+  // size it settles at is worth a snapshot.
+  #pendingRepaint = new Map<string, Cancel>();
+
+  /**
+   * A fresh snapshot once the rows stop changing. On a resize xterm and tmux each move rows between
+   * screen and scrollback on their own, and they disagree: the scrollback ended up holding lines the
+   * screen showed again. tmux is the authority, and a snapshot replaces both wholesale.
+   */
+  #repaintAfterResize(sessionId: string): void {
+    this.#pendingRepaint.get(sessionId)?.();
+    this.#pendingRepaint.set(
+      sessionId,
+      this.#schedule(() => {
+        this.#pendingRepaint.delete(sessionId);
+        // Sent without a position, which makes the server answer with a snapshot. The position
+        // itself is KEPT: output arriving meanwhile still places, where with none every chunk
+        // answered with a `resync` - 100 a second while a keyboard opened.
+        this.#sendAttach(sessionId, true);
+      }, RESIZE_SETTLE_MS),
+    );
   }
 
   /**
@@ -620,7 +648,7 @@ export class Connection {
     );
   }
 
-  #sendAttach(sessionId: string): void {
+  #sendAttach(sessionId: string, fresh = false): void {
     const attachment = this.#attachments.get(sessionId);
     if (attachment === undefined) return;
     const message: ClientMessage = {
@@ -631,7 +659,7 @@ export class Connection {
     };
     // haveEpoch and haveSeq travel together or not at all: a seq without an epoch is a position
     // in no particular space, which is the mistake the epoch exists to prevent.
-    if (attachment.position !== undefined) {
+    if (attachment.position !== undefined && !fresh) {
       message.haveEpoch = attachment.position.epoch;
       message.haveSeq = attachment.position.seq;
     }

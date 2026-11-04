@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Port of src/tmux.ts: every call names agentdeck's socket and config, runs with a built
@@ -409,6 +410,22 @@ func (t *Tmux) CaptureHistory(ctx context.Context, id string, lines int) (string
 		return "", err
 	}
 	return forTerminal(out), nil
+}
+
+// WaitForHeight polls until the pane is `rows` high or `limit` passes. A resize reaches tmux through
+// the attach client's tty, asynchronously, so nothing else says when it has taken effect.
+func (t *Tmux) WaitForHeight(ctx context.Context, id string, rows int, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for {
+		out, err := t.run(ctx, "display-message", "-p", "-t", exactWindowTarget(id), "#{pane_height}")
+		if err == nil && strings.TrimSpace(out) == strconv.Itoa(rows) {
+			return true
+		}
+		if err != nil || time.Now().After(deadline) || ctx.Err() != nil {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (t *Tmux) IsAlternateScreen(ctx context.Context, id string) (bool, error) {

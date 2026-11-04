@@ -162,10 +162,16 @@ type SnapshotSources struct {
 	Alternate      func(ctx context.Context) (bool, error)
 	PaneModes      func(ctx context.Context) (string, error)
 	Repaint        func(ctx context.Context) ([]byte, int64, error)
+	// Settle waits for a resize just asked of tmux to land, so history and screen are captured at
+	// one size: captured either side of it they overlap, and the overlap shows as repeated lines.
+	Settle func(ctx context.Context)
 }
 
 // buildSnapshot is history (unless on the alternate screen), modes, then the repaint last.
 func buildSnapshot(ctx context.Context, s SnapshotSources) (*Snapshot, error) {
+	if s.Settle != nil {
+		s.Settle(ctx)
+	}
 	alt, err := s.Alternate(ctx)
 	if err != nil {
 		return nil, err
@@ -200,9 +206,11 @@ type WSDeps struct {
 	ListSessions   func(ctx context.Context) ([]Session, error)
 	SendInput      func(id, data string)
 	ApplyPaneRows  func(id string, rows int)
-	PingInterval   time.Duration
-	SnapshotLimit  time.Duration
-	NotFound       http.Handler
+	// SettleRows waits, bounded, until the pane is `rows` high. Optional.
+	SettleRows    func(ctx context.Context, id string, rows int)
+	PingInterval  time.Duration
+	SnapshotLimit time.Duration
+	NotFound      http.Handler
 }
 
 type wsClient struct {
@@ -621,6 +629,11 @@ func (s *WSServer) coalescedSnapshot(id string, stream *Stream) (*Snapshot, erro
 			Alternate:      func(ctx context.Context) (bool, error) { return s.d.IsAlternate(ctx, id) },
 			PaneModes:      func(ctx context.Context) (string, error) { return s.d.PaneModes(ctx, id) },
 			Repaint:        func(ctx context.Context) ([]byte, int64, error) { return s.d.Repaint(ctx, id) },
+			Settle: func(ctx context.Context) {
+				if rows := stream.MinRows(); s.d.SettleRows != nil && rows > 0 {
+					s.d.SettleRows(ctx, id, rows)
+				}
+			},
 		})
 		close(result)
 	}()

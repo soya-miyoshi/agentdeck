@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { PANE_COLS } from "./wire.ts";
-import { cellRatio, fontSizeFor, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./pane-fit.ts";
+import {
+  cellRatio,
+  fontSizeFor,
+  fontSizeForRows,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  MIN_ROWS,
+} from "./pane-fit.ts";
 
 // A simulated terminal, so the property is "the columns fill the pane" rather than any arithmetic.
 // The real PANE_COLS rather than a number of this file's own, because it has already moved once.
@@ -125,5 +132,32 @@ void describe("sizing the font so the deck's columns fill the pane", () => {
       worst > 10,
       `flooring only ever cost ${String(worst)}px, so this test proves nothing`,
     );
+  });
+});
+
+void describe("a short pane keeps enough rows to read", () => {
+  // An xterm row is roughly 1.17 font pixels tall; the exact figure is measured at runtime.
+  const rowPerFont = 1.17;
+
+  void test("landscape on a phone gets at least MIN_ROWS rows rather than 5 huge ones", () => {
+    const height = 240;
+    const size = Math.min(
+      fontSizeFor(659, COLUMNS, 0.6),
+      fontSizeForRows(height, MIN_ROWS, rowPerFont),
+    );
+    assert.ok(
+      Math.floor(height / (size * rowPerFont)) >= MIN_ROWS,
+      `only ${String(height / (size * rowPerFont))} rows`,
+    );
+  });
+
+  void test("a tall portrait pane is unaffected: width still decides the size", () => {
+    const width = fontSizeFor(393, COLUMNS, 0.6);
+    assert.equal(Math.min(width, fontSizeForRows(453, MIN_ROWS, rowPerFont)), width);
+  });
+
+  void test("no measurement yet means no cap, never a zero or tiny font", () => {
+    assert.equal(fontSizeForRows(240, MIN_ROWS, 0), MAX_FONT_SIZE);
+    assert.ok(fontSizeForRows(10, MIN_ROWS, rowPerFont) >= MIN_FONT_SIZE);
   });
 });

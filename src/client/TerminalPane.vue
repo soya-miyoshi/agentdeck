@@ -3,7 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
+import { cellRatio, fontSizeFor, fontSizeForRows, MIN_FONT_SIZE, MIN_ROWS } from "./pane-fit.ts";
 import { logicalLines } from "./select-text.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { scrollTarget, wheelDrag } from "./wheel.ts";
@@ -24,7 +24,14 @@ const RULER_RESERVE = 14;
  */
 const PROBE_FONT_SIZE = MIN_FONT_SIZE;
 
-const props = defineProps<{ sessionId: string; visible: boolean; cols: number }>();
+// `fitRows`: also cap the font so MIN_ROWS rows fit. Off while typing, when the short pane is the
+// keyboard's doing and shrinking the text under the thumb would be the wrong answer.
+const props = defineProps<{
+  sessionId: string;
+  visible: boolean;
+  cols: number;
+  fitRows: boolean;
+}>();
 const emit = defineEmits<{
   ready: [sessionId: string, handle: TerminalHandle];
   gone: [sessionId: string];
@@ -53,6 +60,8 @@ let pending: number | undefined;
 // CSS pixels of cell width per pixel of font size. A property of the font, which never changes, so
 // it is measured once: every later rotation and keyboard open sizes in a single pass off this.
 let cellPerFontPx: number | undefined;
+// Row height per pixel of font size, measured at the same probe, for the height cap.
+let rowPerFontPx: number | undefined;
 
 // One finger's position and the fraction of a row it has not paid for. xterm has no touch scrolling:
 // `.xterm-screen` sits over the viewport, so a drag on the text rubber-bands the page instead.
@@ -161,9 +170,16 @@ const refit = (): void => {
     // wrong ratio forever, since this is the only time it is read.
     cellPerFontPx = cellRatio(width, RULER_RESERVE, proposed.cols, PROBE_FONT_SIZE, props.cols);
     if (cellPerFontPx === undefined) return;
+    const height = host.value?.clientHeight ?? 0;
+    if (height > 0 && proposed.rows > 0) rowPerFontPx = height / proposed.rows / PROBE_FONT_SIZE;
   }
 
-  const size = fontSizeFor(width, props.cols, cellPerFontPx);
+  const byWidth = fontSizeFor(width, props.cols, cellPerFontPx);
+  const height = host.value?.clientHeight ?? 0;
+  const size =
+    props.fitRows && rowPerFontPx !== undefined
+      ? Math.min(byWidth, fontSizeForRows(height, MIN_ROWS, rowPerFontPx))
+      : byWidth;
   if (Math.abs(size - current) > 0.05 && passes > 0) {
     passes -= 1;
     terminal.options.fontSize = size;
@@ -262,6 +278,14 @@ watch(
   },
 );
 
+watch(
+  () => props.fitRows,
+  () => {
+    passes = 4;
+    refit();
+  },
+);
+
 // The socket states the width after this pane may already be mounted, and again on every reconnect,
 // so a restarted server corrects a live pane. `cellPerFontPx` survives, so it is one font pass.
 watch(
@@ -293,6 +317,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* xterm's own scrollbar showed as a grey sliver at the right edge; a drag scrolls, and Latest says
+   when the view is not at the bottom. */
+.pane :deep(.xterm-scrollable-element > .scrollbar) {
+  display: none;
+}
 .pane-wrap {
   position: absolute;
   inset: 0;

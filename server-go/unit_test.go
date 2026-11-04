@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -361,5 +362,60 @@ func TestSummariseReap(t *testing.T) {
 	}
 	if s := summariseReap("", "boom\n", 2); s.ok || !strings.Contains(s.summary, "exited 2") {
 		t.Fatal(s.summary)
+	}
+}
+
+func TestSnapshotSettlesBeforeItCaptures(t *testing.T) {
+	// History and screen captured either side of a resize overlap, and the overlap reaches the
+	// phone as repeated lines; measured 2 runs in 3 on the ui-review harness before this.
+	var order []string
+	_, err := buildSnapshot(context.Background(), SnapshotSources{
+		Settle:         func(context.Context) { order = append(order, "settle") },
+		Alternate:      func(context.Context) (bool, error) { order = append(order, "alternate"); return false, nil },
+		CaptureHistory: func(context.Context) (string, error) { order = append(order, "history"); return "h", nil },
+		PaneModes:      func(context.Context) (string, error) { order = append(order, "modes"); return "", nil },
+		Repaint: func(context.Context) ([]byte, int64, error) {
+			order = append(order, "repaint")
+			return []byte("s"), 1, nil
+		},
+	})
+	if err != nil || strings.Join(order, ",") != "settle,alternate,history,modes,repaint" {
+		t.Fatalf("order %v err %v", order, err)
+	}
+}
+
+func TestWaitForHeightSeesAResizeLand(t *testing.T) {
+	d := newDeck(t)
+	id := d.create()
+	if !d.tmux.WaitForHeight(context.Background(), id, 30, time.Second) {
+		t.Fatal("a fresh pane is at its default height")
+	}
+	start := time.Now()
+	if d.tmux.WaitForHeight(context.Background(), id, 7, 150*time.Millisecond) {
+		t.Fatal("nothing resized it to 7, so waiting for 7 must give up")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("the wait is bounded")
+	}
+}
+
+func TestOurOwnRedrawIsNotTheAgentWorking(t *testing.T) {
+	// Looking at a tab resizes and repaints it; that output used to read as "working", and cleared
+	// the "waiting" the person opened the tab to answer.
+	s := newStream("x")
+	s.Declare(StateWaiting, nil)
+	s.Hush(time.Second)
+	s.Write([]byte(strings.Repeat("r", 4000)))
+	if st, _ := s.State(); st != StateWaiting {
+		t.Fatalf("a redraw changed the state to %s", st)
+	}
+	if data, _ := s.Buffered(); len(data) != 4000 {
+		t.Fatal("a hushed write is still output: buffered and delivered")
+	}
+	now := time.Now()
+	s.now = func() time.Time { return now.Add(2 * time.Second) }
+	s.Write([]byte(strings.Repeat("a", 200)))
+	if st, _ := s.State(); st != StateWorking {
+		t.Fatalf("output after the hush is the agent again, got %s", st)
 	}
 }

@@ -92,6 +92,8 @@ type Stream struct {
 	listeners       map[int]func(Chunk)
 	clients         map[string]clientSize
 	now             func() time.Time // swapped in tests to drive cadence
+	// hushUntil: output before it is our own resize or repaint, not the agent doing anything.
+	hushUntil time.Time
 }
 
 func newStream(sessionID string) *Stream {
@@ -115,6 +117,12 @@ func (s *Stream) Write(data []byte) {
 	}
 	s.mu.Lock()
 	now := s.now()
+	if now.Before(s.hushUntil) {
+		// Buffered and sent like any output, but it says nothing about the agent: a tab being
+		// looked at must not read "working", nor lose the "waiting" it was opened to answer.
+		s.deliverLocked(data)
+		return
+	}
 	if now.Sub(s.lastOutputAt) > workingLinger {
 		s.bytesSinceQuiet = 0
 	}
@@ -123,6 +131,11 @@ func (s *Stream) Write(data []byte) {
 	if s.declared == StateWaiting {
 		s.declared = ""
 	}
+	s.deliverLocked(data)
+}
+
+// deliverLocked buffers output and hands it to every listener, releasing the lock first.
+func (s *Stream) deliverLocked(data []byte) {
 	seq := s.buf.append(data)
 	chunk := Chunk{Epoch: s.buf.epoch, Seq: seq, Data: data}
 	listeners := make([]func(Chunk), 0, len(s.listeners))
@@ -133,6 +146,15 @@ func (s *Stream) Write(data []byte) {
 	for _, l := range listeners {
 		l(chunk)
 	}
+}
+
+// Hush discounts output for d: what follows a resize or a repaint is tmux redrawing for us.
+func (s *Stream) Hush(d time.Duration) {
+	s.mu.Lock()
+	if until := s.now().Add(d); until.After(s.hushUntil) {
+		s.hushUntil = until
+	}
+	s.mu.Unlock()
 }
 
 func (s *Stream) State() (SessionState, *int) {

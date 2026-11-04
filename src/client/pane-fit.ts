@@ -29,3 +29,15 @@ export const fontSizeFor = (width: number, columns: number, cellPerFontPx: numbe
   const exact = (width - 1) / columns / cellPerFontPx;
   return Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, exact));
 };
+
+/** Rows a pane should show at least, where its height allows: landscape gave 5-7 rows at 22px. */
+export const MIN_ROWS = 14;
+
+/**
+ * The largest font at which `rows` rows fit `height`, from rows-per-font measured like the cell
+ * width. The caller takes the smaller of this and the width's size, leaving spare width empty.
+ */
+export const fontSizeForRows = (height: number, rows: number, rowPerFontPx: number): number => {
+  if (!(rowPerFontPx > 0) || rows <= 0 || !(height > 0)) return MAX_FONT_SIZE;
+  return Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, height / rows / rowPerFontPx));
+};

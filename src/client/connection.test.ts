@@ -12,6 +12,7 @@ import type { TokenVerdict } from "./api.ts";
 import {
   Connection,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
+  RESIZE_SETTLE_MS,
   HEARTBEAT_GRACE_INTERVALS,
   INPUT_WINDOW_MS,
   MAX_INPUT_FRAME_BYTES,
@@ -1681,5 +1682,49 @@ void describe("a fixed server does not need the user to know to reload", () => {
       afterRejected,
       "a wake retried a token the server has already rejected",
     );
+  });
+});
+
+void describe("a resize repaints from the server once it settles", () => {
+  const attaches = (h: Harness): Record<string, unknown>[] =>
+    sentMessages(h.last()).filter((m) => m["t"] === "attach");
+
+  void test("a change of rows asks for a snapshot, once the size stops moving", () => {
+    const h = openHarness();
+    h.connection.attach("s1", 50, 30);
+    h.last().deliver({ t: "snapshot", sessionId: "s1", epoch: "e1", seq: 10, data: "x" });
+    h.connection.resize("s1", 50, 20);
+    h.connection.resize("s1", 50, 14);
+    const before = attaches(h).length;
+    const settles = h.timers.filter((timer) => timer.delayMs === RESIZE_SETTLE_MS);
+    assert.equal(settles.length, 1, "a burst of resizes is one repaint, not one each");
+    settles[0]?.run();
+    const sent = attaches(h).slice(before);
+    assert.equal(sent.length, 1);
+    // Without a position, which is what makes the server answer with a snapshot.
+    assert.equal(sent[0]?.["haveEpoch"], undefined);
+    assert.equal(sent[0]?.["rows"], 14);
+  });
+
+  void test("output arriving before the snapshot still places, rather than asking to resync", () => {
+    const h = openHarness();
+    h.connection.attach("s1", 50, 30);
+    h.last().deliver({ t: "snapshot", sessionId: "s1", epoch: "e1", seq: 10, data: "x" });
+    h.connection.resize("s1", 50, 20);
+    h.timers.find((timer) => timer.delayMs === RESIZE_SETTLE_MS)?.run();
+    h.last().deliver({ t: "chunk", sessionId: "s1", epoch: "e1", seq: 12, data: "ab" });
+    h.last().deliver({ t: "chunk", sessionId: "s1", epoch: "e1", seq: 14, data: "cd" });
+    assert.equal(
+      sentMessages(h.last()).filter((m) => m["t"] === "resync").length,
+      0,
+      "every chunk while the repaint was in flight answered with a resync",
+    );
+  });
+
+  void test("the same rows again repaint nothing", () => {
+    const h = openHarness();
+    h.connection.attach("s1", 50, 30);
+    h.connection.resize("s1", 50, 30);
+    assert.equal(h.timers.filter((timer) => timer.delayMs === RESIZE_SETTLE_MS).length, 0);
   });
 });

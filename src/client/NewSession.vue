@@ -11,7 +11,6 @@ import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 const props = defineProps<{ cwds: Cwd[]; agents: AgentSummary[]; busy: boolean; open: boolean }>();
 const emit = defineEmits<{
   start: [cwd: string, agent: string];
-  toggle: [];
   close: [];
   open: [];
 }>();
@@ -24,6 +23,22 @@ const choices = computed(() => agentChoices(props.agents));
 const startable = computed(() =>
   canStart(directories.value, choices.value, cwd.value, agent.value),
 );
+
+// The one agent most people start is chosen for them, so the sheet is one tap rather than two.
+watch(
+  choices,
+  (list) => {
+    if (agent.value === undefined) agent.value = list.find((choice) => choice.selectable)?.id;
+  },
+  { immediate: true },
+);
+
+// A disabled Start says what it is waiting for, rather than being a button that does nothing.
+const startLabel = computed(() => {
+  if (startable.value) return "Start";
+  if (cwd.value === undefined) return "Pick a directory";
+  return "Pick an agent";
+});
 
 // The allowlist and PATH are both read fresh each time it opens: an agent installed since the
 // page loaded, or a session started elsewhere, would otherwise be missing from the list.
@@ -42,26 +57,24 @@ const start = (): void => {
 </script>
 
 <template>
-  <div class="picker">
-    <!-- The bar is the deck's one row of session-level actions. The slot is where a sibling action
-         sits so it reads as the same level as `New session` rather than as a stray button above
-         it; the sheet below still spans the full width. -->
-    <div class="bar">
-      <!-- The label never turns into "Close": that word sat right under the tab's kill cap, and a
-           thumb dismissing this sheet armed a session kill. Cancel, at the bottom, closes it. -->
+  <div v-if="open" class="picker">
+    <div class="sheet">
+      <h2 class="title">New session</h2>
+      <p class="label">Agent</p>
+      <!-- Disabled with the reason, never hidden: see agentChoices in new-session.ts. -->
       <button
-        class="toggle"
-        :class="{ on: open }"
+        v-for="choice in choices"
+        :key="choice.id"
+        class="row"
+        :class="{ chosen: choice.id === agent, off: !choice.selectable }"
         type="button"
-        aria-label="New session"
-        :aria-expanded="open"
-        @click="emit('toggle')"
+        :disabled="!choice.selectable"
+        @click="agent = choice.id"
       >
-        New
+        <span class="name">{{ choice.name }}</span>
+        <span v-if="choice.note" class="note">{{ choice.note }}</span>
       </button>
-      <slot name="beside" />
-    </div>
-    <div v-if="open" class="sheet">
+
       <p class="label">Directory</p>
       <p v-if="directories.length === 0" class="none">
         No directories are allowlisted, so no session can start. Set AGENTDECK_ROOTS (or
@@ -80,25 +93,10 @@ const start = (): void => {
         <span v-if="dir.note" class="note">{{ dir.note }}</span>
       </button>
 
-      <p class="label">Agent</p>
-      <!-- Disabled with the reason, never hidden: see agentChoices in new-session.ts. -->
-      <button
-        v-for="choice in choices"
-        :key="choice.id"
-        class="row"
-        :class="{ chosen: choice.id === agent, off: !choice.selectable }"
-        type="button"
-        :disabled="!choice.selectable"
-        @click="agent = choice.id"
-      >
-        <span class="name">{{ choice.name }}</span>
-        <span v-if="choice.note" class="note">{{ choice.note }}</span>
-      </button>
-
       <div class="actions">
         <button class="cancel" type="button" @click="emit('close')">Cancel</button>
         <button class="start" type="button" :disabled="!startable || busy" @click="start">
-          {{ busy ? "Starting…" : "Start" }}
+          {{ busy ? "Starting…" : startLabel }}
         </button>
       </div>
     </div>
@@ -114,14 +112,7 @@ const start = (): void => {
   border-bottom: 1px solid #2a2e35;
   background: #14161a;
 }
-.bar {
-  display: flex;
-  align-items: stretch;
-  /* The toggle takes the rest, so a sibling action keeps only the width its label needs. */
-  padding-right: var(--safe-right);
-  padding-left: var(--safe-left);
-}
-.toggle,
+.cancel,
 .start {
   min-height: var(--touch-target);
   padding: 0 0.75rem;
@@ -130,16 +121,6 @@ const start = (): void => {
   color: #d7dae0;
   font: inherit;
   text-align: left;
-}
-.toggle {
-  /* Takes the row and leaves the slotted actions their labels' width. Basis 0, not auto, so the
-     siblings never push the bar past a phone's width. */
-  flex: 1 1 0;
-  white-space: nowrap;
-}
-.toggle.on {
-  background: #232833;
-  box-shadow: inset 0 -2px 0 #6aa2ff;
 }
 .actions {
   /* Pinned to the bottom of the sheet, so Cancel and Start are on screen however long the lists
@@ -181,6 +162,11 @@ const start = (): void => {
   /* Small enough that the terminal under it keeps a few rows: vh ignores the soft keyboard. */
   max-height: 42vh;
   overflow-y: auto;
+}
+.title {
+  margin: 0.25rem 0 0;
+  font-size: 1rem;
+  font-weight: 600;
 }
 .label {
   margin: 0.5rem 0 0.25rem;

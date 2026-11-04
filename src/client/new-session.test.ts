@@ -331,7 +331,7 @@ void describe("what the picker offers", () => {
 // to, and the sheet is the last thing above the home indicator while it is open.
 void describe("the picker as a phone control", () => {
   void test("every row and both buttons claim the 44px touch target", () => {
-    const rules = ["\\.toggle,\\s*\\n?\\.start", "\\.row"];
+    const rules = ["\\.cancel,\\s*\\n?\\.start", "\\.row"];
     for (const selector of rules) {
       const body = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(picker)?.[1] ?? "";
       assert.notEqual(body, "", `NewSession.vue has no ${selector} rule`);

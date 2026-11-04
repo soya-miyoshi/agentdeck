@@ -3066,3 +3066,73 @@ Verified: `make check` twice, exit 0 (435/435 TS, the Go suite under `-race`); t
 times under `-race`; `scripts/e2e.mjs` and `scripts/restart-survival.mjs` against the binary; the
 real hook line end to end against a server booted with this machine's `.env` on a side port.
 Not demonstrated: the phone against the Go server.
+
+## Phone UI: a Playwright review loop, and what its first pass found
+
+`scripts/ui-review.mjs` boots an isolated Go server with three realistic sessions and drives the built
+client as an emulated iPhone 15 (touch, 3x, safe areas) through every flow, writing a screenshot and
+measured facts per step: undersized and off-screen controls, text under 12px, terminal rows and
+height, the selection, numbered-history gaps. `.claude/agents/ui-reviewer.md` runs it, reads every
+screenshot and reports ranked findings; it does not edit. `playwright-core` is a devDependency for
+this only, with its headless Chromium downloaded by `playwright-core install chromium-headless-shell`.
+
+Found by the first pass, fixed in `679452e`:
+
+- [blocker] The New session sheet could not be dismissed. Its toggle relabelled itself "Close"
+  directly under the tab's "Close", which kills the session; the harness's attempt to close the
+  sheet armed the kill instead, and the armed state never expired. The operator's "the session
+  viewer doesn't close" is most likely this.
+- [blocker] Panels stacked. New session, Processes and Login were three independent booleans, and
+  together they squeezed the terminal to 0px and pushed the tabs and keys off screen.
+- [major] No way to select text: the pane takes every touch for scrolling (`touch-action: none`), so
+  iOS never starts a selection. Select now shows the text where the platform's selection works.
+- [major] A snapshot lost the screenful of history just above the live screen: the repaint draws
+  with absolute moves over rows the history still occupied. Measured on the harness's numbered
+  history: 1 gap without the fix, 0 with. This predates the Go server; every reconnect hit it.
+- [minor] Long tab names pushed every other session off the strip; nothing said you were scrolled
+  away from the live output; the composer placeholder was clipped.
+
+Accepted, with the reason:
+
+- **Return in the composer is a newline, not Send.** A phone keyboard's return inserting a line is
+  what a multi-line box does; Send is the button beside it.
+- **The select view is a copy, not live.** It is the text at the moment it was opened; output that
+  arrives while selecting is in the terminal behind it, which Done returns to.
+
+Not demonstrated: any of this on a real iPhone. Chromium has no iOS long-press selection, handles or
+Copy callout, so the harness proves the select view's text is selectable by the platform, not that
+iOS's gesture feels right on it; the soft keyboard is simulated by shrinking the viewport.
+
+### Second pass, on 679452e
+
+Found by the reviewer's second pass, or by this work while fixing it, all fixed:
+
+- [blocker] Scrollback repeated lines after a resize: the screen restarted at 189 while history ran
+  to 193. Two causes, each measured. History and screen were captured either side of a resize tmux
+  had not applied yet (2 runs in 3 on the harness); the server now waits, bounded at 500ms, for the
+  pane to reach the requested height. And on every later resize xterm and tmux each move rows
+  between screen and scrollback and disagree; the client now asks for a fresh snapshot once the rows
+  hold still for 250ms. 0 gaps over 4 runs after both.
+- [major] That repaint first cleared the client's position, so every chunk in flight answered with a
+  `resync`: 39 and 61 in the two keyboard steps, enough to hit the server's 100-a-second limit and
+  fill the screen with its error. The position is kept and only the request omits it: 0 resyncs.
+  The harness now counts frames sent per step (`framesSent`), so a send storm is a number.
+- [major] Looking at a tab made it read "working" and could clear its "waiting": the resize and
+  repaint that come with looking are output. The server discounts output for 1s after either.
+- [major] On an iPhone SE with the keyboard up the key row was off screen; in landscape it was cut;
+  landscape showed 5-7 rows at 22px. The tab strip and the action bar are one row now (the session
+  switcher, Select, More), it hides while typing on a short screen, the panels give way before the
+  bars do, and the font is capped so 14 rows fit when not typing.
+- [minor] Three or more sessions ran the tab strip off the side: the sessions are a list in a panel,
+  with "+N waiting" on the switcher. The picker puts the agent first and preselects one, and Start
+  says what it is waiting for. A stray xterm scrollbar sliver is hidden.
+
+Accepted, with the reason:
+
+- **The font cap is off while typing.** A short pane while typing is the keyboard's doing, and
+  shrinking the text under the thumb would be the wrong answer; landscape while typing gets fewer,
+  larger rows.
+- **The SE's key caps are 36px wide.** All eight fit and are 44px tall; wider would mean fewer caps.
+
+Verified on the harness, iPhone 15 and SE, portrait and landscape: 0 history gaps, 0 resyncs, no
+control off screen, no console errors, terminal never under 128px. Not demonstrated: a real iPhone.
