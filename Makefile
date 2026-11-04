@@ -17,12 +17,18 @@ WATCHDOG_LOG := $(or $(AGENTDECK_WATCHDOG_LOG),$(HOME)/Library/Logs/agentdeck-wa
 # Seconds between passes. The plist uses 60; this matches it so the two behave the same.
 WATCHDOG_EVERY := $(or $(AGENTDECK_WATCHDOG_EVERY),60)
 
-.PHONY: build start stop restart mounts check reap reap-kill up down
+.PHONY: build wire start stop restart mounts check reap reap-kill up down
 
 # The server is one Go binary, built from server-go/ into bin/ (gitignored). The watchdog and every
 # target below run this file, so a rebuild is what a restart picks up.
 build:
 	@cd server-go && go build -o ../bin/agentdeck .
+
+# src/client/wire.gen.ts, the client's types, regenerated from the Go wire types. `go test` fails
+# while the committed file disagrees with server-go, so a server change cannot drift from the client.
+wire:
+	@cd server-go && AGENTDECK_WRITE_WIRE=1 go test -count=1 -run TestWire_GeneratedTypesAreCurrent . >/dev/null
+	@echo "make: wrote src/client/wire.gen.ts"
 
 # Refuses rather than starting with an empty allowlist, which boots fine and then has no directory
 # to start a session in - a failure the phone reports as "no directories are allowlisted".

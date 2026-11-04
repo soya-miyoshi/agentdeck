@@ -345,7 +345,7 @@ type Session struct {
 	State                SessionState `json:"state"`
 	StartedAt            int64        `json:"startedAt"`
 	ExitCode             *int         `json:"exitCode,omitempty"`
-	WaitingDetectionLost bool         `json:"waitingDetectionLost,omitempty"`
+	WaitingDetectionLost bool         `json:"waitingDetectionLost,omitempty" ts:"true"`
 }
 
 type CreateResult struct {

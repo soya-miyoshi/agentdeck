@@ -327,7 +327,12 @@ The dependency budget is spent: the server's two Go modules, `github.com/creack/
 pnpm typecheck && pnpm lint && pnpm test   # the client, the watchdog and the repo checks
 cd server-go && go vet ./... && go test -race ./...   # the server, against a real tmux
 make check                                 # both
+make wire                                  # after changing a type in server-go/wire.go
 ```
+
+The client's types for everything on the wire are generated from the Go server's into
+`src/client/wire.gen.ts`, so `tsc` checks the frontend against what the server actually sends.
+`go test` fails while that file is stale; `make wire` rewrites it.
 
 For iterating on the client, Vite's dev server proxies `/api` and `/ws` to the server on 7777:
 

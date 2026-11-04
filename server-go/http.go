@@ -106,10 +106,6 @@ func (h *apiHandler) hookAllowed(id string, now time.Time) bool {
 	return true
 }
 
-type errBody struct {
-	Error string `json:"error"`
-}
-
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	payload, _ := json.Marshal(body)
 	w.Header().Set("content-type", "application/json")
@@ -143,7 +139,7 @@ func (h *apiHandler) fail(w http.ResponseWriter, err any) {
 	_, _ = rand.Read(raw[:])
 	id := hex.EncodeToString(raw[:])
 	logf("agentdeck: unhandled request error %s: %v", id, err)
-	payload, _ := json.Marshal(errBody{"the server failed to handle that request (ref " + id + "); see the server log"})
+	payload, _ := json.Marshal(ErrorResponse{"the server failed to handle that request (ref " + id + "); see the server log"})
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(500)
 	_, _ = w.Write(payload)
@@ -167,17 +163,17 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		if !ok {
 			status = 503
 		}
-		return status, map[string]any{"ok": ok, "version": d.Version}, nil
+		return status, HealthResponse{OK: ok, Version: d.Version}, nil
 	}
 
 	if m := hookPath.FindStringSubmatch(path); method == "POST" && m != nil {
 		id := decodeSegment(m[1])
 		secret := r.Header.Get("x-agentdeck-secret")
 		if _, present := r.Header["X-Agentdeck-Secret"]; !present || !d.Registry.SecretMatches(id, secret) {
-			return 401, errBody{"bad session secret"}, nil
+			return 401, ErrorResponse{"bad session secret"}, nil
 		}
 		if !h.hookAllowed(id, time.Now()) {
-			return 429, errBody{"too many hook posts for this session"}, nil
+			return 429, ErrorResponse{"too many hook posts for this session"}, nil
 		}
 		raw, err := readBody(r.Body, hookMaxBodyBytes)
 		var payload any
@@ -185,12 +181,12 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 			err = json.Unmarshal(raw, &payload)
 		}
 		if err != nil {
-			return 400, errBody{"hook payload was not JSON"}, nil
+			return 400, ErrorResponse{"hook payload was not JSON"}, nil
 		}
 		state, reason := mapHookEvent(payload)
 		if state == "" {
 			logf("agentdeck: hook for %s changed no state: %s", id, reason)
-			return 200, map[string]any{"ok": true, "state": nil}, nil
+			return 200, HookResponse{OK: true}, nil
 		}
 		if d.StreamFor != nil {
 			if s := d.StreamFor(id); s != nil {
@@ -201,49 +197,49 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		if d.OnStateDeclared != nil {
 			d.OnStateDeclared(id, state)
 		}
-		return 200, map[string]any{"ok": true, "state": state}, nil
+		return 200, HookResponse{OK: true, State: &state}, nil
 	}
 
 	presented := bearerFrom(r.Header.Get("authorization"))
 	if presented == "" || !tokenMatches(presented, d.Token) {
-		return 401, errBody{"missing or invalid bearer token"}, nil
+		return 401, ErrorResponse{"missing or invalid bearer token"}, nil
 	}
 	if origin := r.Header.Get("origin"); d.Origin != "" && origin != "" && origin != d.Origin {
-		return 403, errBody{"origin not allowed"}, nil
+		return 403, ErrorResponse{"origin not allowed"}, nil
 	}
 
 	if method == "POST" && path == "/api/probe" {
-		return 200, map[string]any{"ok": true}, nil
+		return 200, ProbeResponse{OK: true}, nil
 	}
 	if method == "GET" && path == "/api/sessions" {
 		list, err := d.Registry.List(ctx)
 		if err != nil {
 			return 0, nil, err
 		}
-		return 200, map[string]any{"sessions": list}, nil
+		return 200, SessionsResponse{Sessions: list}, nil
 	}
 	if method == "POST" && path == "/api/sessions" {
 		raw, err := readBody(r.Body, maxBodyBytes)
 		if errors.Is(err, errBodyTooLarge) {
-			return 413, errBody{err.Error()}, nil
+			return 413, ErrorResponse{err.Error()}, nil
 		}
 		var record map[string]any
 		if err != nil || len(raw) == 0 || json.Unmarshal(raw, &record) != nil || record == nil {
-			return 400, errBody{"expected a JSON object"}, nil
+			return 400, ErrorResponse{"expected a JSON object"}, nil
 		}
 		cwd, _ := record["cwd"].(string)
 		agent, _ := record["agent"].(string)
 		if cwd == "" || agent == "" {
-			return 400, errBody{"cwd and agent are both required"}, nil
+			return 400, ErrorResponse{"cwd and agent are both required"}, nil
 		}
 		created, err := d.Registry.Create(ctx, cwd, agent)
 		var notAllowed *CwdNotAllowedError
 		var unknown *UnknownAgentError
 		switch {
 		case errors.As(err, &notAllowed):
-			return 403, errBody{err.Error()}, nil
+			return 403, ErrorResponse{err.Error()}, nil
 		case errors.As(err, &unknown):
-			return 404, errBody{err.Error()}, nil
+			return 404, ErrorResponse{err.Error()}, nil
 		case err != nil:
 			return 0, nil, err
 		}
@@ -254,7 +250,7 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 	}
 	if m := uploadPath.FindStringSubmatch(path); method == "POST" && m != nil {
 		if d.Uploads == nil {
-			return 501, errBody{"this deck has no upload directory configured"}, nil
+			return 501, ErrorResponse{"this deck has no upload directory configured"}, nil
 		}
 		id := decodeSegment(m[1])
 		list, err := d.Registry.List(ctx)
@@ -266,27 +262,27 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 			ours = ours || s.ID == id
 		}
 		if !ours {
-			return 404, errBody{"no session " + id}, nil
+			return 404, ErrorResponse{"no session " + id}, nil
 		}
 		data, err := readBody(r.Body, uploadMaxBodyBytes)
 		if errors.Is(err, errBodyTooLarge) {
-			return 413, errBody{"that image is too large; send under 8MB"}, nil
+			return 413, ErrorResponse{"that image is too large; send under 8MB"}, nil
 		}
 		if err != nil {
 			return 0, nil, err
 		}
 		if len(data) == 0 {
-			return 400, errBody{"the image body was empty"}, nil
+			return 400, ErrorResponse{"the image body was empty"}, nil
 		}
 		saved, err := d.Uploads.Save(id, r.Header.Get("content-type"), data)
 		var unsupported *UnsupportedImageError
 		if errors.As(err, &unsupported) {
-			return 415, errBody{err.Error()}, nil
+			return 415, ErrorResponse{err.Error()}, nil
 		}
 		if err != nil {
 			return 0, nil, err
 		}
-		return 201, map[string]any{"path": saved}, nil
+		return 201, UploadResponse{Path: saved}, nil
 	}
 	if m := sessionPath.FindStringSubmatch(path); method == "DELETE" && m != nil {
 		if err := d.Registry.Close(ctx, decodeSegment(m[1])); err != nil {
@@ -295,7 +291,7 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		if d.OnSessionsChange != nil {
 			d.OnSessionsChange()
 		}
-		return 200, map[string]any{"closed": true}, nil
+		return 200, ClosedResponse{Closed: true}, nil
 	}
 	if method == "GET" && path == "/api/agents" {
 		ids := make([]string, 0, len(d.Profiles))
@@ -307,11 +303,11 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		for _, id := range ids {
 			agents = append(agents, summarise(d.Profiles[id]))
 		}
-		return 200, map[string]any{"agents": agents}, nil
+		return 200, AgentsResponse{Agents: agents}, nil
 	}
 	if method == "GET" && path == "/api/processes" {
 		if d.PanePids == nil {
-			return 200, map[string]any{"sessions": []any{}}, nil
+			return 200, ProcessesResponse{Sessions: []SessionProcesses{}}, nil
 		}
 		panes, err := d.PanePids(ctx)
 		if err != nil {
@@ -321,16 +317,16 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		if len(panes) > 0 {
 			rows = d.ReadProcesses(ctx)
 		}
-		return 200, map[string]any{"sessions": sessionProcesses(panes, rows)}, nil
+		return 200, ProcessesResponse{Sessions: sessionProcesses(panes, rows)}, nil
 	}
 	if method == "GET" && path == "/api/cwds" {
 		byCwd, err := d.Registry.SessionsByCwd(ctx)
 		if err != nil {
 			return 0, nil, err
 		}
-		return 200, map[string]any{"cwds": d.Allowlist.List(byCwd)}, nil
+		return 200, CwdsResponse{Cwds: d.Allowlist.List(byCwd)}, nil
 	}
-	return 404, errBody{"no route for " + method + " " + path}, nil
+	return 404, ErrorResponse{"no route for " + method + " " + path}, nil
 }
 
 // ---- static client

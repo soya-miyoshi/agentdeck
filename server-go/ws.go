@@ -319,14 +319,14 @@ func (s *WSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	go s.writer(c)
-	s.send(c, map[string]any{"t": "hello", "cols": paneCols})
+	s.send(c, HelloFrame{T: frameHello, Cols: paneCols})
 	go func() {
 		list, err := s.d.ListSessions(ctx)
 		if err != nil {
 			logf("agentdeck: could not send the session list on connect: %v", err)
 			return
 		}
-		s.send(c, map[string]any{"t": "sessions", "sessions": list})
+		s.send(c, SessionsFrame{T: frameSessions, Sessions: list})
 	}()
 	s.reader(c)
 }
@@ -416,7 +416,7 @@ func (s *WSServer) withinRate(c *wsClient) bool {
 	}
 	if !c.toldAboutRate {
 		c.toldAboutRate = true
-		s.send(c, map[string]any{"t": "error", "message": fmt.Sprintf(
+		s.send(c, ErrorFrame{T: frameError, Message: fmt.Sprintf(
 			"that tab sent more than %d messages in a second; the rest of this second was dropped", maxFramesPerWindow)})
 	}
 	return false
@@ -435,17 +435,17 @@ func (s *WSServer) applySize(id string) {
 func (s *WSServer) handle(c *wsClient, raw []byte) {
 	m, errText := parseClientMessage(raw)
 	if m == nil {
-		s.send(c, map[string]any{"t": "error", "message": errText})
+		s.send(c, ErrorFrame{T: frameError, Message: errText})
 		return
 	}
 	stream := s.d.StreamFor(m.SessionID)
 	if stream == nil {
-		s.send(c, map[string]any{"t": "error", "sessionId": m.SessionID, "message": "no session " + m.SessionID})
+		s.send(c, ErrorFrame{T: frameError, SessionID: m.SessionID, Message: "no session " + m.SessionID})
 		return
 	}
 	failed := func(err error) {
 		logf("agentdeck: ws message failed: %v", err)
-		s.send(c, map[string]any{"t": "error", "message": "that request failed; see the server log"})
+		s.send(c, ErrorFrame{T: frameError, Message: "that request failed; see the server log"})
 	}
 	switch m.T {
 	case "attach":
@@ -489,8 +489,8 @@ type attachQueue struct {
 	here    bool
 }
 
-func (s *WSServer) chunkFrame(id string, ch Chunk) map[string]any {
-	return map[string]any{"t": "chunk", "sessionId": id, "epoch": ch.Epoch, "seq": ch.Seq, "data": string(ch.Data)}
+func (s *WSServer) chunkFrame(id string, ch Chunk) ChunkFrame {
+	return ChunkFrame{T: frameChunk, SessionID: id, Epoch: ch.Epoch, Seq: ch.Seq, Data: string(ch.Data)}
 }
 
 // registerAttach queues live output until the position is sent, so nothing is painted twice.
@@ -546,11 +546,11 @@ func (s *WSServer) finishAttach(c *wsClient, m *ClientMessage, stream *Stream, q
 	if dropped {
 		if data, head, covered := stream.Position(stream.Epoch(), at, true); covered {
 			if len(data) > 0 {
-				s.send(c, map[string]any{"t": "chunk", "sessionId": m.SessionID, "epoch": stream.Epoch(), "seq": head, "data": string(data)})
+				s.send(c, ChunkFrame{T: frameChunk, SessionID: m.SessionID, Epoch: stream.Epoch(), Seq: head, Data: string(data)})
 			}
 		} else {
 			data, head := stream.Buffered()
-			s.send(c, map[string]any{"t": "snapshot", "sessionId": m.SessionID, "epoch": stream.Epoch(), "seq": head, "data": string(data)})
+			s.send(c, SnapshotFrame{T: frameSnapshot, SessionID: m.SessionID, Epoch: stream.Epoch(), Seq: head, Data: string(data)})
 		}
 		held = nil
 	}
@@ -562,11 +562,7 @@ func (s *WSServer) finishAttach(c *wsClient, m *ClientMessage, stream *Stream, q
 	}
 	q.mu.Unlock()
 	state, code := stream.State()
-	frame := map[string]any{"t": "state", "sessionId": m.SessionID, "state": state}
-	if code != nil {
-		frame["exitCode"] = *code
-	}
-	s.send(c, frame)
+	s.send(c, StateFrame{T: frameState, SessionID: m.SessionID, State: state, ExitCode: code})
 	return nil
 }
 
@@ -575,7 +571,7 @@ func (s *WSServer) sendPosition(c *wsClient, id string, stream *Stream, epoch st
 	if hasPos {
 		if data, head, covered := stream.Position(epoch, seq, true); covered {
 			if len(data) > 0 {
-				s.send(c, map[string]any{"t": "chunk", "sessionId": id, "epoch": stream.Epoch(), "seq": head, "data": string(data)})
+				s.send(c, ChunkFrame{T: frameChunk, SessionID: id, Epoch: stream.Epoch(), Seq: head, Data: string(data)})
 			}
 			return head, nil
 		}
@@ -584,14 +580,8 @@ func (s *WSServer) sendPosition(c *wsClient, id string, stream *Stream, epoch st
 	if err != nil {
 		return 0, err
 	}
-	frame := map[string]any{"t": "snapshot", "sessionId": id, "epoch": snap.Epoch, "seq": snap.Seq, "data": snap.Data}
-	if snap.History != "" {
-		frame["history"] = snap.History
-	}
-	if snap.Modes != "" {
-		frame["modes"] = snap.Modes
-	}
-	s.send(c, frame)
+	s.send(c, SnapshotFrame{T: frameSnapshot, SessionID: id, Epoch: snap.Epoch, Seq: snap.Seq,
+		History: snap.History, Data: snap.Data, Modes: snap.Modes})
 	return snap.Seq, nil
 }
 
@@ -673,7 +663,7 @@ func (s *WSServer) heartbeat() {
 						_ = c.conn.CloseNow()
 					}
 				}(c)
-				s.send(c, map[string]any{"t": "ping", "intervalMs": s.d.PingInterval.Milliseconds()})
+				s.send(c, PingFrame{T: framePing, IntervalMs: s.d.PingInterval.Milliseconds()})
 			}
 		}
 	}
@@ -681,10 +671,7 @@ func (s *WSServer) heartbeat() {
 
 // PushState tells every open socket a session's state, attached to it or not.
 func (s *WSServer) PushState(id string, state SessionState, exitCode *int) {
-	frame := map[string]any{"t": "state", "sessionId": id, "state": state}
-	if exitCode != nil {
-		frame["exitCode"] = *exitCode
-	}
+	frame := StateFrame{T: frameState, SessionID: id, State: state, ExitCode: exitCode}
 	s.mu.Lock()
 	clients := make([]*wsClient, 0, len(s.clients))
 	for c := range s.clients {

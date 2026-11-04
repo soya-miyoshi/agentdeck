@@ -1,4 +1,18 @@
-import type { AgentSummary, Cwd, Session } from "./wire.ts";
+import type {
+  AgentSummary,
+  AgentsResponse,
+  CreateResult,
+  Cwd,
+  CwdsResponse,
+  ErrorResponse,
+  ProcessesResponse,
+  Session,
+  SessionProcesses,
+  SessionsResponse,
+  UploadResponse,
+} from "./wire.ts";
+
+export type { ProcessRow, SessionProcesses } from "./wire.ts";
 // The REST half. Every request carries the bearer token, and a 401 is raised as its own type: the
 // caller drops the token and shows the paste field rather than retrying.
 
@@ -33,7 +47,7 @@ const request = async <T>(
   // A status code alone does not say WHO answered, and a proxy can 401 for its own reasons. Both
   // terminal verdicts therefore require the sentence THIS server writes; anything else retries.
   const refusal = async (): Promise<string | undefined> =>
-    ((await response.json().catch(() => ({}))) as { error?: string }).error;
+    ((await response.json().catch(() => ({}))) as Partial<ErrorResponse>).error;
   if (response.status === 401) {
     const error = await refusal();
     if (error === "missing or invalid bearer token") throw new UnauthorizedError(error);
@@ -47,43 +61,25 @@ const request = async <T>(
   if (!response.ok) {
     // Errors are sentences the server wrote for a person. Rendered verbatim, because rewording a
     // refusal on the client loses the advice it contained.
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    const body = (await response.json().catch(() => ({}))) as Partial<ErrorResponse>;
     throw new Error(body.error ?? `${path} failed with ${String(response.status)}`);
   }
   return (await response.json()) as T;
 };
 
 export const fetchSessions = async (token: string): Promise<Session[]> =>
-  (await request<{ sessions: Session[] }>(token, "/api/sessions")).sessions;
+  (await request<SessionsResponse>(token, "/api/sessions")).sessions;
 
 export const fetchAgents = async (token: string): Promise<AgentSummary[]> =>
-  (await request<{ agents: AgentSummary[] }>(token, "/api/agents")).agents;
-
-export interface ProcessRow {
-  pid: number;
-  ppid: number;
-  ageSeconds: number;
-  rssKb: number;
-  cpuPercent: number;
-  command: string;
-  depth: number;
-}
-
-export interface SessionProcesses {
-  sessionId: string;
-  panePid: number;
-  processes: ProcessRow[];
-  childCount: number;
-  childRssKb: number;
-}
+  (await request<AgentsResponse>(token, "/api/agents")).agents;
 
 /** What each live session is running. Read on demand, never polled: it is a `ps` per call. */
 export const fetchProcesses = async (token: string): Promise<SessionProcesses[]> =>
-  (await request<{ sessions: SessionProcesses[] }>(token, "/api/processes")).sessions;
+  (await request<ProcessesResponse>(token, "/api/processes")).sessions;
 
 /** The directories a session may be started in. The picker's left half; nothing is typed. */
 export const fetchCwds = async (token: string): Promise<Cwd[]> =>
-  (await request<{ cwds: Cwd[] }>(token, "/api/cwds")).cwds;
+  (await request<CwdsResponse>(token, "/api/cwds")).cwds;
 
 /**
  * Start a session in a directory the server named, with an agent the server named. The 201's
@@ -93,8 +89,8 @@ export const createSession = async (
   token: string,
   cwd: string,
   agent: string,
-): Promise<{ session: Session; warning?: string }> =>
-  await request<{ session: Session; warning?: string }>(token, "/api/sessions", "POST", {
+): Promise<CreateResult> =>
+  await request<CreateResult>(token, "/api/sessions", "POST", {
     cwd,
     agent,
   });
@@ -114,7 +110,7 @@ export const uploadImage = async (
     body: image,
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    const body = (await response.json().catch(() => ({}))) as Partial<ErrorResponse>;
     if (response.status === 401 && body.error === "missing or invalid bearer token") {
       throw new UnauthorizedError(body.error);
     }
@@ -123,7 +119,7 @@ export const uploadImage = async (
     }
     throw new Error(body.error ?? `the upload failed with ${String(response.status)}`);
   }
-  return ((await response.json()) as { path: string }).path;
+  return ((await response.json()) as UploadResponse).path;
 };
 
 /** Kill a session and its agent. Irreversible from here: the tmux session goes with it. */
