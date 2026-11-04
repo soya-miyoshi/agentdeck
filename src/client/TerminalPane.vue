@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { cellRatio, fontSizeFor, MIN_FONT_SIZE } from "./pane-fit.ts";
+import { logicalLines } from "./select-text.ts";
 import type { TerminalHandle } from "./terminal-handle.ts";
 import { scrollTarget, wheelDrag } from "./wheel.ts";
 
@@ -32,6 +33,16 @@ const emit = defineEmits<{
 }>();
 
 const host = ref<HTMLDivElement>();
+// Whether the view is above the newest output, so "Latest" says the screen is not live.
+const scrolledUp = ref(false);
+const noteScroll = (): void => {
+  const buffer = terminal?.buffer.active;
+  scrolledUp.value = buffer !== undefined && buffer.viewportY < buffer.baseY;
+};
+const toLatest = (): void => {
+  terminal?.scrollToBottom();
+  noteScroll();
+};
 let terminal: Terminal | undefined;
 let fit: FitAddon | undefined;
 let observer: ResizeObserver | undefined;
@@ -190,6 +201,8 @@ onMounted(() => {
   });
   terminal = term;
   fit = addon;
+  term.onScroll(noteScroll);
+  term.onWriteParsed(noteScroll);
   observer = new ResizeObserver(() => {
     passes = 4;
     refit();
@@ -214,6 +227,15 @@ onMounted(() => {
     },
     size: () => ({ cols: term.cols, rows: term.rows }),
     copyText: () => copyableText(term),
+    text: (max) => {
+      const buffer = term.buffer.active;
+      const rows = [];
+      for (let row = 0; row < buffer.length; row += 1) {
+        const line = buffer.getLine(row);
+        rows.push({ text: line?.translateToString(true) ?? "", wrapped: line?.isWrapped ?? false });
+      }
+      return logicalLines(rows, max).join("\n");
+    },
     // xterm tracks DECCKM as the application sets and clears it, so the key row's arrows take
     // their form from the terminal rather than from a guess about what is running.
     applicationCursorKeys: () => term.modes.applicationCursorKeysMode,
@@ -264,10 +286,33 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-show="visible" ref="host" class="pane"></div>
+  <div v-show="visible" class="pane-wrap">
+    <div ref="host" class="pane"></div>
+    <button v-if="scrolledUp" class="latest" type="button" @click="toLatest">Latest</button>
+  </div>
 </template>
 
 <style scoped>
+.pane-wrap {
+  position: absolute;
+  inset: 0;
+}
+/* Floats over the bottom right of the terminal only while history is on screen. */
+.latest {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  z-index: 1;
+  min-height: var(--touch-target);
+  padding: 0 1rem;
+  border: 1px solid #3b4a63;
+  border-radius: 22px;
+  background: #26303f;
+  color: #d7dae0;
+  font: inherit;
+  font-size: 0.85rem;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 50%);
+}
 .pane {
   position: absolute;
   inset: 0;

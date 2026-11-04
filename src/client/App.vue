@@ -23,6 +23,8 @@ import { loginUrl } from "./login.ts";
 import LoginPanel from "./LoginPanel.vue";
 import NewSession from "./NewSession.vue";
 import ProcessList from "./ProcessList.vue";
+import { historyBytes } from "./repaint.ts";
+import SelectText from "./SelectText.vue";
 import TabStrip from "./TabStrip.vue";
 import TerminalPane from "./TerminalPane.vue";
 import type { TerminalHandle } from "./terminal-handle.ts";
@@ -181,7 +183,9 @@ const start = (current: string): void => {
           handle.clear();
           // Modes first: they decide which buffer the screen below lands in.
           if (action.modes !== undefined) handle.write(action.modes);
-          if (action.history !== undefined) handle.write(action.history);
+          if (action.history !== undefined) {
+            handle.write(historyBytes(action.history, handle.size().rows));
+          }
         }
         handle.write(action.data);
       },
@@ -291,45 +295,42 @@ const submitted = (text: string, mode: SubmitMode): void => {
   connection.value?.input(id, bytes);
 };
 
-// "Copied", briefly, on the button itself. An error banner for a success is the wrong surface, and
-// a clipboard write that silently did nothing is indistinguishable from one that worked.
-const copyLabel = ref("Copy");
-let copyTimer: ReturnType<typeof setTimeout> | undefined;
+// How much history the select view carries: enough to find what scrolled away, small enough to be
+// a page a thumb can still get through.
+const SELECT_LINES = 400;
 
 /**
- * Put the pane's text on the clipboard - the selection, or the visible screen. A phone cannot select
- * inside the terminal at all, so this button is the only way that screen leaves it.
+ * The one panel below the bar, if any. One value rather than a flag each: three could be open at
+ * once, which squeezed the terminal to nothing and pushed the tabs and keys off the screen.
+ * Processes is unmounted while closed, so the `ps` of the whole machine runs only when asked.
  */
-const copyScreen = async (): Promise<void> => {
+type Panel = "new" | "processes" | "login" | "select";
+const panel = ref<Panel>();
+const toggle = (which: Panel): void => {
+  panel.value = panel.value === which ? undefined : which;
+};
+// The sign-in helper and the select view belong to one session's pane.
+watch(active, () => {
+  if (panel.value === "login" || panel.value === "select") panel.value = undefined;
+});
+
+/**
+ * The pane's text as plain text over the pane, where iOS's own selection works. The terminal claims
+ * every touch for scrolling, so there is nothing to long-press on in the terminal itself.
+ */
+const selectText = ref("");
+const openSelect = (): void => {
   const id = active.value;
-  const text = id === undefined ? undefined : handles.get(id)?.copyText();
-  if (text === undefined || text === "") return;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Refused rather than failed: a browser only allows this from a user gesture and a secure
-    // origin, and saying "copied" when it did not is the confidently-wrong result this app refuses.
-    note(
-      "the browser refused the clipboard - copy needs an https address, which the tailnet gives",
-    );
-    return;
-  }
-  copyLabel.value = "Copied";
-  clearTimeout(copyTimer);
-  copyTimer = setTimeout(() => {
-    copyLabel.value = "Copy";
-  }, 1500);
+  const text = id === undefined ? undefined : handles.get(id)?.text(SELECT_LINES);
+  if (text === undefined) return;
+  selectText.value = text;
+  toggle("select");
 };
 
-// Open state lives here because the control is in the New session bar and the list hangs below it.
-// Unmounted while closed, so the `ps` of the whole machine runs only when someone asks.
-const processesOpen = ref(false);
-
-// The sign-in helper for the active pane. Closed on a tab change: its link belongs to one session.
-const loginOpen = ref(false);
-watch(active, () => {
-  loginOpen.value = false;
-});
+const closePanel = (event: KeyboardEvent): void => {
+  if (event.key === "Escape" && panel.value !== undefined) panel.value = undefined;
+};
+window.addEventListener("keydown", closePanel);
 
 const findLoginUrl = (): string | undefined => {
   const id = active.value;
@@ -388,7 +389,7 @@ const wake = (): void => {
 document.addEventListener("visibilitychange", wake);
 window.addEventListener("online", wake);
 onBeforeUnmount(() => {
-  clearTimeout(copyTimer);
+  window.removeEventListener("keydown", closePanel);
   document.removeEventListener("visibilitychange", wake);
   window.removeEventListener("online", wake);
   unfollow?.();
@@ -408,7 +409,10 @@ if (token.value !== undefined) start(token.value);
       :cwds="cwds"
       :agents="agents"
       :busy="starting"
+      :open="panel === 'new'"
       @open="loadCwds"
+      @toggle="toggle('new')"
+      @close="panel = undefined"
       @start="(cwd, agent) => void startSession(cwd, agent)"
     >
       <template #beside>
@@ -417,28 +421,29 @@ if (token.value !== undefined) start(token.value);
         <button
           class="beside"
           type="button"
-          :aria-expanded="processesOpen"
-          @click="processesOpen = !processesOpen"
+          :aria-expanded="panel === 'processes'"
+          @click="toggle('processes')"
         >
           Processes
         </button>
-        <!-- The only way text on that screen leaves the phone: the pane owns every touch gesture,
-             so there is nothing to long-press and select. -->
+        <!-- The way text on that screen leaves the phone: the pane owns every touch gesture, so the
+             text is shown again as plain text where the system's own selection works. -->
         <button
           v-if="active !== undefined"
           class="beside"
           type="button"
-          @click="() => void copyScreen()"
+          :aria-expanded="panel === 'select'"
+          @click="openSelect"
         >
-          {{ copyLabel }}
+          Select
         </button>
         <!-- `/login` prints a URL a phone cannot select and asks for a code it cannot easily paste. -->
         <button
           v-if="active !== undefined"
           class="beside"
           type="button"
-          :aria-expanded="loginOpen"
-          @click="loginOpen = !loginOpen"
+          :aria-expanded="panel === 'login'"
+          @click="toggle('login')"
         >
           Login
         </button>
@@ -450,12 +455,12 @@ if (token.value !== undefined) start(token.value);
         />
       </template>
     </NewSession>
-    <ProcessList v-if="processesOpen" :token="token" />
+    <ProcessList v-if="panel === 'processes'" :token="token" @close="panel = undefined" />
     <LoginPanel
-      v-if="loginOpen && active !== undefined"
+      v-if="panel === 'login' && active !== undefined"
       :find="findLoginUrl"
       @send="(bytes) => active !== undefined && connection?.input(active, bytes)"
-      @close="loginOpen = false"
+      @close="panel = undefined"
     />
     <!-- Only after the FIRST retry fails, so a normal half-second reconnect does not flash UI. -->
     <p v-if="reconnecting" class="banner">Reconnecting…</p>
@@ -471,6 +476,16 @@ if (token.value !== undefined) start(token.value);
         @gone="gone"
         @input="typed"
         @resize="(sessionId, cols, rows) => connection?.resize(sessionId, cols, rows)"
+      />
+      <SelectText
+        v-if="panel === 'select'"
+        :text="selectText"
+        @close="panel = undefined"
+        @refused="
+          note(
+            'the browser refused the clipboard - copy needs an https address, which the tailnet gives',
+          )
+        "
       />
     </main>
     <!-- The input path. The pane above takes no keystrokes: a character typed into it costs a
@@ -505,7 +520,9 @@ if (token.value !== undefined) start(token.value);
 .panes {
   position: relative;
   flex: 1;
-  min-height: 0;
+  /* The terminal keeps a few readable rows whatever is open above it: the panels scroll inside
+     themselves, so they are what gives way, not the thing they are about. */
+  min-height: 8rem;
   /* The key row is the bottom edge of the app now, and it carries the bottom inset - the last rows
      of the terminal, which is where a permission prompt and the cursor are, sit above the row and
      the row sits above the home indicator. Insetting here as well would leave a band of the pane's

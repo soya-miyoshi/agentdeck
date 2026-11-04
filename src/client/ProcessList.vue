@@ -7,6 +7,7 @@ import { onMounted, ref } from "vue";
 import { fetchProcesses, type SessionProcesses } from "./api.ts";
 
 const props = defineProps<{ token: string }>();
+const emit = defineEmits<{ close: [] }>();
 
 const loading = ref(false);
 const error = ref("");
@@ -43,9 +44,13 @@ onMounted(() => {
 
 <template>
   <div class="processes">
-    <button type="button" class="refresh" :disabled="loading" @click="void load()">
-      {{ loading ? "Reading…" : "Refresh" }}
-    </button>
+    <div class="head">
+      <button type="button" class="refresh" :disabled="loading" @click="void load()">
+        {{ loading ? "Reading…" : "Refresh" }}
+      </button>
+      <!-- Its own way out, beside what it closes: the toggle that opened it is at the far end. -->
+      <button type="button" class="refresh" @click="emit('close')">Close</button>
+    </div>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-else-if="!loading && sessions.length === 0" class="empty">No live sessions.</p>
     <section v-for="session in sessions" :key="session.sessionId" class="session">
@@ -53,7 +58,9 @@ onMounted(() => {
         {{ session.sessionId }}
         <!-- The count and size are of what is BELOW the pane, which is what the session has
              accumulated rather than what it is. -->
-        <span class="tally"> {{ session.childCount }} child(ren), {{ mb(session.childRssKb) }} </span>
+        <span class="tally">
+          {{ session.childCount }} child(ren), {{ mb(session.childRssKb) }}
+        </span>
       </h3>
       <ul>
         <li
@@ -74,12 +81,19 @@ onMounted(() => {
 /* Hangs below the New session bar, whose toggle opens it, so it is a sheet like the picker's
    rather than a strip at the far end of the app from its own control. */
 .processes {
+  /* Shrinks before the terminal below it does (see .panes in App.vue), scrolling inside itself. */
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: 40vh;
   overflow-y: auto;
   padding: 0 calc(0.6rem + var(--safe-right)) 0.6rem calc(0.6rem + var(--safe-left));
   background: #14161a;
   border-bottom: 1px solid #2a2e35;
   font-size: 0.8rem;
+}
+.head {
+  display: flex;
+  justify-content: space-between;
 }
 .refresh {
   min-height: var(--touch-target);

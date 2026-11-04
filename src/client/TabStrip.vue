@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import { nextArm } from "./close-arm.ts";
 import type { Tab } from "./tabs.ts";
@@ -10,11 +10,22 @@ const emit = defineEmits<{ select: [id: string]; close: [id: string] }>();
 // Closing kills the agent, so it takes two taps rather than one: the first arms the cap and the
 // second acts. A single X beside a tab is a thumb's width from the control that switches tabs.
 const armed = ref<string>();
+const strip = ref<HTMLElement>();
 
-/** First tap arms this tab's close cap, second tap closes. Any other tab disarms it. */
+/** How long an armed cap stays armed. A live kill switch that outlasts the thought is a trap. */
+const ARM_MS = 3000;
+let disarm: ReturnType<typeof setTimeout> | undefined;
+
+/** First tap arms this tab's end cap, second tap ends it. It disarms itself after ARM_MS. */
 const press = (id: string): void => {
   const next = nextArm(armed.value, id);
   armed.value = next.armed;
+  clearTimeout(disarm);
+  if (next.armed !== undefined) {
+    disarm = setTimeout(() => {
+      armed.value = undefined;
+    }, ARM_MS);
+  }
   if (next.close) emit("close", id);
 };
 
@@ -22,12 +33,22 @@ watch(
   () => props.active,
   () => {
     armed.value = undefined;
+    // The strip scrolls sideways, so the tab being looked at is brought into view.
+    void nextTick(() => {
+      strip.value
+        ?.querySelector(".tab.active")
+        ?.scrollIntoView({ inline: "nearest", block: "nearest" });
+    });
   },
 );
+
+onBeforeUnmount(() => {
+  clearTimeout(disarm);
+});
 </script>
 
 <template>
-  <nav class="strip">
+  <nav ref="strip" class="strip">
     <div
       v-for="tab in tabs"
       :key="tab.id"
@@ -39,26 +60,26 @@ watch(
       }"
     >
       <button class="pick" type="button" @click="$emit('select', tab.id)">
-      <!-- The dot is drawn only for an agent that can actually detect waiting. An agent with
+        <!-- The dot is drawn only for an agent that can actually detect waiting. An agent with
            detectsWaiting false reports working/idle/exited and never claims waiting, and the
            client shows its tab without a needs-you indicator rather than inventing one. -->
-      <span v-if="tab.needsYou" class="dot" aria-label="needs you"></span>
-      <span class="name">{{ tab.name }}</span>
-      <span class="status" :class="tab.state">{{ tab.status }}</span>
-      <!-- The session outlived the server, so its hook secret is gone and it can never report
+        <span v-if="tab.needsYou" class="dot" aria-label="needs you"></span>
+        <span class="name">{{ tab.name }}</span>
+        <span class="status" :class="tab.state">{{ tab.status }}</span>
+        <!-- The session outlived the server, so its hook secret is gone and it can never report
            waiting again until its agent is restarted (plan 002). It stays a WORD rather than
            becoming a colour or an icon: this is a tab that will look healthy and quietly never ask
            for you, and a person cannot infer that from a shade of grey. One word rather than the
            sentence it used to be, because at 40 columns the sentence was most of the tab - the
            sentence is in the title and the aria-label, which is where a person who wants it looks
            and where a screen reader takes it from. -->
-      <span
-        v-if="tab.waitingDetectionLost"
-        class="lost"
-        aria-label="waiting alerts are muted for this session"
-        title="This session outlived the server, so it can no longer tell you when it needs you. Restart the agent in this tab to get it back."
-        >muted</span
-      >
+        <span
+          v-if="tab.waitingDetectionLost"
+          class="lost"
+          aria-label="waiting alerts are muted for this session"
+          title="This session outlived the server, so it can no longer tell you when it needs you. Restart the agent in this tab to get it back."
+          >muted</span
+        >
       </button>
       <!-- Only on the tab being looked at, so a mis-hit cannot arm the close cap of an agent the
            operator is not watching. The armed word says what the next tap does. -->
@@ -67,10 +88,10 @@ watch(
         class="close"
         :class="{ armed: armed === tab.id }"
         type="button"
-        :aria-label="armed === tab.id ? `confirm closing ${tab.name}` : `close ${tab.name}`"
+        :aria-label="armed === tab.id ? `confirm ending ${tab.name}` : `end ${tab.name}`"
         @click="press(tab.id)"
       >
-        {{ armed === tab.id ? "Sure?" : "Close" }}
+        {{ armed === tab.id ? "End?" : "End" }}
       </button>
     </div>
     <p v-if="tabs.length === 0" class="empty">No sessions.</p>
@@ -145,6 +166,13 @@ watch(
 .lost {
   font-size: 0.75rem;
   color: #c9a227;
+}
+.name {
+  /* One long repository name must not push every other session off the strip. */
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .status {
   font-size: 0.75rem;

@@ -101,7 +101,10 @@ void describe("the cap as it is wired into the page", () => {
     // The repository's no-glyph rule, and the armed state has to be READABLE: an armed cap that
     // looks like an unarmed one is a control whose next tap the person cannot predict.
     assert.doesNotMatch(strip, /\p{Extended_Pictographic}/u, "an emoji in the tab strip");
-    assert.match(strip, /"Sure\?" : "Close"/);
+    // "End", not "Close": the panels close with "Close", and two of them stacked is how a person
+    // dismissing a sheet armed a session kill instead.
+    assert.match(strip, /"End\?" : "End"/);
+    assert.doesNotMatch(strip, /"Close"/);
     assert.match(strip, /\.close\.armed\s*\{/);
     assert.match(strip, /:aria-label=/);
   });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { AgentSummary, Cwd } from "./wire.ts";
 import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
@@ -7,28 +7,37 @@ import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 // The picker: a directory and an agent, both from what the server reported. 44px targets, and the
 // sheet carries the bottom inset because it is the last thing above the home indicator.
 
-const props = defineProps<{ cwds: Cwd[]; agents: AgentSummary[]; busy: boolean }>();
-const emit = defineEmits<{ start: [cwd: string, agent: string]; open: [] }>();
+// Open state is the app's, so opening this closes every other panel rather than stacking on it.
+const props = defineProps<{ cwds: Cwd[]; agents: AgentSummary[]; busy: boolean; open: boolean }>();
+const emit = defineEmits<{
+  start: [cwd: string, agent: string];
+  toggle: [];
+  close: [];
+  open: [];
+}>();
 
-const open = ref(false);
 const cwd = ref<string>();
 const agent = ref<string>();
 
 const directories = computed(() => directoryChoices(props.cwds));
 const choices = computed(() => agentChoices(props.agents));
-const startable = computed(() => canStart(directories.value, choices.value, cwd.value, agent.value));
+const startable = computed(() =>
+  canStart(directories.value, choices.value, cwd.value, agent.value),
+);
 
-const toggle = (): void => {
-  open.value = !open.value;
-  // The allowlist and PATH are both read fresh each time it opens: an agent installed since the
-  // page loaded, or a session started elsewhere, would otherwise be missing from the list.
-  if (open.value) emit("open");
-};
+// The allowlist and PATH are both read fresh each time it opens: an agent installed since the
+// page loaded, or a session started elsewhere, would otherwise be missing from the list.
+watch(
+  () => props.open,
+  (now) => {
+    if (now) emit("open");
+  },
+);
 
 const start = (): void => {
   if (!startable.value || cwd.value === undefined || agent.value === undefined) return;
   emit("start", cwd.value, agent.value);
-  open.value = false;
+  emit("close");
 };
 </script>
 
@@ -38,8 +47,17 @@ const start = (): void => {
          sits so it reads as the same level as `New session` rather than as a stray button above
          it; the sheet below still spans the full width. -->
     <div class="bar">
-      <button class="toggle" type="button" @click="toggle">
-        {{ open ? "Close" : "New session" }}
+      <!-- The label never turns into "Close": that word sat right under the tab's kill cap, and a
+           thumb dismissing this sheet armed a session kill. Cancel, at the bottom, closes it. -->
+      <button
+        class="toggle"
+        :class="{ on: open }"
+        type="button"
+        aria-label="New session"
+        :aria-expanded="open"
+        @click="emit('toggle')"
+      >
+        New
       </button>
       <slot name="beside" />
     </div>
@@ -77,15 +95,22 @@ const start = (): void => {
         <span v-if="choice.note" class="note">{{ choice.note }}</span>
       </button>
 
-      <button class="start" type="button" :disabled="!startable || busy" @click="start">
-        {{ busy ? "Starting…" : "Start" }}
-      </button>
+      <div class="actions">
+        <button class="cancel" type="button" @click="emit('close')">Cancel</button>
+        <button class="start" type="button" :disabled="!startable || busy" @click="start">
+          {{ busy ? "Starting…" : "Start" }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .picker {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
   border-bottom: 1px solid #2a2e35;
   background: #14161a;
 }
@@ -107,13 +132,41 @@ const start = (): void => {
   text-align: left;
 }
 .toggle {
-  /* Takes the row and leaves the slotted action its label's width. Basis 0, not auto: an `auto`
-     basis is the label's own width, and `New session` plus a sibling then overflows a phone. */
+  /* Takes the row and leaves the slotted actions their labels' width. Basis 0, not auto, so the
+     siblings never push the bar past a phone's width. */
   flex: 1 1 0;
+  white-space: nowrap;
+}
+.toggle.on {
+  background: #232833;
+  box-shadow: inset 0 -2px 0 #6aa2ff;
+}
+.actions {
+  /* Pinned to the bottom of the sheet, so Cancel and Start are on screen however long the lists
+     are: a sheet whose way out has to be scrolled to is a sheet that will not close. */
+  position: sticky;
+  bottom: calc(-0.5rem - var(--safe-bottom));
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.5rem calc(-0.5rem - var(--safe-right)) calc(-0.5rem - var(--safe-bottom))
+    calc(-0.5rem - var(--safe-left));
+  padding: 0.5rem calc(0.5rem + var(--safe-right)) calc(0.5rem + var(--safe-bottom))
+    calc(0.5rem + var(--safe-left));
+  background: #14161a;
+  border-top: 1px solid #2a2e35;
+}
+.cancel {
+  flex: 1 1 0;
+  min-height: var(--touch-target);
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  background: #1b1e24;
+  color: #d7dae0;
+  font: inherit;
 }
 .start {
-  width: 100%;
-  margin-top: 0.5rem;
+  flex: 2 1 0;
+  border-radius: 6px;
   background: #24406b;
   text-align: center;
 }
@@ -122,9 +175,11 @@ const start = (): void => {
   opacity: 0.5;
 }
 .sheet {
+  min-height: 0;
   padding: 0.5rem calc(0.5rem + var(--safe-right)) calc(0.5rem + var(--safe-bottom))
     calc(0.5rem + var(--safe-left));
-  max-height: 60vh;
+  /* Small enough that the terminal under it keeps a few rows: vh ignores the soft keyboard. */
+  max-height: 42vh;
   overflow-y: auto;
 }
 .label {

@@ -349,7 +349,7 @@ void describe("the picker as a phone control", () => {
 
   void test("the labels are words, and an unstartable agent is disabled rather than hidden", () => {
     assert.doesNotMatch(picker, /\p{Extended_Pictographic}/u, "the picker uses an emoji");
-    for (const label of ["New session", "Close", "Directory", "Agent", "Start"]) {
+    for (const label of ["New session", "Cancel", "Directory", "Agent", "Start"]) {
       assert.ok(picker.includes(label), `no text label for ${label}`);
     }
     // Disabled with the reason, not filtered out: hiding it answers "where did claude go" with

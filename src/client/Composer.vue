@@ -61,7 +61,7 @@ defineExpose({ insert });
       class="box"
       rows="1"
       :disabled="disabled"
-      :placeholder="disabled ? 'No session' : 'Type, paste or dictate here'"
+      :placeholder="disabled ? 'No session' : 'Type or paste'"
       autocapitalize="off"
       autocomplete="off"
       autocorrect="off"

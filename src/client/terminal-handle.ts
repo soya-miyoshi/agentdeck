@@ -11,6 +11,8 @@ export interface TerminalHandle {
    * caller's, because it needs a user gesture and a message when the browser refuses one.
    */
   copyText: () => string;
+  /** The newest `max` lines as a person would select them: soft wraps rejoined, see select-text.ts. */
+  text: (max: number) => string;
   /**
    * Whether the application has set DECCKM, which decides an arrow key's bytes. Only the terminal
    * knows which of `ESC [ A` and `ESC O A` the application in the pane expects.
