@@ -53,7 +53,21 @@ export class SessionPty {
       // Definitive, and the only signal that needs no inference. Sticky in the stream, so bytes
       // still draining out of a dead pane cannot resurrect it as `working`.
       this.stream.declare("exited", exitCode);
+      // The child is gone but node-pty still holds the master fd until destroy(). Leaving it open
+      // leaked one /dev/ptmx per re-attach until kern.tty.ptmx_max (511) was hit machine-wide.
+      this.#closePty();
     });
+  }
+
+  /** Close the master fd. `kill()` only signals the child; `destroy()` is what releases the PTY. */
+  #closePty(): void {
+    try {
+      const pty = this.#pty as IPty & { destroy?: () => void };
+      if (typeof pty.destroy === "function") pty.destroy();
+      else pty.kill();
+    } catch {
+      // Already closed.
+    }
   }
 
   write(data: string): void {
@@ -74,11 +88,7 @@ export class SessionPty {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    try {
-      this.#pty.kill();
-    } catch {
-      // Already gone. Nothing to do, and nothing worth failing a shutdown over.
-    }
+    this.#closePty();
   }
 
   get disposed(): boolean {
