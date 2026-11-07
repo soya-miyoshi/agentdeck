@@ -369,27 +369,40 @@ const findLoginUrl = (): string | undefined => {
 };
 
 const uploading = ref(false);
+const uploadProgress = ref<string>();
 
 /**
- * Put an image where the agent can read it, then put its path in the composer - in the box and NOT
- * on the wire, because an image with no question is a turn spent on "what am I looking at".
+ * Put images where the agent can read them, then put their paths in the composer - in the box and
+ * NOT on the wire, because an image with no question is a turn spent on "what am I looking at".
+ * One at a time, so a failure names its image and the rest still land.
  */
-const sendImage = async (file: File): Promise<void> => {
+const sendImages = async (files: File[]): Promise<void> => {
   const id = active.value;
   const current = token.value;
   if (id === undefined || current === undefined) return;
   uploading.value = true;
+  const failed: string[] = [];
   try {
-    const path = await uploadImage(current, id, await downscale(file));
-    composer.value?.insert(`${path} `);
-  } catch (error) {
-    if (error instanceof UnauthorizedError) {
-      signOut("That token was rejected. Paste the current one.");
-      return;
+    for (const [index, file] of files.entries()) {
+      uploadProgress.value =
+        files.length > 1 ? `${String(index + 1)}/${String(files.length)}` : undefined;
+      try {
+        const path = await uploadImage(current, id, await downscale(file));
+        composer.value?.insert(`${path} `);
+      } catch (error) {
+        if (error instanceof UnauthorizedError) {
+          signOut("That token was rejected. Paste the current one.");
+          return;
+        }
+        failed.push(
+          `${file.name}: ${error instanceof Error ? error.message : "could not send it"}`,
+        );
+      }
     }
-    note(error instanceof Error ? error.message : "could not send that image");
+    if (failed.length > 0) note(failed.join("; "));
   } finally {
     uploading.value = false;
+    uploadProgress.value = undefined;
   }
 };
 
@@ -473,7 +486,8 @@ if (token.value !== undefined) start(token.value);
       <UploadImage
         v-if="active !== undefined"
         :busy="uploading"
-        @pick="(file) => void sendImage(file)"
+        :progress="uploadProgress"
+        @pick="(files) => void sendImages(files)"
       />
       <button class="row" type="button" @click="panel = undefined">Close</button>
     </nav>

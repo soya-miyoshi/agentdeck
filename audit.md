@@ -3136,3 +3136,18 @@ Accepted, with the reason:
 
 Verified on the harness, iPhone 15 and SE, portrait and landscape: 0 history gaps, 0 resyncs, no
 control off screen, no console errors, terminal never under 128px. Not demonstrated: a real iPhone.
+
+## Several images in one pick
+
+The Image button's file input takes `multiple`. The picked files are downscaled and uploaded one at
+a time, each path put in the composer as it lands; the button reads `Sending 2/3…` meanwhile. The
+server is unchanged: still one image per POST, 8MB each.
+
+- Accepted: a file that fails (undecodable, too large) is named in one note after the rest land,
+  rather than stopping the batch. A rejected token still stops it and signs out.
+- Accepted: sequential, not parallel. A burst of PNG encodes on a phone is the slower half anyway.
+
+Verified on the harness (emulated iPhone 15, Playwright file chooser): three PNGs gave three paths
+in the composer and three files on disk; with an undecodable file in the middle, the other two
+landed and the note read `broken.png: The source image could not be decoded.` No console errors.
+Not demonstrated: the iOS photo library sheet's multi-select on a real iPhone.
