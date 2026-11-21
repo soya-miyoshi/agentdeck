@@ -134,6 +134,14 @@ installed: today it still runs as you, and every sentence above is the current t
 - **Do not run `make up` while that job is installed.** It starts a SECOND supervision loop against
   the same port and the two fight over recovery. `make up`/`make down` were written for the world
   where no launchd job existed.
+- **The agent profiles file is read once at boot, not watched.** `AGENTDECK_PROFILES`
+  (`~/.agentdeck/agents.json`, the `claude`/`shell` profiles and their `args` such as
+  `--dangerously-skip-permissions`) is loaded only at server startup - no hot reload. Editing it
+  does nothing to a running server, and the symptom is a new session that still starts with the old
+  args. To apply a change, restart the server: `kill` the running `./bin/agentdeck` pid and let the
+  watchdog relaunch it within 60s (NOT `make up` - see above). Existing tmux sessions keep the args
+  they were born with; Close and recreate them on the phone to pick up the change. The boot log line
+  `agentdeck: N agent profile(s)` confirms the reload.
 - **Same-uid is the standing residual.** Every agent runs as the operator, so the token, the hook
   secrets and the tmux socket are all readable by anything they run. It is recorded, not solved —
   and plan 008 does not solve it either. A separate account moves the residual down one level:
