@@ -902,7 +902,7 @@ var bootTable = []ProcessRow{
 // bootProcessesServer is the API with only what /api/processes uses, counting each ps read.
 func bootProcessesServer(t *testing.T, panes func(context.Context) ([]PaneRef, error), rows func(context.Context) []ProcessRow) *httptest.Server {
 	t.Helper()
-	reg, err := newRegistry(newTmux("agentdeck-gotest-processes-unused", ""), map[string]*AgentProfile{}, newAllowlist(nil, nil), "test-secret-key")
+	reg, err := newRegistry(newTmux("agentdeck-gotest-processes-unused", ""), map[string]*AgentProfile{}, newAllowlist(nil, nil), "test-secret-key", 7777)
 	if err != nil {
 		t.Fatal(err)
 	}

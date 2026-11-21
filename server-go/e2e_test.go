@@ -64,7 +64,7 @@ func newDeck(t *testing.T) *deck {
 	profiles, _ := parseProfiles([]byte(`{"sh":{"command":"/bin/sh","waiting":{"via":"hook","settings":"sh.json"}}}`))
 	allow := newAllowlist(nil, []string{root})
 	token := generateToken()
-	reg, _ := newRegistry(tmux, profiles, allow, token)
+	reg, _ := newRegistry(tmux, profiles, allow, token, 7777)
 	d := &deck{t: t, tmux: tmux, reg: reg, token: token, repo: repo, clients: clientDir}
 	var ws *WSServer
 	d.hub = newHub(tmux, reg, func(id string, st SessionState, c *int) {
@@ -427,7 +427,7 @@ func TestRestartAdoptsRunningSessions(t *testing.T) {
 	id := d.create()
 	// A second registry over the same tmux is a restarted server: no memory, same derived secret.
 	profiles, _ := parseProfiles([]byte(`{"sh":{"command":"/bin/sh"}}`))
-	fresh, _ := newRegistry(d.tmux, profiles, newAllowlist(nil, d.reg.allowlist.Roots()), d.token)
+	fresh, _ := newRegistry(d.tmux, profiles, newAllowlist(nil, d.reg.allowlist.Roots()), d.token, 7777)
 	list, err := fresh.List(context.Background())
 	if err != nil || len(list) != 1 || list[0].ID != id || list[0].Agent != "sh" {
 		t.Fatalf("adopted %v %v", list, err)

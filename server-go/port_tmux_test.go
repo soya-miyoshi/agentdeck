@@ -89,7 +89,7 @@ func tmxEqual(t *testing.T, got, want any, what string) {
 }
 
 func tmxLine(id, dead, status string) string {
-	return strings.Join([]string{id, dead, status, "1700000000"}, sep)
+	return strings.Join([]string{id, "", dead, status, "1700000000"}, sep)
 }
 
 var tmxBG = context.Background()
@@ -827,9 +827,9 @@ func TestTmux_ClosingTakesProcesses(t *testing.T) {
 func TestTmux_FieldSeparatorRenderings(t *testing.T) {
 	for label, s := range map[string]string{"the raw byte": sep, "the octal escape": `\037`} {
 		t.Run("list() reads a session written with "+label, func(t *testing.T) {
-			got, err := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "0", "", "1700000000", "/repo/a"}, s))
+			got, err := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "my tab", "0", "", "1700000000", "/repo/a"}, s))
 			if err != nil || len(got) != 1 || got[0].ID != "agentdeck-shell-abc" || got[0].Path != "/repo/a" ||
-				got[0].Dead || got[0].StartedAt != 1_700_000_000_000 {
+				got[0].Dead || got[0].StartedAt != 1_700_000_000_000 || got[0].Title != "my tab" {
 				t.Fatalf("%+v %v", got, err)
 			}
 		})
@@ -849,14 +849,14 @@ func TestTmux_FieldSeparatorRenderings(t *testing.T) {
 			}
 		})
 		t.Run("a dead session keeps its exit code with "+label, func(t *testing.T) {
-			got, _ := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "1", "7", "1700000000", "/repo/a"}, s))
+			got, _ := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "", "1", "7", "1700000000", "/repo/a"}, s))
 			if len(got) != 1 || !got[0].Dead || got[0].ExitCode == nil || *got[0].ExitCode != 7 {
 				t.Fatalf("%+v", got)
 			}
 		})
 	}
 	t.Run("a path shaped like the escape costs that path alone, never the fields before it", func(t *testing.T) {
-		got, err := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "0", "", "1700000000", `/repo/lit\037eral`}, `\037`))
+		got, err := tmxList(t, strings.Join([]string{"agentdeck-shell-abc", "", "0", "", "1700000000", `/repo/lit\037eral`}, `\037`))
 		if err != nil || len(got) != 1 || got[0].ID != "agentdeck-shell-abc" || got[0].Dead ||
 			got[0].StartedAt != 1_700_000_000_000 || got[0].Path == "" {
 			t.Fatalf("%+v %v", got, err)

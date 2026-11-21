@@ -330,8 +330,8 @@ void describe("what the picker offers", () => {
 // The two phone properties at the SOURCE: the built-CSS check cannot say which element they belong
 // to, and the sheet is the last thing above the home indicator while it is open.
 void describe("the picker as a phone control", () => {
-  void test("every row and both buttons claim the 44px touch target", () => {
-    const rules = ["\\.cancel,\\s*\\n?\\.start", "\\.row"];
+  void test("every row and the action buttons claim the 44px touch target", () => {
+    const rules = ["\\.cancel,\\s*\\n?\\.another,\\s*\\n?\\.start", "\\.row"];
     for (const selector of rules) {
       const body = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(picker)?.[1] ?? "";
       assert.notEqual(body, "", `NewSession.vue has no ${selector} rule`);

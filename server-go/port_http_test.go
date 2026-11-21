@@ -74,7 +74,7 @@ func htpFakeTmux(listErr error) *Tmux {
 			sort.Strings(ids)
 			var out strings.Builder
 			for _, id := range ids {
-				out.WriteString(strings.Join([]string{id, "0", "", "1700000000", sessions[id].path}, sep) + "\n")
+				out.WriteString(strings.Join([]string{id, "", "0", "", "1700000000", sessions[id].path}, sep) + "\n")
 			}
 			return out.String(), nil
 		case "new-session":
@@ -112,7 +112,7 @@ func htpServeAPI(t *testing.T, listErr error, tweak func(*HTTPDeps)) *htpAPI {
 	t.Helper()
 	profiles := htpProfiles(t, `{"claude":{"command":"/bin/sh","name":"Claude Code"}}`)
 	allow := newAllowlist([]string{htpCwd}, nil)
-	reg, err := newRegistry(htpFakeTmux(listErr), profiles, allow, htpSecretKey)
+	reg, err := newRegistry(htpFakeTmux(listErr), profiles, allow, htpSecretKey, 7777)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestHTTP_HookAuthenticated(t *testing.T) {
 		d.StreamFor = func(string) *Stream { return stream }
 		d.OnStateDeclared = func(id string, s SessionState) { mu.Lock(); declared = append(declared, decl{id, s}); mu.Unlock() }
 	})
-	created, err := a.reg.Create(context.Background(), htpCwd, "claude")
+	created, err := a.reg.Create(context.Background(), htpCwd, "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestHTTP_HookUnauthenticated(t *testing.T) {
 		a := htpServeAPI(t, nil, func(d *HTTPDeps) {
 			d.OnStateDeclared = func(_ string, s SessionState) { mu.Lock(); declared = append(declared, s); mu.Unlock() }
 		})
-		created, err := a.reg.Create(context.Background(), htpCwd, "claude")
+		created, err := a.reg.Create(context.Background(), htpCwd, "claude", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -698,7 +698,7 @@ func TestHTTP_Uploads(t *testing.T) {
 
 	root := t.TempDir()
 	a := htpServeAPI(t, nil, func(d *HTTPDeps) { d.Uploads = newUploadStore(root) })
-	created, err := a.reg.Create(context.Background(), htpCwd, "claude")
+	created, err := a.reg.Create(context.Background(), htpCwd, "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1486,6 +1486,42 @@ func TestHTTP_ServeClient(t *testing.T) {
 		})
 		if len(offenders) > 0 {
 			t.Fatalf("a symlink here becomes a real file in dist/client: %v", offenders)
+		}
+	})
+}
+
+func TestHTTP_TitleRename(t *testing.T) {
+	a := htpServeAPI(t, nil, nil)
+	created, err := a.reg.Create(context.Background(), htpCwd, "claude", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.Session.ID
+	secret := secretFor(htpSecretKey, id)
+	path := "/api/sessions/" + id + "/title"
+
+	t.Run("the bearer renames and the stored title is sanitised", func(t *testing.T) {
+		s, b, _ := a.call("POST", path, true, htpJSON(map[string]string{"title": "  My Tab\n "}), "content-type", "application/json")
+		if s != 200 || b["ok"] != true || b["title"] != "My Tab" {
+			t.Fatalf("%d %v", s, b)
+		}
+	})
+	t.Run("the session secret renames without the bearer, so the agent can rename its own tab", func(t *testing.T) {
+		s, b, _ := a.call("POST", path, false, htpJSON(map[string]string{"title": "agent set"}), "x-agentdeck-secret", secret, "content-type", "application/json")
+		if s != 200 || b["title"] != "agent set" {
+			t.Fatalf("%d %v", s, b)
+		}
+	})
+	t.Run("neither credential is rejected", func(t *testing.T) {
+		s, _, _ := a.call("POST", path, false, htpJSON(map[string]string{"title": "x"}), "content-type", "application/json")
+		if s != 401 {
+			t.Fatalf("want 401, got %d", s)
+		}
+	})
+	t.Run("an unknown session is 404", func(t *testing.T) {
+		s, _, _ := a.call("POST", "/api/sessions/nope/title", true, htpJSON(map[string]string{"title": "x"}), "content-type", "application/json")
+		if s != 404 {
+			t.Fatalf("want 404, got %d", s)
 		}
 	})
 }

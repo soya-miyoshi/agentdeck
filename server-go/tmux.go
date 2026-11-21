@@ -102,6 +102,7 @@ func isMissingSession(err error) bool {
 
 type TmuxSession struct {
 	ID        string
+	Title     string // the @agentdeck_title user option, empty when unset
 	Dead      bool
 	ExitCode  *int
 	StartedAt int64 // ms
@@ -199,7 +200,7 @@ func (t *Tmux) clearInheritedGlobalEnv(ctx context.Context) error {
 // List returns every session on the socket; an empty or absent server is an empty list.
 func (t *Tmux) List(ctx context.Context) ([]TmuxSession, error) {
 	out, err := t.run(ctx, "list-sessions", "-F",
-		strings.Join([]string{"#{session_name}", "#{pane_dead}", "#{pane_dead_status}", "#{session_created}", "#{session_path}"}, sep))
+		strings.Join([]string{"#{session_name}", "#{@agentdeck_title}", "#{pane_dead}", "#{pane_dead_status}", "#{session_created}", "#{session_path}"}, sep))
 	if err != nil {
 		if isEmptyTmux(err) {
 			return nil, nil
@@ -236,18 +237,18 @@ func (t *Tmux) List(ctx context.Context) ([]TmuxSession, error) {
 			return d
 		}
 		path := ""
-		if len(f) > 4 {
-			path = strings.Join(f[4:], sep)
+		if len(f) > 5 {
+			path = strings.Join(f[5:], sep)
 		}
-		dead := get(1, "0") == "1"
+		dead := get(2, "0") == "1"
 		var exitCode *int
-		if status := get(2, ""); dead && status != "" {
+		if status := get(3, ""); dead && status != "" {
 			if n, err := strconv.Atoi(status); err == nil {
 				exitCode = &n
 			}
 		}
-		created, _ := strconv.ParseInt(get(3, "0"), 10, 64)
-		sessions = append(sessions, TmuxSession{ID: get(0, ""), Dead: dead, ExitCode: exitCode, StartedAt: created * 1000, Path: path})
+		created, _ := strconv.ParseInt(get(4, "0"), 10, 64)
+		sessions = append(sessions, TmuxSession{ID: get(0, ""), Title: get(1, ""), Dead: dead, ExitCode: exitCode, StartedAt: created * 1000, Path: path})
 	}
 	return sessions, nil
 }
@@ -328,6 +329,19 @@ func (t *Tmux) Describe(ctx context.Context, id string) (path string, startedAt 
 		return "", 0, false
 	}
 	return path, n * 1000, true
+}
+
+// SetTitle writes the @agentdeck_title user option on one session, or unsets it when title is empty.
+// The target is the window form "=id:" that set-option takes here (a bare "=id" is rejected), the
+// same exact target the remain-on-exit set-option uses, so a sibling whose id has this id as a
+// prefix is never hit.
+func (t *Tmux) SetTitle(ctx context.Context, id, title string) error {
+	if title == "" {
+		_, err := t.run(ctx, "set-option", "-t", exactWindowTarget(id), "-u", "@agentdeck_title")
+		return err
+	}
+	_, err := t.run(ctx, "set-option", "-t", exactWindowTarget(id), "@agentdeck_title", title)
+	return err
 }
 
 type PaneRef struct {

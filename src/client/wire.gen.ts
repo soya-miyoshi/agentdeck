@@ -24,6 +24,7 @@ export const MAX_DIMENSION = 1000;
 export interface Session {
   id: string;
   name: string;
+  title?: string;
   cwd: string;
   agent: string;
   state: SessionState;

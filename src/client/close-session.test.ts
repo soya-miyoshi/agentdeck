@@ -91,10 +91,11 @@ void describe("the cap as it is wired into the page", () => {
   void test("only the tab being looked at has a close cap", () => {
     // A close cap on every tab puts a destructive control a thumb's width from the control that
     // switches tabs, on tabs whose terminal is not even on screen.
-    assert.match(strip, /v-if="tab\.id === active"[\s\S]{0,200}?class="close"|class="close"/);
-    const close = /<button\s+v-if="tab\.id === active"[\s\S]*?<\/button>/.exec(strip)?.[0] ?? "";
-    assert.notEqual(close, "", "the close cap is not conditional on the tab being active");
-    assert.match(close, /class="close"/);
+    // The close button opens with a v-if gated on the active tab (it may carry further conditions,
+    // such as not while renaming) and then its class. The property is that a non-active tab has no cap.
+    const open = /<button\s+v-if="tab\.id === active[^"]*"\s+class="close"/.exec(strip)?.[0] ?? "";
+    assert.notEqual(open, "", "the close cap is not conditional on the tab being active");
+    assert.match(open, /class="close"/);
   });
 
   void test("the cap is a text label and says which tap it is on", () => {

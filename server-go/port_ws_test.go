@@ -1320,7 +1320,7 @@ func wsNewTmuxRig(t *testing.T) *wsTmuxRig {
 	}
 	raw, _ := json.Marshal(profs)
 	profiles, _ := parseProfiles(raw)
-	reg, err := newRegistry(tmux, profiles, newAllowlist(nil, []string{root}), "test-secret-key")
+	reg, err := newRegistry(tmux, profiles, newAllowlist(nil, []string{root}), "test-secret-key", 7777)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1330,7 +1330,7 @@ func wsNewTmuxRig(t *testing.T) *wsTmuxRig {
 }
 
 func (r *wsTmuxRig) create(t *testing.T, agent string) string {
-	res, err := r.reg.Create(context.Background(), r.repo, agent)
+	res, err := r.reg.Create(context.Background(), r.repo, agent, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -117,6 +117,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 var hookPath = regexp.MustCompile(`^/api/hooks/([^/]+)$`)
 var uploadPath = regexp.MustCompile(`^/api/sessions/([^/]+)/uploads$`)
+var titlePath = regexp.MustCompile(`^/api/sessions/([^/]+)/title$`)
 var sessionPath = regexp.MustCompile(`^/api/sessions/([^/]+)$`)
 
 func (h *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +201,38 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		return 200, HookResponse{OK: true, State: &state}, nil
 	}
 
+	// Renaming a tab is reachable two ways: the browser with the bearer token, and the agent in the
+	// session with its own secret (so `agentdeck title` works without the bearer the agent never sees).
+	if m := titlePath.FindStringSubmatch(path); method == "POST" && m != nil {
+		id := decodeSegment(m[1])
+		_, hasSecret := r.Header["X-Agentdeck-Secret"]
+		bySecret := hasSecret && d.Registry.SecretMatches(id, r.Header.Get("x-agentdeck-secret"))
+		bearer := bearerFrom(r.Header.Get("authorization"))
+		byBearer := bearer != "" && tokenMatches(bearer, d.Token)
+		if !bySecret && !byBearer {
+			return 401, ErrorResponse{"rename needs this session's secret or the bearer token"}, nil
+		}
+		raw, err := readBody(r.Body, maxBodyBytes)
+		if errors.Is(err, errBodyTooLarge) {
+			return 413, ErrorResponse{err.Error()}, nil
+		}
+		var record map[string]any
+		if err != nil || len(raw) == 0 || json.Unmarshal(raw, &record) != nil || record == nil {
+			return 400, ErrorResponse{"expected a JSON object with a title"}, nil
+		}
+		title, _ := record["title"].(string)
+		var unknown *UnknownAgentError
+		if err := d.Registry.SetTitle(ctx, id, title); errors.As(err, &unknown) {
+			return 404, ErrorResponse{err.Error()}, nil
+		} else if err != nil {
+			return 0, nil, err
+		}
+		if d.OnSessionsChange != nil {
+			d.OnSessionsChange()
+		}
+		return 200, TitleResponse{OK: true, Title: sanitiseTitle(title)}, nil
+	}
+
 	presented := bearerFrom(r.Header.Get("authorization"))
 	if presented == "" || !tokenMatches(presented, d.Token) {
 		return 401, ErrorResponse{"missing or invalid bearer token"}, nil
@@ -229,10 +262,11 @@ func (h *apiHandler) handle(r *http.Request) (int, any, error) {
 		}
 		cwd, _ := record["cwd"].(string)
 		agent, _ := record["agent"].(string)
+		fresh, _ := record["fresh"].(bool)
 		if cwd == "" || agent == "" {
 			return 400, ErrorResponse{"cwd and agent are both required"}, nil
 		}
-		created, err := d.Registry.Create(ctx, cwd, agent)
+		created, err := d.Registry.Create(ctx, cwd, agent, fresh)
 		var notAllowed *CwdNotAllowedError
 		var unknown *UnknownAgentError
 		switch {

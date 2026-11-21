@@ -10,7 +10,7 @@ import { agentChoices, canStart, directoryChoices } from "./new-session.ts";
 // Open state is the app's, so opening this closes every other panel rather than stacking on it.
 const props = defineProps<{ cwds: Cwd[]; agents: AgentSummary[]; busy: boolean; open: boolean }>();
 const emit = defineEmits<{
-  start: [cwd: string, agent: string];
+  start: [cwd: string, agent: string, fresh: boolean];
   close: [];
   open: [];
 }>();
@@ -22,6 +22,13 @@ const directories = computed(() => directoryChoices(props.cwds));
 const choices = computed(() => agentChoices(props.agents));
 const startable = computed(() =>
   canStart(directories.value, choices.value, cwd.value, agent.value),
+);
+
+// Whether the chosen directory already holds a session. When it does, Start attaches to the one
+// running here and a second button starts another alongside it; the id carries a suffix so they
+// are distinct sessions rather than the same tmux session reattached.
+const occupied = computed(
+  () => (directories.value.find((d) => d.path === cwd.value)?.sessions.length ?? 0) > 0,
 );
 
 // The one agent most people start is chosen for them, so the sheet is one tap rather than two.
@@ -49,9 +56,9 @@ watch(
   },
 );
 
-const start = (): void => {
+const start = (fresh = false): void => {
   if (!startable.value || cwd.value === undefined || agent.value === undefined) return;
-  emit("start", cwd.value, agent.value);
+  emit("start", cwd.value, agent.value, fresh);
   emit("close");
 };
 </script>
@@ -95,7 +102,18 @@ const start = (): void => {
 
       <div class="actions">
         <button class="cancel" type="button" @click="emit('close')">Cancel</button>
-        <button class="start" type="button" :disabled="!startable || busy" @click="start">
+        <!-- When the directory already runs a session, Start attaches to it and "Another" starts a
+             second one beside it. The second button only appears when there is something to be beside. -->
+        <button
+          v-if="occupied && startable"
+          class="another"
+          type="button"
+          :disabled="busy"
+          @click="start(true)"
+        >
+          Another
+        </button>
+        <button class="start" type="button" :disabled="!startable || busy" @click="start(false)">
           {{ busy ? "Starting…" : startLabel }}
         </button>
       </div>
@@ -113,6 +131,7 @@ const start = (): void => {
   background: #14161a;
 }
 .cancel,
+.another,
 .start {
   min-height: var(--touch-target);
   padding: 0 0.75rem;
@@ -145,6 +164,13 @@ const start = (): void => {
   color: #d7dae0;
   font: inherit;
 }
+.another {
+  flex: 1 1 0;
+  border: 1px solid #3b4a63;
+  border-radius: 6px;
+  color: #a9c4ff;
+  text-align: center;
+}
 .start {
   flex: 2 1 0;
   border-radius: 6px;
@@ -152,6 +178,7 @@ const start = (): void => {
   text-align: center;
 }
 .start:disabled,
+.another:disabled,
 .row.off {
   opacity: 0.5;
 }

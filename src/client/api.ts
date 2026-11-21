@@ -89,11 +89,28 @@ export const createSession = async (
   token: string,
   cwd: string,
   agent: string,
+  fresh = false,
 ): Promise<CreateResult> =>
   await request<CreateResult>(token, "/api/sessions", "POST", {
     cwd,
     agent,
+    // fresh mints a new session where one already runs; without it, Start attaches to the running one.
+    fresh,
   });
+
+/**
+ * Rename a session's tab, or clear it back to the repo name with "". The server also exposes this to
+ * the agent in the session (via its secret), so `agentdeck title` and this button hit one endpoint.
+ */
+export const setSessionTitle = async (token: string, id: string, title: string): Promise<string> =>
+  (
+    await request<{ ok: true; title: string }>(
+      token,
+      `/api/sessions/${encodeURIComponent(id)}/title`,
+      "POST",
+      { title },
+    )
+  ).title;
 
 /**
  * Send an image into a session and get back the path it landed on. Raw bytes rather than JSON or

@@ -224,6 +224,52 @@ func runHook(stdin io.Reader) {
 	}
 }
 
+// runTitle lets the agent in a session rename its own tab: `agentdeck title "<text>"`. It reads the
+// id, secret and port from the environment the session was started with, so no argument carries them.
+func runTitle(args []string, stdout, stderr io.Writer) int {
+	id := os.Getenv("AGENTDECK_SESSION_ID")
+	secret := os.Getenv("AGENTDECK_SECRET")
+	if id == "" || secret == "" {
+		fmt.Fprintln(stderr, "agentdeck title: not inside an agentdeck session (AGENTDECK_SESSION_ID/SECRET unset)")
+		return 1
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, `agentdeck title: usage: agentdeck title "<new tab name>"`)
+		return 1
+	}
+	port := os.Getenv("AGENTDECK_PORT")
+	if port == "" {
+		port = "7777"
+	}
+	title := strings.TrimSpace(strings.Join(args, " "))
+	body, _ := json.Marshal(map[string]string{"title": title})
+	req, err := http.NewRequest("POST", "http://127.0.0.1:"+port+"/api/sessions/"+url.PathEscape(id)+"/title", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintln(stderr, "agentdeck title:", err)
+		return 1
+	}
+	req.Header.Set("X-Agentdeck-Secret", secret)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 3 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintln(stderr, "agentdeck title:", err)
+		return 1
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(res.Body, 64*1024))
+	if res.StatusCode != http.StatusOK {
+		fmt.Fprintf(stderr, "agentdeck title: server said %d: %s\n", res.StatusCode, strings.TrimSpace(string(out)))
+		return 1
+	}
+	if title == "" {
+		fmt.Fprintln(stdout, "agentdeck: tab title cleared")
+	} else {
+		fmt.Fprintf(stdout, "agentdeck: tab renamed to %q\n", title)
+	}
+	return 0
+}
+
 var errBodyTooLarge = errors.New("request body too large")
 
 func readBody(r io.Reader, limit int64) ([]byte, error) {

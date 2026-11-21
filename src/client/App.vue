@@ -8,6 +8,7 @@ import {
   fetchAgents,
   fetchCwds,
   fetchSessions,
+  setSessionTitle,
   UnauthorizedError,
   uploadImage,
   verifyToken,
@@ -124,12 +125,12 @@ const loadCwds = async (): Promise<void> => {
  * Create the session the picker chose. The 201's `warning` and a refusal are both shown in the
  * server's own words - swallowing either makes a second agent in one tree invisible.
  */
-const startSession = async (cwd: string, agent: string): Promise<void> => {
+const startSession = async (cwd: string, agent: string, fresh = false): Promise<void> => {
   const current = token.value;
   if (current === undefined) return;
   starting.value = true;
   try {
-    const { session, warning } = await createSession(current, cwd, agent);
+    const { session, warning } = await createSession(current, cwd, agent, fresh);
     sessions.value = [...sessions.value.filter((s) => s.id !== session.id), session];
     if (warning !== undefined) note(warning);
     select(session.id);
@@ -164,6 +165,27 @@ const endSession = async (id: string): Promise<void> => {
       return;
     }
     note(error instanceof Error ? error.message : "could not close that session");
+  }
+};
+
+/**
+ * Rename a session's tab. The returned title is the server's sanitised version, so the tab shows
+ * exactly what was stored rather than the raw text; an empty title clears back to the repo name.
+ */
+const renameSession = async (id: string, title: string): Promise<void> => {
+  const current = token.value;
+  if (current === undefined) return;
+  try {
+    const saved = await setSessionTitle(current, id, title);
+    sessions.value = sessions.value.map((session) =>
+      session.id === id ? { ...session, title: saved } : session,
+    );
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      signOut("That token was rejected. Paste the current one.");
+      return;
+    }
+    note(error instanceof Error ? error.message : "could not rename that tab");
   }
 };
 
@@ -466,6 +488,7 @@ if (token.value !== undefined) start(token.value);
       @select="pick"
       @close="(id) => void endSession(id)"
       @new="panel = 'new'"
+      @rename="(id, title) => void renameSession(id, title)"
     />
     <NewSession
       :cwds="cwds"
@@ -474,7 +497,7 @@ if (token.value !== undefined) start(token.value);
       :open="panel === 'new'"
       @open="loadCwds"
       @close="panel = undefined"
-      @start="(cwd, agent) => void startSession(cwd, agent)"
+      @start="(cwd, agent, fresh) => void startSession(cwd, agent, fresh)"
     />
     <!-- The rarer things done to a session or the machine, a tap further away than the common ones. -->
     <nav v-if="panel === 'more'" class="more">

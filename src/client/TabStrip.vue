@@ -5,7 +5,33 @@ import { nextArm } from "./close-arm.ts";
 import type { Tab } from "./tabs.ts";
 
 const props = defineProps<{ tabs: Tab[]; active: string | undefined }>();
-const emit = defineEmits<{ select: [id: string]; close: [id: string]; new: [] }>();
+const emit = defineEmits<{
+  select: [id: string];
+  close: [id: string];
+  new: [];
+  rename: [id: string, title: string];
+}>();
+
+// Inline rename of the active tab: one field, Save writes it, empty clears back to the repo name.
+const renaming = ref<string>();
+const draft = ref("");
+const field = ref<HTMLInputElement>();
+
+const startRename = (tab: Tab): void => {
+  armed.value = undefined;
+  renaming.value = tab.id;
+  draft.value = tab.title;
+  void nextTick(() => field.value?.focus());
+};
+
+const saveRename = (id: string): void => {
+  emit("rename", id, draft.value.trim());
+  renaming.value = undefined;
+};
+
+const cancelRename = (): void => {
+  renaming.value = undefined;
+};
 
 // Closing kills the agent, so it takes two taps rather than one: the first arms the cap and the
 // second acts. A single X beside a tab is a thumb's width from the control that switches tabs.
@@ -33,6 +59,7 @@ watch(
   () => props.active,
   () => {
     armed.value = undefined;
+    renaming.value = undefined;
     void nextTick(() => {
       strip.value?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest" });
     });
@@ -78,10 +105,21 @@ onBeforeUnmount(() => {
           >muted</span
         >
       </button>
+      <!-- Only on the active tab: a rename control, then the close cap. On a mis-hit the close cap
+           arming is still two taps, so neither sits a thumb's width from a destructive single tap. -->
+      <button
+        v-if="tab.id === active && renaming !== tab.id"
+        class="rename"
+        type="button"
+        :aria-label="`rename ${tab.name}`"
+        @click="startRename(tab)"
+      >
+        Rename
+      </button>
       <!-- Only on the tab being looked at, so a mis-hit cannot arm the close cap of an agent the
            operator is not watching. The armed word says what the next tap does. -->
       <button
-        v-if="tab.id === active"
+        v-if="tab.id === active && renaming !== tab.id"
         class="close"
         :class="{ armed: armed === tab.id }"
         type="button"
@@ -90,6 +128,22 @@ onBeforeUnmount(() => {
       >
         {{ armed === tab.id ? "End?" : "End" }}
       </button>
+      <!-- The rename field is a full-width row under the name, because a phone tab is too narrow to
+           hold a text input beside the name and status without one shoving the other off-screen. -->
+      <form v-if="renaming === tab.id" class="renamer" @submit.prevent="saveRename(tab.id)">
+        <input
+          ref="field"
+          v-model="draft"
+          class="renamefield"
+          type="text"
+          maxlength="80"
+          placeholder="tab name (empty resets to the repo name)"
+          aria-label="new tab name"
+          @keydown.escape="cancelRename"
+        />
+        <button class="save" type="submit">Save</button>
+        <button class="cancelrename" type="button" @click="cancelRename">Cancel</button>
+      </form>
     </div>
     <p v-if="tabs.length === 0" class="empty">No sessions.</p>
     <button class="new" type="button" @click="$emit('new')">New session</button>
@@ -113,6 +167,7 @@ onBeforeUnmount(() => {
 }
 .tab {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   flex: 0 0 auto;
   border: 1px solid #2a2e35;
@@ -121,6 +176,7 @@ onBeforeUnmount(() => {
 }
 .pick,
 .close,
+.rename,
 .new {
   /* Touch target rather than a pointer target: a mis-hit here switches which agent's terminal the
      next keystroke goes to. */
@@ -150,6 +206,46 @@ onBeforeUnmount(() => {
   /* The only red in the app, on the one control that destroys something. */
   background: #3a2226;
   color: #ff9d9d;
+}
+.rename {
+  padding: 0 0.9rem;
+  border-left: 1px solid #2a2e35;
+  color: #8b9099;
+  font-size: 0.85rem;
+}
+.renamer {
+  /* A full-width row of its own: the field and its two buttons wrap under the tab name. */
+  flex: 1 0 100%;
+  display: flex;
+  gap: 0.35rem;
+  padding: 0 0.5rem 0.5rem;
+}
+.renamefield {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--touch-target);
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #3b4a63;
+  border-radius: 6px;
+  background: #14161a;
+  color: #d7dae0;
+  font: inherit;
+}
+.save,
+.cancelrename {
+  flex: 0 0 auto;
+  min-height: var(--touch-target);
+  min-width: var(--touch-target);
+  padding: 0 0.8rem;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  background: none;
+  color: #d7dae0;
+  font: inherit;
+}
+.save {
+  border-color: #3b4a63;
+  color: #a9c4ff;
 }
 .new {
   flex: 0 0 auto;

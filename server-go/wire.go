@@ -148,3 +148,8 @@ type UploadResponse struct {
 type ClosedResponse struct {
 	Closed bool `json:"closed" ts:"true"`
 }
+
+type TitleResponse struct {
+	OK    bool   `json:"ok" ts:"true"`
+	Title string `json:"title"`
+}

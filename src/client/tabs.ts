@@ -5,7 +5,11 @@ import type { AgentSummary, Session, SessionState } from "./wire.ts";
 
 export interface Tab {
   id: string;
+  /** What the tab shows: the custom title when set, else the repo name. Siblings in one repo share a
+   * repo name, so a title is how they are told apart. */
   name: string;
+  /** The custom title alone, so the rename field can show it is empty rather than the repo name. */
+  title: string;
   agent: string;
   state: SessionState;
   /** What the status pill says. An exited tab shows its code, because that is the answer to
@@ -44,9 +48,11 @@ export const toTabs = (sessions: readonly Session[], agents: readonly AgentSumma
   return sessions.map((session) => {
     const detects = detectsWaiting(byId, session.agent);
     const state: SessionState = session.state === "waiting" && !detects ? "working" : session.state;
+    const title = session.title ?? "";
     const tab: Tab = {
       id: session.id,
-      name: session.name,
+      name: title.length > 0 ? title : session.name,
+      title,
       agent: session.agent,
       state,
       status: statusOf(state, session.exitCode),

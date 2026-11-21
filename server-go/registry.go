@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +39,25 @@ func sanitise(v string) string {
 func sessionID(absCwd, agent string) string {
 	sum := sha256.Sum256([]byte(absCwd))
 	return sanitise(nodeBasename(absCwd)) + "-" + sanitise(agent) + "-" + hex.EncodeToString(sum[:])[:8]
+}
+
+// freshSessionID is the canonical id plus a short random suffix, so a repo+agent can hold more than
+// one session. adopt() reproduces the agent from either form (bare canonical, or canonical-<suffix>).
+func freshSessionID(absCwd, agent string) string {
+	return sessionID(absCwd, agent) + "-" + randSuffix()
+}
+
+// randSuffix is five characters from the sanitise charset, enough to tell sibling sessions apart.
+func randSuffix() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 5)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano()%60466176, 36)
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
 }
 
 // nodeBasename matches Node's path.basename: trailing slashes ignored, "/" gives "".
@@ -340,6 +361,7 @@ func scanRepos(roots []string, maxDepth int) []string {
 type Session struct {
 	ID                   string       `json:"id"`
 	Name                 string       `json:"name"`
+	Title                string       `json:"title,omitempty"`
 	Cwd                  string       `json:"cwd"`
 	Agent                string       `json:"agent"`
 	State                SessionState `json:"state"`
@@ -378,6 +400,7 @@ type Registry struct {
 	profiles  map[string]*AgentProfile
 	allowlist *Allowlist
 	secretKey string
+	port      int // passed to each session as AGENTDECK_PORT so `agentdeck title` can reach the server
 
 	mu     sync.Mutex
 	meta   map[string]*sessionMeta
@@ -387,11 +410,11 @@ type Registry struct {
 	declared map[string]SessionState
 }
 
-func newRegistry(tmux *Tmux, profiles map[string]*AgentProfile, allowlist *Allowlist, secretKey string) (*Registry, error) {
+func newRegistry(tmux *Tmux, profiles map[string]*AgentProfile, allowlist *Allowlist, secretKey string, port int) (*Registry, error) {
 	if secretKey == "" {
 		return nil, errors.New("Registry needs a non-empty secret key; it derives every hook secret from it")
 	}
-	return &Registry{tmux: tmux, profiles: profiles, allowlist: allowlist, secretKey: secretKey,
+	return &Registry{tmux: tmux, profiles: profiles, allowlist: allowlist, secretKey: secretKey, port: port,
 		meta: map[string]*sessionMeta{}, states: map[string]SessionState{}, deaf: map[string]bool{}, declared: map[string]SessionState{}}, nil
 }
 
@@ -404,7 +427,7 @@ func (r *Registry) forget(id string) {
 	r.mu.Unlock()
 }
 
-func (r *Registry) Create(ctx context.Context, rawCwd, agentID string) (*CreateResult, error) {
+func (r *Registry) Create(ctx context.Context, rawCwd, agentID string, fresh bool) (*CreateResult, error) {
 	cwd := resolvePath(rawCwd)
 	if !r.allowlist.Allows(cwd) {
 		return nil, &CwdNotAllowedError{r.allowlist.Refusal(cwd)}
@@ -413,7 +436,12 @@ func (r *Registry) Create(ctx context.Context, rawCwd, agentID string) (*CreateR
 	if !ok {
 		return nil, &UnknownAgentError{"no agent profile named " + agentID}
 	}
+	// fresh mints a new id so a second session can start where one already runs; otherwise the
+	// canonical id is reused and CreateOrAttach attaches to the running one.
 	id := sessionID(cwd, agentID)
+	if fresh {
+		id = freshSessionID(cwd, agentID)
+	}
 
 	// A dead pane under our id at this cwd is cleared, or the 201 would claim a running agent.
 	existing, err := r.tmux.List(ctx)
@@ -432,7 +460,8 @@ func (r *Registry) Create(ctx context.Context, rawCwd, agentID string) (*CreateR
 	secret := secretFor(r.secretKey, id)
 	startedAfter := time.Now().Unix() * 1000
 	attached, err := r.tmux.CreateOrAttach(ctx, id, cwd, profile.Command, profile.Args,
-		spawnEnv(profile, map[string]string{"AGENTDECK_SESSION_ID": id, "AGENTDECK_SECRET": secret}, os.LookupEnv))
+		spawnEnv(profile, map[string]string{"AGENTDECK_SESSION_ID": id, "AGENTDECK_SECRET": secret,
+			"AGENTDECK_PORT": strconv.Itoa(r.port)}, os.LookupEnv))
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +531,7 @@ func (r *Registry) List(ctx context.Context) ([]Session, error) {
 		if e.Dead {
 			state = StateExited
 		}
-		out = append(out, Session{ID: e.ID, Name: sessionName(e.Path), Cwd: e.Path, Agent: meta.agent,
+		out = append(out, Session{ID: e.ID, Name: sessionName(e.Path), Title: e.Title, Cwd: e.Path, Agent: meta.agent,
 			State: state, StartedAt: e.StartedAt, ExitCode: e.ExitCode, WaitingDetectionLost: deaf})
 	}
 	return out, nil
@@ -519,7 +548,9 @@ func (r *Registry) adopt(id, path string) *sessionMeta {
 	}
 	sort.Strings(agents)
 	for _, agent := range agents {
-		if sessionID(path, agent) != id {
+		// A session's id is the canonical id, or the canonical id plus a "-<suffix>" for a sibling.
+		canonical := sessionID(path, agent)
+		if id != canonical && !strings.HasPrefix(id, canonical+"-") {
 			continue
 		}
 		meta := &sessionMeta{cwd: path, agent: agent, secret: secretFor(r.secretKey, id)}
@@ -552,6 +583,40 @@ func (r *Registry) Close(ctx context.Context, id string) error {
 	}
 	r.forget(id)
 	return nil
+}
+
+// SetTitle stores a display title for one of our sessions as a tmux user option, or clears it when
+// the title is empty. tmux is the store, so the title survives a server restart like the session.
+func (r *Registry) SetTitle(ctx context.Context, id, title string) error {
+	title = sanitiseTitle(title)
+	list, err := r.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range list {
+		if s.ID == id {
+			return r.tmux.SetTitle(ctx, id, title)
+		}
+	}
+	return &UnknownAgentError{"no session " + id}
+}
+
+// sanitiseTitle keeps the title to one printable line and a sane length: it is stored in tmux and
+// shown on a phone tab, and the field separator and newlines would break parsing or the strip.
+func sanitiseTitle(title string) string {
+	var b strings.Builder
+	for _, run := range title {
+		if run == '\n' || run == '\r' || run == '\t' {
+			b.WriteByte(' ')
+			continue
+		}
+		if run < 0x20 || run == 0x7f || run == '\x1f' {
+			continue
+		}
+		b.WriteRune(run)
+	}
+	out := strings.TrimSpace(b.String())
+	return truncateRunes(out, 80)
 }
 
 // Reap closes corpses this process started; adopted ones keep their `exited N`.

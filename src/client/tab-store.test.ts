@@ -33,6 +33,7 @@ const throwing: TokenStorage = {
 const tab = (id: string): Tab => ({
   id,
   name: id,
+  title: "",
   agent: "shell",
   state: "working",
   status: "working",

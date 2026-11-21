@@ -36,6 +36,8 @@ func main() {
 		case "hook":
 			runHook(os.Stdin)
 			return
+		case "title":
+			os.Exit(runTitle(os.Args[2:], os.Stdout, os.Stderr))
 		case "version", "--version":
 			fmt.Println(version)
 			return
@@ -278,7 +280,7 @@ func serve() error {
 	if err := tmux.EnsureServer(ctx); err != nil {
 		logf("agentdeck: could not start the tmux server: %v", err)
 	}
-	registry, err := newRegistry(tmux, profiles, allowlist, token)
+	registry, err := newRegistry(tmux, profiles, allowlist, token, port)
 	if err != nil {
 		return err
 	}

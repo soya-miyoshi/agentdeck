@@ -29,6 +29,7 @@ type regFakeSession struct {
 	status  string
 	created int64
 	path    string
+	title   string
 }
 
 type regFakeState struct {
@@ -115,7 +116,7 @@ func (f *regFake) exec(_ context.Context, args []string, _ map[string]string) (s
 			if x.dead {
 				dead = "1"
 			}
-			lines = append(lines, strings.Join([]string{id, dead, x.status, strconv.FormatInt(x.created, 10), x.path}, sep))
+			lines = append(lines, strings.Join([]string{id, x.title, dead, x.status, strconv.FormatInt(x.created, 10), x.path}, sep))
 		}
 		s.mu.Unlock()
 		return strings.Join(lines, "\n") + "\n", nil
@@ -182,7 +183,7 @@ func (f *regFake) ids() []string {
 func regRegistry(t *testing.T, f *regFake, profilesJSON string, mounts ...string) *Registry {
 	t.Helper()
 	profiles, _ := parseProfiles([]byte(profilesJSON))
-	r, err := newRegistry(f.tmux, profiles, newAllowlist(mounts, nil), "test-secret-key")
+	r, err := newRegistry(f.tmux, profiles, newAllowlist(mounts, nil), "test-secret-key", 7777)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ var regCtx = context.Background()
 
 func regCreate(t *testing.T, r *Registry, cwd, agent string) *CreateResult {
 	t.Helper()
-	res, err := r.Create(regCtx, cwd, agent)
+	res, err := r.Create(regCtx, cwd, agent, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +387,7 @@ func TestRegistry_Adoption(t *testing.T) {
 func TestRegistry_Creating(t *testing.T) {
 	t.Run("refuses a cwd off the mount list, with a sentence that says what to change", func(t *testing.T) {
 		r, _ := regBuild(t, nil)
-		_, err := r.Create(regCtx, "/workspace/not-mounted", "claude")
+		_, err := r.Create(regCtx, "/workspace/not-mounted", "claude", false)
 		var e *CwdNotAllowedError
 		if !errors.As(err, &e) || !strings.Contains(e.Error(), "AGENTDECK_MOUNTS") {
 			t.Fatalf("got %v", err)
@@ -395,7 +396,7 @@ func TestRegistry_Creating(t *testing.T) {
 
 	t.Run("refuses an unknown agent", func(t *testing.T) {
 		r, _ := regBuild(t, nil)
-		_, err := r.Create(regCtx, "/workspace/agentdeck", "nonexistent")
+		_, err := r.Create(regCtx, "/workspace/agentdeck", "nonexistent", false)
 		var e *UnknownAgentError
 		if !errors.As(err, &e) {
 			t.Fatalf("got %v", err)
@@ -616,7 +617,7 @@ func TestRegistry_FailedCreateLeavesNoOrphan(t *testing.T) {
 	t.Run("the session is killed when the list after the create throws", func(t *testing.T) {
 		r, f := regBuild(t, nil)
 		f.fail("list-throws", 2)
-		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude"); err == nil {
+		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude", false); err == nil {
 			t.Fatal("create succeeded")
 		}
 		if ids := f.ids(); len(ids) != 0 {
@@ -627,7 +628,7 @@ func TestRegistry_FailedCreateLeavesNoOrphan(t *testing.T) {
 	t.Run("the session is killed when the list comes back without it", func(t *testing.T) {
 		r, f := regBuild(t, nil)
 		f.fail("list-omits", 0)
-		_, err := r.Create(regCtx, "/workspace/agentdeck", "claude")
+		_, err := r.Create(regCtx, "/workspace/agentdeck", "claude", false)
 		if err == nil || !strings.Contains(err.Error(), "was created but tmux does not list it") {
 			t.Fatalf("got %v", err)
 		}
@@ -639,7 +640,7 @@ func TestRegistry_FailedCreateLeavesNoOrphan(t *testing.T) {
 	t.Run("a retry after a failed create succeeds rather than colliding with its own leftovers", func(t *testing.T) {
 		r, f := regBuild(t, nil)
 		f.fail("list-throws", 2)
-		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude"); err == nil {
+		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude", false); err == nil {
 			t.Fatal("create succeeded")
 		}
 		f.fail("ok", 0)
@@ -657,7 +658,7 @@ func TestRegistry_FailedCreateLeavesNoOrphan(t *testing.T) {
 		id := sessionID("/workspace/agentdeck", "claude")
 		f.plant(id, "/workspace/agentdeck")
 		f.fail("list-omits", 0)
-		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude"); err == nil {
+		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude", false); err == nil {
 			t.Fatal("create succeeded")
 		}
 		if !f.has(id) {
@@ -669,7 +670,7 @@ func TestRegistry_FailedCreateLeavesNoOrphan(t *testing.T) {
 		r, f := regBuild(t, nil)
 		first := regCreate(t, r, "/workspace/agentdeck", "claude")
 		f.fail("list-throws", 2)
-		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude"); err == nil {
+		if _, err := r.Create(regCtx, "/workspace/agentdeck", "claude", false); err == nil {
 			t.Fatal("create succeeded")
 		}
 		if ids := f.ids(); len(ids) != 1 || ids[0] != first.Session.ID {
@@ -1240,11 +1241,11 @@ func TestRegistry_Create500(t *testing.T) {
 		}
 		work, _ := filepath.EvalSymlinks(t.TempDir())
 		profiles, _ := parseProfiles([]byte(`{"sh":{"command":"/bin/sh","args":["-c","exec sleep 100000"]}}`))
-		r, _ := newRegistry(tm, profiles, newAllowlist([]string{work}, nil), "test-secret-key")
+		r, _ := newRegistry(tm, profiles, newAllowlist([]string{work}, nil), "test-secret-key", 7777)
 		if err := tm.EnsureServer(regCtx); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.Create(regCtx, work, "sh"); err == nil {
+		if _, err := r.Create(regCtx, work, "sh", false); err == nil {
 			t.Fatal("create succeeded")
 		}
 		if creates.Load() == 0 {
@@ -1792,4 +1793,69 @@ func TestRegistry_ProtocolPaneRows(t *testing.T) {
 			t.Fatal(s.MinRows())
 		}
 	})
+}
+
+func TestRegistry_MultipleSessionsPerRepo(t *testing.T) {
+	t.Run("fresh mints a second session beside the first rather than attaching", func(t *testing.T) {
+		r, _ := regBuild(t, nil)
+		first := regCreate(t, r, "/workspace/agentdeck", "claude")
+		second, err := r.Create(regCtx, "/workspace/agentdeck", "claude", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.Session.ID == second.Session.ID {
+			t.Fatalf("fresh reused the id %q", second.Session.ID)
+		}
+		if second.Warning != "" {
+			t.Fatalf("fresh attached instead of creating: %q", second.Warning)
+		}
+		if got := len(regList(t, r)); got != 2 {
+			t.Fatalf("want 2 sessions in one repo, got %d", got)
+		}
+	})
+
+	t.Run("a suffixed id is adopted by a server that never created it", func(t *testing.T) {
+		f := regNewFake(t, nil)
+		r := regRegistry(t, f, regProfiles, "/workspace/agentdeck", "/workspace/web")
+		created, err := r.Create(regCtx, "/workspace/agentdeck", "claude", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := created.Session.ID
+		// A second registry over the same tmux has no memory of the create; adopt must recover it.
+		fresh := regRegistry(t, f, regProfiles, "/workspace/agentdeck", "/workspace/web")
+		list, err := fresh.List(regCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found *Session
+		for i := range list {
+			if list[i].ID == id {
+				found = &list[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("the suffixed session %q was not adopted; got %+v", id, list)
+		}
+		if found.Agent != "claude" {
+			t.Fatalf("adopt recovered the wrong agent: %q", found.Agent)
+		}
+	})
+}
+
+func TestSanitiseTitle(t *testing.T) {
+	cases := map[string]string{
+		"plain":                  "plain",
+		"  trims  ":              "trims",
+		"two\nlines":             "two lines",
+		"tab\there":              "tab here",
+		"nul\x00byte":            "nulbyte",
+		"sep\x1fbyte":            "sepbyte",
+		strings.Repeat("x", 200): strings.Repeat("x", 80),
+	}
+	for in, want := range cases {
+		if got := sanitiseTitle(in); got != want {
+			t.Fatalf("sanitiseTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

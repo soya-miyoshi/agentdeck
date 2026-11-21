@@ -3151,3 +3151,39 @@ Verified on the harness (emulated iPhone 15, Playwright file chooser): three PNG
 in the composer and three files on disk; with an undecodable file in the middle, the other two
 landed and the note read `broken.png: The source image could not be decoded.` No console errors.
 Not demonstrated: the iOS photo library sheet's multi-select on a real iPhone.
+
+## Multiple sessions per repo, and editable tab names
+
+Two changes that go together. A session id was `<repo>-<agent>-<pathhash>`, one per repo+agent; it
+now takes an optional `-<suffix>` so a repo can hold several. `POST /api/sessions` gained `fresh`:
+without it, Start attaches to the canonical session as before; with it, a new suffixed id is minted.
+`adopt` recovers either form (exact canonical, or `canonical-<suffix>`), so a restarted server picks
+up the siblings it never created.
+
+Tab titles live as the tmux user option `@agentdeck_title` (no database; tmux is the authority). It
+is read in `list-sessions` and set through `POST /api/sessions/<id>/title`, authenticated by EITHER
+the bearer token (the browser) OR the session's own secret (the agent, via `agentdeck title "..."`,
+which reads `AGENTDECK_SESSION_ID/SECRET/PORT` from its environment). The session env now carries
+`AGENTDECK_PORT` so the CLI can reach the server. Titles are sanitised to one printable line, 80
+chars.
+
+- **Accepted/notable:** `set-option` on this tmux rejects the bare `=id` exact target but takes the
+  window form `=id:` (the same target `remain-on-exit` already uses). This matters because the
+  canonical id is a PREFIX of its siblings, so an unprefixed target would be ambiguous; the exact
+  window target is what keeps a rename off the sibling. Verified directly.
+- **Accepted:** a wrong session secret on the title endpoint marks the session waiting-detection
+  deaf, the same side effect the hook endpoint has. A browser call with no secret header is unaffected
+  (it never calls SecretMatches).
+- **Accepted:** two un-renamed siblings show the same repo name in the strip until one is renamed.
+  The title is how they are told apart; the client `.name` already wraps for this.
+
+Verified against real tmux on a throwaway server (own socket, port 7799): two distinct sessions in
+one repo; canonical re-create attaches with the warning; bearer rename with sanitisation; the
+`agentdeck title` CLI run from INSIDE a sibling session renamed only that sibling (secret auth, env,
+real set-option/list round-trip); and after a server restart both ids and both titles were adopted
+back. `make check`'s TS half is green (451 tests) and the Go half is green WITHOUT `-race` - this Mac
+has no C toolchain, so the race detector did not run.
+
+**Not demonstrated:** the Vue UI itself on a phone. The rename field in `TabStrip.vue` and the
+"Another" button in `NewSession.vue` are covered by the component tests but were not rendered on an
+emulated or real iPhone this round.
