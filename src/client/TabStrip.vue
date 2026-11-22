@@ -144,7 +144,9 @@ onBeforeUnmount(() => {
         <span class="name">{{ tab.name }}</span>
         <!-- The repo folder, shown only when the name is a custom title and so no longer says it. -->
         <span v-if="tab.dir !== tab.name" class="dir" :title="tab.cwd">{{ tab.dir }}</span>
-        <span class="status" :class="tab.state">{{ tab.status }}</span>
+        <!-- Status is shown only when it is not the resting state: `idle` on every row was noise that
+             pushed the name narrower for nothing. working, waiting and an exit code still show. -->
+        <span v-if="tab.state !== 'idle'" class="status" :class="tab.state">{{ tab.status }}</span>
         <!-- The session outlived the server, so its hook secret is gone and it can never report
            waiting again until its agent is restarted (plan 002). It stays a WORD rather than
            becoming a colour or an icon: this is a tab that will look healthy and quietly never ask
@@ -284,16 +286,18 @@ onBeforeUnmount(() => {
   font: inherit;
 }
 .pick {
-  flex: 1 1 auto;
+  /* flex-basis 0, not auto: a long title's own width must not decide the wrap, or the End button is
+     pushed to a second line and the row doubles in height. The name ellipsis takes up the slack. */
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
+  gap: 0.45rem;
+  padding: 0.3rem 0.65rem;
   text-align: left;
 }
 .close {
-  padding: 0 0.9rem;
+  padding: 0 0.7rem;
   border-left: 1px solid #2a2e35;
   color: #8b9099;
   font-size: 0.85rem;
@@ -304,7 +308,7 @@ onBeforeUnmount(() => {
   color: #ff9d9d;
 }
 .rename {
-  padding: 0 0.9rem;
+  padding: 0 0.7rem;
   border-left: 1px solid #2a2e35;
   color: #8b9099;
   font-size: 0.85rem;
@@ -371,9 +375,13 @@ onBeforeUnmount(() => {
   border-style: dashed;
 }
 .name {
-  /* The full name, wrapped: in a list there is room, and two sessions differing only in a suffix
-     must be told apart. */
-  overflow-wrap: anywhere;
+  /* One line, truncated: a long custom title used to wrap and double a row's height. The repo chip
+     beside it and the full title in the rename field are where the rest is read. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
 }
 .dir {

@@ -28,7 +28,9 @@ const waiting = computed(
     >
       <span v-if="current?.needsYou" class="dot" aria-label="needs you"></span>
       <span class="name">{{ current?.name ?? "No session" }}</span>
-      <span v-if="current" class="status" :class="current.state">{{ current.status }}</span>
+      <span v-if="current && current.state !== 'idle'" class="status" :class="current.state">{{
+        current.status
+      }}</span>
       <span v-if="waiting > 0" class="waiting">+{{ waiting }} waiting</span>
       <span class="count">{{ tabs.length }}</span>
     </button>
