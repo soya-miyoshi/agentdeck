@@ -38,6 +38,51 @@ const cancelRename = (): void => {
 const armed = ref<string>();
 const strip = ref<HTMLElement>();
 
+// Swipe-to-end: a left swipe on a row uncovers a red End cap; a tap on that cap ends the session.
+// The swipe is the first deliberate act, the tap the second, so it is as hard to trigger by accident
+// as the two-tap cap. Only one row is uncovered at a time.
+const revealed = ref<string>();
+
+/** How far a horizontal drag must travel to count as a swipe rather than a tap or a vertical scroll. */
+const SWIPE_PX = 45;
+let gesture: { x: number; y: number; id: string } | undefined;
+
+const onTouchStart = (id: string, event: TouchEvent): void => {
+  const touch = event.changedTouches[0];
+  gesture = touch === undefined ? undefined : { x: touch.clientX, y: touch.clientY, id };
+};
+
+/** A mostly-horizontal drag past the threshold reveals (leftward) or hides (rightward) the End cap;
+ *  anything shorter or more vertical is left alone, so a tap and a vertical scroll both still work.
+ *  On a swipe it cancels the click the browser would synthesise, so the gesture does not also fire
+ *  the row's tap handler - more reliable than a flag, since a swipe may emit no click at all. */
+const onTouchEnd = (id: string, event: TouchEvent): void => {
+  const start = gesture;
+  gesture = undefined;
+  const touch = event.changedTouches[0];
+  if (start === undefined || touch === undefined || start.id !== id) return;
+  const dx = touch.clientX - start.x;
+  const dy = touch.clientY - start.y;
+  if (Math.abs(dx) < SWIPE_PX || Math.abs(dx) <= Math.abs(dy)) return;
+  event.preventDefault();
+  revealed.value = dx < 0 ? id : undefined;
+};
+
+/** A tap on a row: dismiss this row's uncovered cap, else select the tab and clear any other cap. */
+const pickTab = (id: string): void => {
+  if (revealed.value === id) {
+    revealed.value = undefined;
+    return;
+  }
+  revealed.value = undefined;
+  emit("select", id);
+};
+
+const confirmSwipeEnd = (id: string): void => {
+  revealed.value = undefined;
+  emit("close", id);
+};
+
 /** How long an armed cap stays armed. A live kill switch that outlasts the thought is a trap. */
 const ARM_MS = 3000;
 let disarm: ReturnType<typeof setTimeout> | undefined;
@@ -60,6 +105,7 @@ watch(
   () => {
     armed.value = undefined;
     renaming.value = undefined;
+    revealed.value = undefined;
     void nextTick(() => {
       strip.value?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest" });
     });
@@ -83,7 +129,14 @@ onBeforeUnmount(() => {
         deaf: tab.waitingDetectionLost,
       }"
     >
-      <button class="pick" type="button" @click="$emit('select', tab.id)">
+      <!-- The row content. It stays put on a swipe so the name is still readable while deciding to
+           end it; the End cap slides in over the status pill at the right instead. -->
+      <div
+        class="swipebody"
+        @touchstart.passive="onTouchStart(tab.id, $event)"
+        @touchend="onTouchEnd(tab.id, $event)"
+      >
+      <button class="pick" type="button" @click="pickTab(tab.id)">
         <!-- The dot is drawn only for an agent that can actually detect waiting. An agent with
            detectsWaiting false reports working/idle/exited and never claims waiting, and the
            client shows its tab without a needs-you indicator rather than inventing one. -->
@@ -146,6 +199,21 @@ onBeforeUnmount(() => {
         <button class="save" type="submit">Save</button>
         <button class="cancelrename" type="button" @click="cancelRename">Cancel</button>
       </form>
+      </div>
+      <!-- Slid in by a left swipe: one tap here ends the session. The swipe to show it is the first
+           deliberate act and the tap is the second, so this one-tap cap is still two acts to a kill.
+           Kept in the DOM but inert while hidden, so it can slide rather than appear. -->
+      <button
+        class="swipeend"
+        :class="{ shown: revealed === tab.id }"
+        type="button"
+        :aria-hidden="revealed === tab.id ? 'false' : 'true'"
+        :tabindex="revealed === tab.id ? 0 : -1"
+        :aria-label="`end ${tab.name}`"
+        @click="confirmSwipeEnd(tab.id)"
+      >
+        End
+      </button>
     </div>
     <p v-if="tabs.length === 0" class="empty">No sessions.</p>
     <button class="new" type="button" @click="$emit('new')">New session</button>
@@ -168,13 +236,39 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid #2a2e35;
 }
 .tab {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
+  /* The swipe body slides within this; the uncovered End cap sits in the space it leaves, clipped to
+     the rounded rect so nothing shows until a swipe. */
+  position: relative;
+  overflow: hidden;
   flex: 0 0 auto;
   border: 1px solid #2a2e35;
   border-radius: 6px;
   background: #1b1e24;
+}
+.swipebody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  background: #1b1e24;
+}
+.swipeend {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5.5rem;
+  height: 100%;
+  border: 0;
+  /* The same red as the two-tap cap: the one colour in the app, on the controls that destroy. */
+  background: #3a2226;
+  color: #ff9d9d;
+  font: inherit;
+  /* Parked off the right edge (clipped by the tab's overflow) and slid in when shown, so the reveal
+     reads as one motion and the name under it never moves. */
+  transform: translateX(100%);
+  transition: transform 0.18s ease;
+}
+.swipeend.shown {
+  transform: translateX(0);
 }
 .pick,
 .close,
@@ -257,6 +351,9 @@ onBeforeUnmount(() => {
 }
 .tab.active {
   border-color: #6aa2ff;
+  background: #232833;
+}
+.tab.active .swipebody {
   background: #232833;
 }
 .tab.exited {
