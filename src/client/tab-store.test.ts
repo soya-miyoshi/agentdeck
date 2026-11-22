@@ -34,6 +34,8 @@ const tab = (id: string): Tab => ({
   id,
   name: id,
   title: "",
+  cwd: `/repos/${id}`,
+  dir: id,
   agent: "shell",
   state: "working",
   status: "working",

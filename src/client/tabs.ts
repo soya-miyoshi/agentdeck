@@ -10,6 +10,11 @@ export interface Tab {
   name: string;
   /** The custom title alone, so the rename field can show it is empty rather than the repo name. */
   title: string;
+  /** The session's working directory, so the tab and the top bar can say which repo this is. */
+  cwd: string;
+  /** The last path segment of cwd: the repo folder, shown alongside a custom title so a renamed tab
+   * still says where it is. */
+  dir: string;
   agent: string;
   state: SessionState;
   /** What the status pill says. An exited tab shows its code, because that is the answer to
@@ -29,6 +34,13 @@ export interface Tab {
  * Whether this session's agent has a working waiting mechanism. An unknown agent counts as not
  * detecting: a session can outlive its profile, and a missing indicator beats a wrong one.
  */
+/** The last path segment of an absolute cwd, trailing slashes ignored. "" for "/" or empty. */
+const basename = (cwd: string): string =>
+  cwd
+    .split("/")
+    .filter((part) => part.length > 0)
+    .pop() ?? "";
+
 const detectsWaiting = (agents: ReadonlyMap<string, AgentSummary>, agentId: string): boolean =>
   agents.get(agentId)?.detectsWaiting ?? false;
 
@@ -53,6 +65,8 @@ export const toTabs = (sessions: readonly Session[], agents: readonly AgentSumma
       id: session.id,
       name: title.length > 0 ? title : session.name,
       title,
+      cwd: session.cwd,
+      dir: basename(session.cwd) || session.name,
       agent: session.agent,
       state,
       status: statusOf(state, session.exitCode),

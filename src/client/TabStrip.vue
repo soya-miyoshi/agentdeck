@@ -89,6 +89,8 @@ onBeforeUnmount(() => {
            client shows its tab without a needs-you indicator rather than inventing one. -->
         <span v-if="tab.needsYou" class="dot" aria-label="needs you"></span>
         <span class="name">{{ tab.name }}</span>
+        <!-- The repo folder, shown only when the name is a custom title and so no longer says it. -->
+        <span v-if="tab.dir !== tab.name" class="dir" :title="tab.cwd">{{ tab.dir }}</span>
         <span class="status" :class="tab.state">{{ tab.status }}</span>
         <!-- The session outlived the server, so its hook secret is gone and it can never report
            waiting again until its agent is restarted (plan 002). It stays a WORD rather than
@@ -276,6 +278,15 @@ onBeforeUnmount(() => {
      must be told apart. */
   overflow-wrap: anywhere;
   font-weight: 600;
+}
+.dir {
+  /* The repo folder beside a custom title: small and muted, a label not a heading. */
+  flex: 0 0 auto;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  background: #22262e;
+  color: #8b9099;
+  font-size: 0.75rem;
 }
 .lost {
   font-size: 0.8rem;

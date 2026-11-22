@@ -51,8 +51,8 @@ const waiting = computed(
 .bar {
   display: flex;
   align-items: stretch;
-  /* Top edge of the app: clear of the notch and status bar, with the background running under. */
-  padding: var(--safe-top) var(--safe-right) 0 var(--safe-left);
+  /* The dir bar above carries the notch inset now, so this row starts flush under it. */
+  padding: 0 var(--safe-right) 0 var(--safe-left);
   background: #14161a;
   border-bottom: 1px solid #2a2e35;
 }

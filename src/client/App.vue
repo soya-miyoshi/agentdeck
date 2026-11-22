@@ -60,6 +60,10 @@ const handles = new Map<string, TerminalHandle>();
 const tabs = computed(() => toTabs(sessions.value, agents.value));
 const reconnecting = computed(() => status.value === "reconnecting");
 
+// The active session's repo folder, for the always-on top bar: while typing the SessionBar hides, so
+// this is the only thing left saying which repo the keystrokes are going to.
+const activeTab = computed(() => tabs.value.find((tab) => tab.id === active.value));
+
 const note = (message: string, sessionId?: string): void => {
   // Newest first, and bounded: an error surface that grows without limit becomes the page.
   const entry = sessionId === undefined ? { message } : { sessionId, message };
@@ -470,6 +474,11 @@ if (token.value !== undefined) start(token.value);
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
+    <!-- A thin always-on bar naming the active session's repo folder. It stays up while typing, when
+         the SessionBar below is hidden, so it is always clear which repo a keystroke reaches. -->
+    <div class="dirbar" :title="activeTab?.cwd">
+      <span class="dirbarlabel">{{ activeTab?.dir ?? "No session" }}</span>
+    </div>
     <!-- One row: which session this is, Select, and More. A strip of tabs ran off the side of a
          phone at three sessions, and the action bar beside it scrolled sideways on a small one. -->
     <SessionBar
@@ -603,6 +612,24 @@ if (token.value !== undefined) start(token.value);
      background between the two. */
   padding: 0 var(--safe-right) 0 var(--safe-left);
   box-sizing: border-box;
+}
+.dirbar {
+  /* The topmost edge of the app now, so it carries the notch inset. Thin and quiet: one line naming
+     the repo the active session is in, legible but not competing with the SessionBar below it. */
+  flex: 0 0 auto;
+  padding: var(--safe-top) calc(0.75rem + var(--safe-right)) 0.15rem calc(0.75rem + var(--safe-left));
+  background: #0f1115;
+  border-bottom: 1px solid #2a2e35;
+  overflow: hidden;
+}
+.dirbarlabel {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8b9099;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
 }
 .more {
   display: flex;
