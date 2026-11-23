@@ -251,6 +251,9 @@ func (c reapConfig) orphans(rows []reapRow, spared map[int]bool, serving map[int
 		if r.pid <= 1 || r.pid == os.Getpid() || r.ppid != 1 || r.tty != "??" || r.age < c.minAge || spared[r.pid] || tmuxCommand.MatchString(r.command) {
 			continue
 		}
+		if c.keep.MatchString(r.command) {
+			continue // AGENTDECK_REAP_KEEP spares deliberate detached jobs too, not only MCP servers in panes
+		}
 		self := false
 		for _, s := range c.selfCommands {
 			self = self || strings.Contains(r.command, s)
