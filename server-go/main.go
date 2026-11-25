@@ -122,6 +122,17 @@ func tokenWriteError(path string, err error) error {
 }
 
 // probeTmux is liveness: a hard-timed round trip, where an empty server is healthy.
+// sessionsChanged runs after a start, close or rename: attach new panes, then push the list to every
+// socket so open phones see it without reloading.
+func sessionsChanged(ctx context.Context, hub *Hub, ws *WSServer) {
+	if err := hub.Sync(ctx); err != nil {
+		logf("agentdeck: sync failed: %v", err)
+	}
+	if err := ws.PushSessions(ctx); err != nil {
+		logf("agentdeck: could not push the session list: %v", err)
+	}
+}
+
 func probeTmux(ctx context.Context, socket string) bool {
 	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
 	defer cancel()
@@ -297,11 +308,7 @@ func serve() error {
 	}
 
 	syncNow := func() {
-		go func() {
-			if err := hub.Sync(context.Background()); err != nil {
-				logf("agentdeck: sync failed: %v", err)
-			}
-		}()
+		go sessionsChanged(context.Background(), hub, ws)
 	}
 	api := newAPIHandler(HTTPDeps{
 		Registry: registry, Profiles: profiles, Allowlist: allowlist, Token: token, Version: version, Origin: origin,

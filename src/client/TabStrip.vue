@@ -375,13 +375,18 @@ onBeforeUnmount(() => {
   border-style: dashed;
 }
 .name {
-  /* One line, truncated: a long custom title used to wrap and double a row's height. The repo chip
-     beside it and the full title in the rename field are where the rest is read. */
+  /* Wraps to at most two lines, then truncates: one line cut most titles to a word, more than two
+     lets one long title take over the list. `anywhere` breaks Japanese titles, which have no spaces. */
   flex: 0 1 auto;
   min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  line-height: 1.25;
   font-weight: 600;
 }
 .dir {

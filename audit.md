@@ -3187,3 +3187,23 @@ has no C toolchain, so the race detector did not run.
 **Not demonstrated:** the Vue UI itself on a phone. The rename field in `TabStrip.vue` and the
 "Another" button in `NewSession.vue` are covered by the component tests but were not rendered on an
 emulated or real iPhone this round.
+
+## Live tab titles and two-line tab names
+
+A start, close or rename now pushes the full session list to every open socket
+(`WSServer.PushSessions`, called from `sessionsChanged` after `hub.Sync`), so a title set by an agent
+with `agentdeck title` shows on an open phone without pressing reload. In the tab list, `.name` now wraps
+to at most two lines (`line-clamp: 2`, `overflow-wrap: anywhere` for Japanese) at 0.9rem instead of
+truncating to one line.
+
+- **Accepted:** the push is the whole list, not a diff. It is a few hundred bytes and only goes out on a
+  start, close or rename, and the client already treats a `sessions` frame as authoritative.
+- **Accepted:** the SessionBar at the top still truncates to one line. It is a one-row bar, and the open
+  list is where the full name is read.
+
+Verified: `TestAgentRenameReachesAnOpenSocket` fails with the push disabled and passes with it. Against
+the REAL deck, after rebuild and a watchdog restart, a socket opened as the phone does got a second
+`sessions` frame carrying the new title when this session renamed itself by its secret. The wrapped
+list was rendered on an emulated iPhone 13 against the live deck.
+
+**Not demonstrated:** the real phone. The PWA on the iPhone was not watched receiving the rename.

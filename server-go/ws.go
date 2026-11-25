@@ -682,9 +682,23 @@ func (s *WSServer) heartbeat() {
 	}
 }
 
+// PushSessions sends the current session list to every open socket, so a rename, start or close made
+// elsewhere (an agent's `agentdeck title`, another phone) shows without a reload.
+func (s *WSServer) PushSessions(ctx context.Context) error {
+	list, err := s.d.ListSessions(ctx)
+	if err != nil {
+		return err
+	}
+	s.broadcast(SessionsFrame{T: frameSessions, Sessions: list})
+	return nil
+}
+
 // PushState tells every open socket a session's state, attached to it or not.
 func (s *WSServer) PushState(id string, state SessionState, exitCode *int) {
-	frame := StateFrame{T: frameState, SessionID: id, State: state, ExitCode: exitCode}
+	s.broadcast(StateFrame{T: frameState, SessionID: id, State: state, ExitCode: exitCode})
+}
+
+func (s *WSServer) broadcast(frame any) {
 	s.mu.Lock()
 	clients := make([]*wsClient, 0, len(s.clients))
 	for c := range s.clients {

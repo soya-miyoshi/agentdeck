@@ -75,7 +75,7 @@ func newDeck(t *testing.T) *deck {
 	api := newAPIHandler(HTTPDeps{
 		Registry: reg, Profiles: profiles, Allowlist: allow, Token: token, Version: version,
 		Probe:            func(ctx context.Context) bool { return probeTmux(ctx, socket) },
-		OnSessionsChange: func() { _ = d.hub.Sync(context.Background()) },
+		OnSessionsChange: func() { sessionsChanged(context.Background(), d.hub, ws) },
 		StreamFor:        d.hub.StreamFor, Uploads: newUploadStore(filepath.Join(tmp, "uploads")), PanePids: tmux.PanePids,
 		OnStateDeclared: func(id string, st SessionState) { d.hub.Announce(id, st, nil) },
 	})
@@ -311,6 +311,32 @@ func TestPhoneFlowAgainstRealTmux(t *testing.T) {
 		_ = exec.Command("kill", "-9", strconv.Itoa(sleepPid)).Run()
 		t.Fatal("closing a session must end what it started")
 	}
+}
+
+// An agent renaming its own tab reaches a phone that is already connected, with no reload.
+func TestAgentRenameReachesAnOpenSocket(t *testing.T) {
+	d := newDeck(t)
+	id := d.create()
+	w, _, err := d.dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.until(5*time.Second, "the list on connect", isT("sessions"))
+	if status, body := d.do("POST", "/api/sessions/"+id+"/title", "", map[string]string{"title": "fixing the build"},
+		"x-agentdeck-secret", secretFor(d.token, id)); status != 200 {
+		t.Fatalf("rename: %d %v", status, body)
+	}
+	w.until(5*time.Second, "a pushed list carrying the new title", func(m map[string]any) bool {
+		if m["t"] != "sessions" {
+			return false
+		}
+		for _, s := range m["sessions"].([]any) {
+			if s := s.(map[string]any); s["id"] == id && s["title"] == "fixing the build" {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestReattachingLeaksNoPTYs(t *testing.T) {
