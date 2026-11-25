@@ -3207,3 +3207,14 @@ the REAL deck, after rebuild and a watchdog restart, a socket opened as the phon
 list was rendered on an emulated iPhone 13 against the live deck.
 
 **Not demonstrated:** the real phone. The PWA on the iPhone was not watched receiving the rename.
+
+## Repo name moves into the SessionBar
+
+The always-on dir bar above the SessionBar cost a full line at rest. Now, at rest, the dir bar is only the
+notch inset and the SessionBar shows the title with the repo folder stacked under it in small muted text
+(height, not width). While typing, when the SessionBar hides, the dir bar shows `repo · title`.
+
+Verified on an emulated iPhone 13 against the live deck: resting shows title over `agentdeck` in the bar;
+focusing the composer with a short viewport shows `agentdeck · dir bar layout` in the thin bar.
+
+**Not demonstrated:** the real phone, including how the notch inset looks with the label gone.

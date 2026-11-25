@@ -27,7 +27,11 @@ const waiting = computed(
       @click="$emit('sessions')"
     >
       <span v-if="current?.needsYou" class="dot" aria-label="needs you"></span>
-      <span class="name">{{ current?.name ?? "No session" }}</span>
+      <!-- Title over the repo folder, stacked, so naming the repo costs height not width. -->
+      <span class="ident">
+        <span class="name">{{ current?.name ?? "No session" }}</span>
+        <span v-if="current && current.dir !== current.name" class="dir">{{ current.dir }}</span>
+      </span>
       <span v-if="current && current.state !== 'idle'" class="status" :class="current.state">{{
         current.status
       }}</span>
@@ -86,11 +90,24 @@ const waiting = computed(
   border-left: 1px solid #2a2e35;
   font-size: 0.9rem;
 }
-.name {
+.ident {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.name,
+.dir {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.name {
   font-weight: 600;
+}
+.dir {
+  color: #8b9099;
+  font-size: 0.72rem;
 }
 .status {
   flex: 0 0 auto;

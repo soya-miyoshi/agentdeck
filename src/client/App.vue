@@ -474,10 +474,13 @@ if (token.value !== undefined) start(token.value);
 <template>
   <TokenGate v-if="token === undefined" :message="gateMessage" @token="accept" />
   <div v-else ref="shell" class="app">
-    <!-- A thin always-on bar naming the active session's repo folder. It stays up while typing, when
-         the SessionBar below is hidden, so it is always clear which repo a keystroke reaches. -->
-    <div class="dirbar" :title="activeTab?.cwd">
-      <span class="dirbarlabel">{{ activeTab?.dir ?? "No session" }}</span>
+    <!-- Carries the notch inset always; while typing, when the SessionBar is hidden, it also names the
+         repo and title so it stays clear where keystrokes go. Otherwise the SessionBar shows both. -->
+    <div class="dirbar" :class="{ labelled: typing }" :title="activeTab?.cwd">
+      <span v-if="typing" class="dirbarlabel">
+        {{ activeTab?.dir ?? "No session"
+        }}<span v-if="activeTab?.title" class="dirbartitle"> · {{ activeTab.title }}</span>
+      </span>
     </div>
     <!-- One row: which session this is, Select, and More. A strip of tabs ran off the side of a
          phone at three sessions, and the action bar beside it scrolled sideways on a small one. -->
@@ -617,10 +620,16 @@ if (token.value !== undefined) start(token.value);
   /* The topmost edge of the app now, so it carries the notch inset. Thin and quiet: one line naming
      the repo the active session is in, legible but not competing with the SessionBar below it. */
   flex: 0 0 auto;
-  padding: var(--safe-top) calc(0.75rem + var(--safe-right)) 0.15rem calc(0.75rem + var(--safe-left));
+  padding: var(--safe-top) calc(0.75rem + var(--safe-right)) 0 calc(0.75rem + var(--safe-left));
   background: #0f1115;
-  border-bottom: 1px solid #2a2e35;
   overflow: hidden;
+}
+.dirbar.labelled {
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid #2a2e35;
+}
+.dirbartitle {
+  color: #c3c7cf;
 }
 .dirbarlabel {
   display: block;
